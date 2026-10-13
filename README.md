@@ -17,15 +17,15 @@ Generalist LLMs waste 95% of their parameters memorizing static world trivia and
 
 ```mermaid
 flowchart TD
-    subgraph Input["1. Typed Input & Compact Protocol"]
-        U["Typed Items & Prompt (U$)<br/>Roles: Observation | Premise | Candidate | Hypothesis | Criterion"]
+    subgraph Input["1. Typed Input & Self-Scaffolding Protocol"]
+        U["Typed Items & Task (U$) + Cached Best Scaffold (S_prev)<br/>Stage 1 Evolves Refined Scaffold & Operator Schedule (S$)"]
     end
 
     subgraph Backbone["2. Shared MCL4-CED MoE Backbone"]
         PLE["Per-Layer Token Embeddings (PLE)<br/>High-rank lexical capacity at zero expert FLOP cost"]
-        ENC["Lower Causal Encoder Layers (CED)<br/>Encodes shared context & premises once into global K/V"]
+        ENC["Lower Causal Encoder Layers (CED)<br/>Encodes shared (U$, S$) & premises once into global K/V"]
         MCL4["MCL4 Attention (4 Local Anchors + 12 Markov Walkers)<br/>Multi-hop semantic graph traversal without softmax dilution"]
-        MOE["Fine-Grained SwiGLU MoE + CPUOffloadAdamW + NVFP4<br/>Small active FLOPs in VRAM; master weights & Adam in 32GB DDR5"]
+        MOE["Fine-Grained SwiGLU MoE + ExpertLifecycle + CPUOffloadAdamW + NVFP4<br/>Dynamic expert growth/pruning; master weights & Adam in 32GB DDR5"]
         REC["Recurrent Latent Feedback (anchor + gate * LayerNorm(state))<br/>Multi-pass latent refinement across operators"]
         PLE --> ENC --> MCL4 --> MOE --> REC
     end
@@ -44,7 +44,7 @@ flowchart TD
 
     U --> PLE
     REC --> ASSOC & ABD & IND & DED & ABS & EVAL & META & DEC & INF
-    ASSOC & ABD & IND & DED & ABS & EVAL & META -. "Composable multi-pass ensemble (any order per prompt)" .-> ENC
+    ASSOC & ABD & IND & DED & ABS & EVAL & META -. "Joint Two-Stage Staleness-Weighted GRPO updates S$ + COE + T$/A$" .-> U
 ```
 
 ---
@@ -57,6 +57,7 @@ flowchart TD
 | **[`docs/02_WHY_COE_BEATS_GENERALIST_LLMS.md`](docs/02_WHY_COE_BEATS_GENERALIST_LLMS.md)** | Why decomposing thinking into composable single-softmax operators (`Decision`, `Association`, `Deduction`, `Abduction`, `Metacognition`) demonstrates frontier capabilities that 70B generalist LLMs cannot match. |
 | **[`docs/03_HARDWARE_AND_TRAINING_ROADMAP.md`](docs/03_HARDWARE_AND_TRAINING_ROADMAP.md)** | Hardware physics for the **RTX 2050 (4GB)** and **RTX 5070 (12GB GDDR7 + 32GB DDR5 + 10TB NVMe)**, unlocking ~1 PFLOP Sparse NVFP4 during RL rollouts, and the 4-milestone implementation plan. |
 | **[`docs/04_YYCORE_LAUNCH_BLUEPRINT.md`](docs/04_YYCORE_LAUNCH_BLUEPRINT.md)** | Proof-led research and self-serve commercialization roadmap for `yycore.ai`. |
+| **[`docs/05_ORNITH_SELF_SCAFFOLDING_SPEC.md`](docs/05_ORNITH_SELF_SCAFFOLDING_SPEC.md)** | Ornith-1.0 style two-stage self-scaffolding (`U$ -> S$ -> COE -> T$ -> A$`), staleness-weighted pipeline GRPO ($w(d_t)$), 3-layer anti-reward-hacking guard (using in-network `Deduction`/`Evaluation` vetoes), and bounded MoE `ExpertLifecycle` growth/pruning. |
 
 ---
 

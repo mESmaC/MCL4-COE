@@ -53,6 +53,7 @@ flowchart TD
 
 | Document | Summary |
 | :--- | :--- |
+| **[`docs/00_AGENT_HANDOFF_AND_CONTEXT.md`](docs/00_AGENT_HANDOFF_AND_CONTEXT.md)** | **START HERE ON DESKTOP:** Complete session handoff, empirical findings from `mini`/`mcattn`/`oracle`, source module map, and immediate Milestone 1 & 2 action plan. |
 | **[`docs/01_UNIFIED_ARCHITECTURE_SPEC.md`](docs/01_UNIFIED_ARCHITECTURE_SPEC.md)** | Full technical specification of the `MCL4` router, `CED` cross-attending encoder-decoder fix, `PLE`, `CPUOffloadAdamW` + `NVFP4`, and the mathematical definitions of all 9 `COE` cognitive operators. |
 | **[`docs/02_WHY_COE_BEATS_GENERALIST_LLMS.md`](docs/02_WHY_COE_BEATS_GENERALIST_LLMS.md)** | Why decomposing thinking into composable single-softmax operators (`Decision`, `Association`, `Deduction`, `Abduction`, `Metacognition`) demonstrates frontier capabilities that 70B generalist LLMs cannot match. |
 | **[`docs/03_HARDWARE_AND_TRAINING_ROADMAP.md`](docs/03_HARDWARE_AND_TRAINING_ROADMAP.md)** | Hardware physics for the **RTX 2050 (4GB)** and **RTX 5070 (12GB GDDR7 + 32GB DDR5 + 10TB NVMe)**, unlocking ~1 PFLOP Sparse NVFP4 during RL rollouts, and the 4-milestone implementation plan. |

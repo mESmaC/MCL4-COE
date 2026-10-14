@@ -109,23 +109,28 @@ DEFAULT_HF_TRACK_SOURCES: dict[str, list[dict[str, Any]]] = {
 }
 
 
-def resolve_hf_token(explicit_token: str | None = None) -> str | None:
-    """Resolve `HF_TOKEN` from argument, environment, or Google Colab Secrets (`userdata`)."""
+def resolve_hf_token(
+    explicit_token: str | None = None,
+    *,
+    require_userdata: bool = False,
+) -> str | None:
+    """Resolve `HF_TOKEN` from argument or environment (and optionally Colab `userdata` when pushing)."""
     if explicit_token:
         return explicit_token.strip()
     for env_key in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
         val = os.environ.get(env_key)
         if val and val.strip():
             return val.strip()
-    try:
-        from google.colab import userdata  # type: ignore[import-not-found]
+    if require_userdata:
+        try:
+            from google.colab import userdata  # type: ignore[import-not-found]
 
-        secret = userdata.get("HF_TOKEN")
-        if secret and str(secret).strip():
-            os.environ["HF_TOKEN"] = str(secret).strip()
-            return str(secret).strip()
-    except Exception:
-        pass
+            secret = userdata.get("HF_TOKEN")
+            if secret and str(secret).strip():
+                os.environ["HF_TOKEN"] = str(secret).strip()
+                return str(secret).strip()
+        except Exception:
+            pass
     return None
 
 

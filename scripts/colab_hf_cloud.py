@@ -63,11 +63,13 @@ DEFAULT_HF_TRACK_SOURCES: dict[str, list[dict[str, Any]]] = {
         {"path": "HuggingFaceFW/fineweb-edu", "name": "sample-10BT", "split": "train"},
     ],
     "uta_trace": [
+        {"path": "a-m-team/AM-DeepSeek-R1-Distilled-1.4M", "name": None, "split": "train"},
         {"path": "HuggingFaceH4/no_robots", "name": None, "split": "train"},
         {"path": "sahil2801/CodeAlpaca-20k", "name": None, "split": "train"},
         {"path": "meta-math/MetaMathQA", "name": None, "split": "train"},
         {"path": "TIGER-Lab/MathInstruct", "name": None, "split": "train"},
         {"path": "OpenAssistant/oasst1", "name": None, "split": "train"},
+        {"path": "Anthropic/hh-rlhf", "name": None, "split": "train"},
     ],
     "typed_decision": [
         {"path": "jev/typed-decisions", "name": None, "split": "train"},

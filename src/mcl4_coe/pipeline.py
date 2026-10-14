@@ -436,22 +436,26 @@ def _compact_uta_triplet(
     max_total_chars: int = 1900,
     max_total_bytes: int = 1960,
 ) -> tuple[str, str, str]:
-    """Sanitize and compact `#U$#`, `#T$#`, and `#A$#` so every episode fits inside `seq_len=2048`."""
+    """Sanitize and compact `#U$#`, `#T$#`, and `#A$#` so every episode fits inside `seq_len`."""
     u_s = sanitize_trace_markers(u).strip()
     t_s = sanitize_trace_markers(t).strip()
     a_s = sanitize_trace_markers(a).strip()
 
+    u_cap = min(640, max(64, int(max_total_bytes * 0.34)))
+    a_cap = min(560, max(48, int(max_total_bytes * 0.28)))
+    t_min = min(240, max(48, int(max_total_bytes * 0.20)))
+
     # 1. Cap oversized prompt (#U$#) and post-</think> answer (#A$#) windows first
-    if len(u_s) > 720:
-        u_s = build_head_tail_window(u_s, head_chars=460, tail_chars=220)
-    if len(a_s) > 640:
-        a_s = build_head_tail_window(a_s, head_chars=380, tail_chars=220)
+    if len(u_s) > u_cap + 60:
+        u_s = build_head_tail_window(u_s, head_chars=int(u_cap * 0.65), tail_chars=int(u_cap * 0.30))
+    if len(a_s) > a_cap + 60:
+        a_s = build_head_tail_window(a_s, head_chars=int(a_cap * 0.65), tail_chars=int(a_cap * 0.30))
 
     # 2. Compact verbose <think> scratchpad (#T$#) to fit remaining character budget
-    if len(u_s) + len(t_s) + len(a_s) > max_total_chars and len(t_s) > 280:
-        budget = max(280, max_total_chars - len(u_s) - len(a_s))
-        head_c = max(160, int(budget * 0.60))
-        tail_c = max(100, int(budget * 0.34))
+    if len(u_s) + len(t_s) + len(a_s) > max_total_chars and len(t_s) > t_min:
+        budget = max(t_min, max_total_chars - len(u_s) - len(a_s))
+        head_c = max(32, int(budget * 0.60))
+        tail_c = max(24, int(budget * 0.34))
         t_s = build_head_tail_window(t_s, head_chars=head_c, tail_chars=tail_c)
 
     # 3. Guarantee UTF-8 byte length <= max_total_bytes (accounting for multibyte math/Unicode)
@@ -459,17 +463,33 @@ def _compact_uta_triplet(
     t_b = len(t_s.encode("utf-8"))
     a_b = len(a_s.encode("utf-8"))
     if u_b + t_b + a_b > max_total_bytes:
-        u_s = _truncate_utf8_bytes(u_s, min(u_b, 640))
-        a_s = _truncate_utf8_bytes(a_s, min(a_b, 560))
-        rem = max(240, max_total_bytes - len(u_s.encode("utf-8")) - len(a_s.encode("utf-8")))
+        u_s = _truncate_utf8_bytes(u_s, min(u_b, u_cap))
+        a_s = _truncate_utf8_bytes(a_s, min(a_b, a_cap))
+        rem = max(48, max_total_bytes - len(u_s.encode("utf-8")) - len(a_s.encode("utf-8")))
         t_s = _truncate_utf8_bytes(t_s, rem)
     return (u_s, t_s, a_s)
 
 
-def extract_uta_episodes(record: Any) -> list[tuple[str, str, str]]:
+def extract_uta_episodes(
+    record: Any,
+    *,
+    max_seq_len: int = 2048,
+) -> list[tuple[str, str, str]]:
     """Extract `(prompt, thought, answer)` tuples from heterogeneous chat/CoT records."""
     if not isinstance(record, dict):
         return []
+
+    max_b = max(180, max_seq_len - 88)
+    max_c = max(160, max_seq_len - 148)
+
+    def _pack(u_raw: str, t_raw: str, a_raw: str) -> tuple[str, str, str]:
+        return _compact_uta_triplet(
+            u_raw,
+            t_raw,
+            a_raw,
+            max_total_chars=max_c,
+            max_total_bytes=max_b,
+        )
 
     # Case 1: Supra-Reasoning-CoT (`user`, `CoT`, `assistant`)
     if "user" in record and ("CoT" in record or "cot" in record) and "assistant" in record:
@@ -478,7 +498,7 @@ def extract_uta_episodes(record: Any) -> list[tuple[str, str, str]]:
         a = str(record.get("assistant") or "").strip()
         if u and (t or a):
             t_clean, a_clean = _split_thought_and_answer(a, explicit_thought=t)
-            return [_compact_uta_triplet(u, t_clean, a_clean)]
+            return [_pack(u, t_clean, a_clean)]
 
     # Case 2: Fable-5 (`query`, `thinking`, optional `answer`/`response`)
     if "query" in record and "thinking" in record:
@@ -487,7 +507,7 @@ def extract_uta_episodes(record: Any) -> list[tuple[str, str, str]]:
         a = str(record.get("answer") or record.get("response") or "").strip()
         if u and (t or a):
             t_clean, a_clean = _split_thought_and_answer(a, explicit_thought=t)
-            return [_compact_uta_triplet(u, t_clean, a_clean)]
+            return [_pack(u, t_clean, a_clean)]
 
     # Case 3: Instruction / Query / Formal Statement + Response / Output / Proof
     for q_key in (
@@ -531,7 +551,7 @@ def extract_uta_episodes(record: Any) -> list[tuple[str, str, str]]:
                     t_clean, a_clean = _split_thought_and_answer(
                         record[a_key], explicit_thought=explicit_t or None
                     )
-                    return [_compact_uta_triplet(u, t_clean, a_clean)]
+                    return [_pack(u, t_clean, a_clean)]
 
     # Case 4: `messages` or `conversations` array (`AM-DeepSeek-R1`, `Nemotron-Cascade-2`, `Nemotron-Post-Training`, etc.)
     msg_list = record.get("messages") or record.get("conversations")
@@ -559,7 +579,7 @@ def extract_uta_episodes(record: Any) -> list[tuple[str, str, str]]:
             elif role in ("assistant", "gpt", "model", "bot") and (content or reasoning) and has_real_user:
                 prompt_str = "\n\n".join(current_user)
                 t_clean, a_clean = _split_thought_and_answer(content, explicit_thought=reasoning)
-                episodes.append(_compact_uta_triplet(prompt_str, t_clean, a_clean))
+                episodes.append(_pack(prompt_str, t_clean, a_clean))
                 current_user.clear()
                 has_real_user = False
         return episodes
@@ -578,7 +598,7 @@ def extract_uta_episodes(record: Any) -> list[tuple[str, str, str]]:
                     last_a = body
             if last_u and last_a:
                 t_clean, a_clean = _split_thought_and_answer(last_a)
-                return [_compact_uta_triplet(last_u, t_clean, a_clean)]
+                return [_pack(last_u, t_clean, a_clean)]
 
     # Case 6: GitHub CodeReview (`before_code`, `reviewer_comment`, `after_code`)
     if "before_code" in record and "reviewer_comment" in record and "after_code" in record:
@@ -586,7 +606,7 @@ def extract_uta_episodes(record: Any) -> list[tuple[str, str, str]]:
         comment = str(record.get("reviewer_comment") or "").strip()
         after = str(record.get("after_code") or "").strip()
         if before and comment and after:
-            return [_compact_uta_triplet(f"Review and patch code:\n{before}", comment, after)]
+            return [_pack(f"Review and patch code:\n{before}", comment, after)]
 
     # Case 7: Nemotron SFT (`text` formatted as `input: ... output: ...`)
     raw_text = record.get("text")
@@ -594,7 +614,7 @@ def extract_uta_episodes(record: Any) -> list[tuple[str, str, str]]:
         parts = re.split(r"\s+output\s*:\s*", raw_text.lstrip()[len("input:") :], maxsplit=1, flags=re.IGNORECASE)
         if len(parts) == 2 and parts[0].strip() and parts[1].strip():
             t_clean, a_clean = _split_thought_and_answer(parts[1].strip())
-            return [_compact_uta_triplet(parts[0].strip(), t_clean, a_clean)]
+            return [_pack(parts[0].strip(), t_clean, a_clean)]
 
     return []
 
@@ -777,7 +797,11 @@ def parse_mcqa_decision_fields(
     return state, kind, question, clean_opts, best_idx, None
 
 
-def extract_typed_decision_uta(record: Any) -> tuple[str, str, str] | None:
+def extract_typed_decision_uta(
+    record: Any,
+    *,
+    max_seq_len: int = 2048,
+) -> tuple[str, str, str] | None:
     """Convert a typed decision or Nemotron MCQA record into a `#U$#/#Q$#/#H$# -> #T$# -> #A$#` episode."""
     parsed = parse_mcqa_decision_fields(record)
     if parsed is None:
@@ -796,7 +820,13 @@ def extract_typed_decision_uta(record: Any) -> tuple[str, str, str] | None:
         else f"Compare {len(clean_opts)} candidate hypotheses against state evidence -> option [{best_idx}] matches."
     )
     answer = f"[{best_idx}] {winning_opt}"
-    return _compact_uta_triplet(prompt, thought, answer)
+    return _compact_uta_triplet(
+        prompt,
+        thought,
+        answer,
+        max_total_chars=max(160, max_seq_len - 148),
+        max_total_bytes=max(180, max_seq_len - 88),
+    )
 
 
 def extract_pretrain_text(

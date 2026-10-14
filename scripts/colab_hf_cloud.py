@@ -305,7 +305,7 @@ def build_cloud_shards(
                             writer.add_pretrain_document(text)
                             accepted += 1
                     elif track == "uta_trace":
-                        eps = extract_uta_episodes(row)
+                        eps = extract_uta_episodes(row, max_seq_len=seq_len)
                         if not eps:
                             rejected += 1
                         else:
@@ -318,7 +318,7 @@ def build_cloud_shards(
                             else:
                                 rejected += 1
                     else:
-                        uta = extract_typed_decision_uta(row)
+                        uta = extract_typed_decision_uta(row, max_seq_len=seq_len)
                         dec_ex = _convert_record_to_decision_example(
                             row, len(decision_pool), max_seq_len=min(512, seq_len)
                         )
@@ -327,7 +327,7 @@ def build_cloud_shards(
                         if uta is not None and writer.add_uta_episode(*uta):
                             accepted += 1
                         else:
-                            eps = extract_uta_episodes(row)
+                            eps = extract_uta_episodes(row, max_seq_len=seq_len)
                             if eps and writer.add_uta_episode(*eps[0]):
                                 accepted += 1
                             else:

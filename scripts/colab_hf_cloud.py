@@ -661,6 +661,120 @@ def run_context_hierarchy_ablation(
     return results
 
 
+def pull_run_from_cloud(
+    run_id: str,
+    *,
+    runs_root: str | Path = "runs",
+    hf_run_repo: str = "mESmaC/mcl4-coe-runs",
+    drive_root: str | Path | None = None,
+    hf_token: str | None = None,
+) -> Path:
+    """Download a cloud-trained run directory (`checkpoints/`, `metrics.jsonl`, `samples.jsonl`) locally."""
+    token = resolve_hf_token(hf_token, require_userdata=False)
+    _configure_hf_transfer()
+    dst_root = Path(runs_root).expanduser().resolve()
+    run_dir = dst_root / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    if drive_root:
+        src = Path(drive_root).expanduser().resolve() / "runs" / run_id
+        if src.is_dir():
+            shutil.copytree(src, run_dir, dirs_exist_ok=True)
+            return run_dir
+
+    from huggingface_hub import snapshot_download  # type: ignore[import-not-found]
+
+    snapshot_download(
+        repo_id=hf_run_repo,
+        repo_type="model",
+        allow_patterns=[f"{run_id}/**"],
+        local_dir=str(dst_root),
+        token=token,
+    )
+    return run_dir
+
+
+def evaluate_trained_checkpoint(
+    checkpoint_or_run: str | Path,
+    *,
+    shards_root: str | Path = "runs/nemotron_core_shards",
+    prompt: str = "Explain why Markov Local-4 routing achieves O(T) complexity while preserving local context.",
+    max_new_tokens: int = 96,
+) -> dict[str, Any]:
+    """Run generative `<UTA>`, held-out Nemotron 4-way MCQA, and `A.TXY` routing evaluation on a checkpoint."""
+    from mcl4_coe import collate_decisions, evaluate_checkpoint_prompt
+
+    target = Path(checkpoint_or_run).expanduser().resolve()
+    if target.is_dir():
+        ckpts = list_checkpoints(target)
+        if not ckpts:
+            raise FileNotFoundError(f"No checkpoints found in {target}")
+        ckpt_path = Path(str(ckpts[0]["pt_file"]))
+    else:
+        ckpt_path = target
+
+    gen_eval = evaluate_checkpoint_prompt(ckpt_path, prompt=prompt, max_new_tokens=max_new_tokens)
+
+    payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    b_cfg = MCL4CEDConfig(**payload["backbone_config"])
+    c_cfg = COEConfig(**payload["coe_config"])
+    model = CognitiveOperatorEnsemble(MCL4CEDBackbone(b_cfg), c_cfg)
+    model.load_state_dict(payload["model_state"])
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device).eval()
+
+    mcqa_eval: dict[str, Any] = {}
+    dec_cache = Path(shards_root).expanduser().resolve() / "typed_decision" / "decision_examples_cache.pt"
+    if not dec_cache.is_file():
+        alt = REPO_ROOT / "data_shards" / "typed_decision" / "decision_examples_cache.pt"
+        if alt.is_file():
+            dec_cache = alt
+    if dec_cache.is_file():
+        dec_pool = torch.load(dec_cache, map_location="cpu", weights_only=False)
+        held_out = [ex for ex in dec_pool if len(ex.descriptions) == 4][:24]
+        if held_out:
+            raw_b = collate_decisions(held_out, max_length=512)
+            dec_batch = {k: v.to(device) for k, v in raw_b.items()}
+            with torch.no_grad():
+                op_out = model.forward_all_operators(**dec_batch)
+                mcqa_eval = {
+                    "num_examples": len(held_out),
+                    "decision_ce_loss": round(float(op_out.decision.ce_loss.item()), 4),
+                    "random_4way_ce_baseline": 1.3863,
+                    "decision_top1_accuracy": round(
+                        float((op_out.decision.logits.argmax(dim=-1) == dec_batch["targets"]).float().mean().item()),
+                        4,
+                    ),
+                    "deduction_loss": round(float(op_out.deduction_loss.item()), 4),
+                    "evaluation_loss": round(float(op_out.evaluation_loss.item()), 4),
+                    "metacognition_loss": round(float(op_out.metacognition_loss.item()), 4),
+                    "abstraction_loss": round(float(op_out.abstraction_loss.item()), 4),
+                }
+
+    store = index_python_repo_to_atxy(REPO_ROOT, subsystems=("src",))
+    router = COEAddressRouter(store, max_seq_len=128)
+    r_out = router.route_query(
+        model,
+        "Locate parse_mcqa_decision_fields and Nemotron-Core shard pipeline in mcl4_coe",
+        top_k_candidates=6,
+    )
+    rec = r_out.get("record")
+    atxy_eval = {
+        "address": r_out["address"],
+        "confidence": round(float(r_out["confidence"]), 4),
+        "candidates": r_out["candidates"],
+        "resolved_payload": rec.payload[:160] if rec is not None else None,
+        "resolved_fields": rec.fields if rec is not None else None,
+    }
+
+    return {
+        "checkpoint_path": str(ckpt_path),
+        "generative_uta": gen_eval,
+        "held_out_mcqa": mcqa_eval,
+        "atxy_routing": atxy_eval,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="MCL4-COE Cloud Pipeline (Colab + HF Pro + Drive)")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -694,6 +808,21 @@ def main() -> None:
     p_train.add_argument("--micro-batch-size", type=int, default=4)
     p_train.add_argument("--hf-run-repo", default=None)
     p_train.add_argument("--drive-root", default=None)
+
+    p_pull_run = sub.add_parser("pull-run", help="Pull a cloud-trained run directory locally")
+    p_pull_run.add_argument("--run-id", default="colab_mcl4_coe_v1")
+    p_pull_run.add_argument("--runs-root", default="runs")
+    p_pull_run.add_argument("--hf-run-repo", default="mESmaC/mcl4-coe-runs")
+    p_pull_run.add_argument("--drive-root", default=None)
+
+    p_eval = sub.add_parser("eval-checkpoint", help="Evaluate a trained checkpoint (UTA + MCQA + A.TXY)")
+    p_eval.add_argument("--target", default="runs/nemotron_core_v1")
+    p_eval.add_argument("--shards-root", default="runs/nemotron_core_shards")
+    p_eval.add_argument(
+        "--prompt",
+        default="Explain why Markov Local-4 routing achieves O(T) complexity while preserving local context.",
+    )
+    p_eval.add_argument("--max-new-tokens", type=int, default=96)
 
     p_ablate = sub.add_parser("ablate", help="Run 4-Arm Context Hierarchy & Backbone Ablation")
     p_ablate.add_argument("--output-dir", default="runs/ablations")
@@ -750,6 +879,22 @@ def main() -> None:
             drive_root=args.drive_root,
         )
         print(json.dumps(manifest, indent=2))
+    elif args.cmd == "pull-run":
+        out_dir = pull_run_from_cloud(
+            args.run_id,
+            runs_root=args.runs_root,
+            hf_run_repo=args.hf_run_repo,
+            drive_root=args.drive_root,
+        )
+        print(json.dumps({"pulled_run_dir": str(out_dir), "checkpoints": len(list_checkpoints(out_dir))}, indent=2))
+    elif args.cmd == "eval-checkpoint":
+        res = evaluate_trained_checkpoint(
+            args.target,
+            shards_root=args.shards_root,
+            prompt=args.prompt,
+            max_new_tokens=args.max_new_tokens,
+        )
+        print(json.dumps(res, indent=2))
     elif args.cmd == "ablate":
         res = run_context_hierarchy_ablation(
             args.output_dir,
@@ -763,3 +908,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

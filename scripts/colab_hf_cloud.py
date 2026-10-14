@@ -381,14 +381,18 @@ def build_cloud_shards(
         summary["drive_mirror"] = str(drive_shards)
 
     if hf_dataset_repo:
-        push_folder_to_hf(
-            out_root,
-            repo_id=hf_dataset_repo,
-            repo_type="dataset",
-            hf_token=token,
-            commit_message=f"Update MCL4-COE sharded tracks (seq_len={seq_len})",
-        )
-        summary["hf_dataset_repo"] = hf_dataset_repo
+        try:
+            uploaded_url = push_folder_to_hf(
+                out_root,
+                repo_id=hf_dataset_repo,
+                repo_type="dataset",
+                hf_token=token,
+                commit_message=f"Update MCL4-COE sharded tracks (seq_len={seq_len})",
+            )
+            summary["hf_dataset_repo"] = uploaded_url
+        except Exception as exc:
+            print(f"[build-cloud-shards] Warning: HF upload skipped ({exc})")
+            summary["hf_upload_skipped"] = str(exc)
 
     return summary
 
@@ -408,9 +412,18 @@ def push_folder_to_hf(
     token = resolve_hf_token(hf_token, require_userdata=True)
     _configure_hf_transfer()
     api = HfApi(token=token)
-    api.create_repo(repo_id=repo_id, repo_type=repo_type, private=True, exist_ok=True)
+    target_repo = repo_id
+    try:
+        who = api.whoami()
+        hf_user = str(who.get("name") or "").strip()
+        if hf_user:
+            short_name = repo_id.split("/")[-1]
+            target_repo = f"{hf_user}/{short_name}"
+    except Exception:
+        pass
+    api.create_repo(repo_id=target_repo, repo_type=repo_type, private=True, exist_ok=True)
     info = api.upload_folder(
-        repo_id=repo_id,
+        repo_id=target_repo,
         repo_type=repo_type,
         folder_path=str(Path(local_dir).expanduser().resolve()),
         path_in_repo=path_in_repo,

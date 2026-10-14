@@ -173,6 +173,80 @@ def _convert_record_to_decision_example(
     )
 
 
+def _configure_hf_transfer() -> None:
+    """Enable `hf_transfer` only when the `hf_transfer` package is actually installed."""
+    import importlib.util
+
+    if importlib.util.find_spec("hf_transfer") is not None:
+        os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+    else:
+        os.environ.pop("HF_HUB_ENABLE_HF_TRANSFER", None)
+
+
+def _iter_hf_source_rows(
+    ds_path: str,
+    ds_name: str | None,
+    ds_split: str,
+    max_rows: int,
+    token: str | None,
+    load_dataset_fn: Any,
+):
+    """Stream up to `max_rows` records from HF Datasets Server (`/rows`) with `load_dataset` fallback."""
+    import urllib.parse
+    import urllib.request
+
+    cfg = ds_name or "default"
+    yielded = 0
+    try:
+        while yielded < max_rows:
+            length = min(100, max_rows - yielded)
+            qs = urllib.parse.urlencode(
+                {
+                    "dataset": ds_path,
+                    "config": cfg,
+                    "split": ds_split,
+                    "offset": yielded,
+                    "length": length,
+                }
+            )
+            req = urllib.request.Request(f"https://datasets-server.huggingface.co/rows?{qs}")
+            if token:
+                req.add_header("Authorization", f"Bearer {token}")
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            rows = payload.get("rows", [])
+            if not rows:
+                break
+            for item in rows:
+                if isinstance(item, dict) and isinstance(item.get("row"), dict):
+                    yielded += 1
+                    yield item["row"]
+                    if yielded >= max_rows:
+                        return
+            if len(rows) < length:
+                return
+        if yielded > 0:
+            return
+    except Exception:
+        if yielded > 0:
+            return
+
+    if load_dataset_fn is not None:
+        stream = load_dataset_fn(
+            ds_path,
+            name=ds_name,
+            split=ds_split,
+            streaming=True,
+            token=token,
+        )
+        for row in stream:
+            if isinstance(row, dict):
+                yielded += 1
+                yield row
+                if yielded >= max_rows:
+                    return
+
+
 def build_cloud_shards(
     shards_root: str | Path,
     *,
@@ -185,7 +259,7 @@ def build_cloud_shards(
 ) -> dict[str, Any]:
     """Stream datasets from Hugging Face Hub directly into `.bin` shards + `index_receipt.json`."""
     token = resolve_hf_token(hf_token)
-    os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+    _configure_hf_transfer()
     out_root = Path(shards_root).expanduser().resolve()
     out_root.mkdir(parents=True, exist_ok=True)
 
@@ -197,47 +271,32 @@ def build_cloud_shards(
     summary: dict[str, Any] = {"shards_root": str(out_root), "tracks": {}}
     decision_pool: list[DecisionExample] = []
 
-    if load_dataset is not None:
-        for track, sources in DEFAULT_HF_TRACK_SOURCES.items():
-            t_dir = out_root / track
-            t_dir.mkdir(parents=True, exist_ok=True)
-            writer = BlockAlignedShardWriter(
-                t_dir,
-                track=track,
-                split="train",
-                seq_len=seq_len,
-                max_blocks_per_shard=max_blocks_per_shard,
-            )
-            track_accepted = 0
-            track_rejected = 0
+    for track, sources in DEFAULT_HF_TRACK_SOURCES.items():
+        t_dir = out_root / track
+        t_dir.mkdir(parents=True, exist_ok=True)
+        writer = BlockAlignedShardWriter(
+            t_dir,
+            track=track,
+            split="train",
+            seq_len=seq_len,
+            max_blocks_per_shard=max_blocks_per_shard,
+        )
+        track_accepted = 0
+        track_rejected = 0
 
-            for src in sources:
-                ds_path = src["path"]
-                ds_name = src.get("name")
-                ds_split = src.get("split", "train")
-                print(f"[build-cloud-shards] Streaming {ds_path} ({ds_name or 'default'}) -> {track} ...")
-                try:
-                    stream = load_dataset(
-                        ds_path,
-                        name=ds_name,
-                        split=ds_split,
-                        streaming=True,
-                        token=token,
-                    )
-                except Exception as exc:
-                    print(f"  [skip] {ds_path}: {exc}")
-                    continue
-
-                accepted = 0
-                rejected = 0
-                row_idx = 0
-                for row in stream:
+        for src in sources:
+            ds_path = src["path"]
+            ds_name = src.get("name")
+            ds_split = src.get("split", "train")
+            print(f"[build-cloud-shards] Streaming {ds_path} ({ds_name or 'default'}/{ds_split}) -> {track} ...")
+            accepted = 0
+            rejected = 0
+            row_idx = 0
+            try:
+                for row in _iter_hf_source_rows(
+                    ds_path, ds_name, ds_split, records_per_source, token, load_dataset
+                ):
                     row_idx += 1
-                    if row_idx > records_per_source:
-                        break
-                    if not isinstance(row, dict):
-                        continue
-
                     if track == "pretrain_lm":
                         text, rej = extract_pretrain_text(row)
                         if rej or not text:
@@ -260,40 +319,44 @@ def build_cloud_shards(
                                 rejected += 1
                     else:
                         uta = extract_typed_decision_uta(row)
-                        dec_ex = _convert_record_to_decision_example(row, len(decision_pool), max_seq_len=min(512, seq_len))
+                        dec_ex = _convert_record_to_decision_example(
+                            row, len(decision_pool), max_seq_len=min(512, seq_len)
+                        )
                         if dec_ex is not None and len(decision_pool) < 4096:
                             decision_pool.append(dec_ex)
                         if uta is not None and writer.add_uta_episode(*uta):
                             accepted += 1
                         else:
-                            # Fallback if a tasksource instruct record has inputs/targets
                             eps = extract_uta_episodes(row)
                             if eps and writer.add_uta_episode(*eps[0]):
                                 accepted += 1
                             else:
                                 rejected += 1
+            except Exception as exc:
+                print(f"  [skip] {ds_path}: {exc}")
+                continue
 
-                if accepted > 0 or rejected > 0:
-                    writer.record_provenance(
-                        corpus=ds_path,
-                        source_file=f"hf://{ds_path}/{ds_name or ds_split}",
-                        row_start=1,
-                        row_end=row_idx,
-                        episodes_accepted=accepted,
-                        episodes_rejected_stage0=rejected,
-                    )
-                    track_accepted += accepted
-                    track_rejected += rejected
-                    print(f"  -> accepted={accepted:,}, rejected_stage0={rejected:,}")
+            if accepted > 0 or rejected > 0:
+                writer.record_provenance(
+                    corpus=ds_path,
+                    source_file=f"hf://{ds_path}/{ds_name or ds_split}",
+                    row_start=1,
+                    row_end=row_idx,
+                    episodes_accepted=accepted,
+                    episodes_rejected_stage0=rejected,
+                )
+                track_accepted += accepted
+                track_rejected += rejected
+                print(f"  -> accepted={accepted:,}, rejected_stage0={rejected:,}")
 
-            writer.flush_shard()
-            summary["tracks"][track] = {
-                "accepted_episodes": track_accepted,
-                "rejected_stage0": track_rejected,
-                "num_blocks": writer.index_receipt.totals.get("num_blocks", 0),
-                "num_tokens": writer.index_receipt.totals.get("num_tokens", 0),
-                "num_shards": writer.index_receipt.totals.get("num_shards", 0),
-            }
+        writer.flush_shard()
+        summary["tracks"][track] = {
+            "accepted_episodes": track_accepted,
+            "rejected_stage0": track_rejected,
+            "num_blocks": writer.index_receipt.totals.get("num_blocks", 0),
+            "num_tokens": writer.index_receipt.totals.get("num_tokens", 0),
+            "num_shards": writer.index_receipt.totals.get("num_shards", 0),
+        }
 
     if decision_pool:
         dec_cache = out_root / "typed_decision" / "decision_examples_cache.pt"
@@ -305,7 +368,11 @@ def build_cloud_shards(
     healed = ensure_sharded_tracks_ready(out_root, seq_len=seq_len)
     for t_name, idx_path in healed.items():
         raw_idx = json.loads(idx_path.read_text(encoding="utf-8"))
-        summary["tracks"][t_name] = raw_idx.get("totals", {})
+        totals = dict(raw_idx.get("totals", {}))
+        if t_name in summary["tracks"]:
+            totals["streamed_accepted"] = summary["tracks"][t_name].get("accepted_episodes", 0)
+            totals["streamed_rejected_stage0"] = summary["tracks"][t_name].get("rejected_stage0", 0)
+        summary["tracks"][t_name] = totals
 
     if drive_root:
         drive_shards = Path(drive_root).expanduser().resolve() / "data_shards"
@@ -338,8 +405,8 @@ def push_folder_to_hf(
     """Create (if needed) and upload `local_dir` to a private Hugging Face repo."""
     from huggingface_hub import HfApi  # type: ignore[import-not-found]
 
-    token = resolve_hf_token(hf_token)
-    os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+    token = resolve_hf_token(hf_token, require_userdata=True)
+    _configure_hf_transfer()
     api = HfApi(token=token)
     api.create_repo(repo_id=repo_id, repo_type=repo_type, private=True, exist_ok=True)
     info = api.upload_folder(
@@ -363,8 +430,8 @@ def pull_shards_to_local_nvme(
     """Stage `.bin` shards onto local NVMe from HF Hub or Google Drive (or heal portably)."""
     dst = Path(local_shards_root).expanduser().resolve()
     dst.mkdir(parents=True, exist_ok=True)
-    token = resolve_hf_token(hf_token)
-    os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+    token = resolve_hf_token(hf_token, require_userdata=bool(hf_dataset_repo))
+    _configure_hf_transfer()
 
     if hf_dataset_repo:
         from huggingface_hub import snapshot_download  # type: ignore[import-not-found]
@@ -394,7 +461,8 @@ def run_cloud_training(
     resume_from_cloud: bool = True,
 ) -> dict[str, Any]:
     """Run `MCL4COETrainer` and automatically sync checkpoints + telemetry to HF Hub and/or Drive."""
-    token = resolve_hf_token(hf_token)
+    token = resolve_hf_token(hf_token, require_userdata=bool(hf_run_repo))
+    _configure_hf_transfer()
     runs_root = Path(config.runs_root).expanduser().resolve()
     run_dir = runs_root / config.run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -465,8 +533,8 @@ def run_cloud_training(
             _sync_run_artifacts(step)
 
     trainer = MCL4COETrainer(config, on_step_callback=_on_step)
-    manifest = trainer.run()
-    _sync_run_artifacts(int(manifest.get("current_step", config.total_steps)))
+    manifest = trainer.train()
+    _sync_run_artifacts(int(manifest.get("step", config.total_steps)))
     return manifest
 
 

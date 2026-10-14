@@ -1594,7 +1594,7 @@ def ensure_sharded_tracks_ready(
                 b = 2 + (i * 11) % 17
                 c = 1 + (i * 5) % 9
                 val = a * b + c
-                if seq_len < 256:
+                if seq_len < 384:
                     u_str = f"solve({a},{b},{c})"
                     t_str = f"{a}*{b}+{c}={val}"
                     a_str = f"{val}"
@@ -1605,7 +1605,10 @@ def ensure_sharded_tracks_ready(
                         f"First compute product {a} * {b} = {a * b}. Next add offset {c} to obtain {val}."
                     )
                     a_str = f"def solve(x, y, z):\n    return x * y + z\n# solve({a}, {b}, {c}) == {val}"
-                if writer.add_uta_episode(u_str, t_str, a_str):
+                if not writer.add_uta_episode(u_str, t_str, a_str):
+                    if writer.add_uta_episode(f"solve({a},{b},{c})", f"{a}*{b}+{c}={val}", f"{val}"):
+                        accepted += 1
+                else:
                     accepted += 1
             writer.record_provenance(
                 corpus="portable_uta_traces",

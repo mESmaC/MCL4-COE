@@ -1,0 +1,1578 @@
+"""Dream-RSI: Recursive Self-Improvement through Evolving Worlds for `MCL4-COE`.
+
+Implements the complete Dream-RSI loop (Zheng et al., 2026, Section 3 & Eq. 1) natively
+integrated with `MCL4-COE`'s 9 Cognitive Operators and `Ornith-1.5`:
+1. Prefix-Observable Discovery Tree & Exact Replay Simulator (`Node`, `World`, `View`,
+   `Outcome`, `OnlineResult`, `ReplayResult`, `online_rollout`, `replay`, `score_policy`):
+   - Online exploration deploys policy $\\pi_t$ to expand a discovery tree $\\mathcal{T}_t$
+     where the root opens new branches (`CONTINUE(0)`) and each non-root node has at most
+     one recorded continuation (`CONTINUE(v)`).
+   - Historical replay (`replay`, `score_policy`) evaluates candidate exploration policies
+     against the growing world archive $\\mathcal{H}_t = (\\mathcal{T}_1, \\dots, \\mathcal{T}_t)$
+     across multi-budget preferences $\\rho \\in (0, 0.25, 0.5, 0.75, 1.0)$ using normalized
+     Pareto hypervolume minus round/call penalty at **zero real execution cost**.
+2. Executable Policy Language & Monotonic Policy Evolution (`Program`, `GRAMMAR`,
+   `RANK_FEATURES`, `improve_policy`, `DreamState`):
+   - Stateless 6-directive exploration programs (`WIDTH`, `ROOT`, `RANK`, `STOP`,
+     `PATIENCE`, `ROUNDS`) ranking causally visible frontier leaves by `SCORE`, `GAIN`,
+     `DEEP`, `SHALLOW`, `RECENT`, `OLD`, plus `MCL4-COE` operator signals `UTILITY`
+     (`Evaluation`), `NOVELTY` (`Association`), and `CONFIDENCE` (`Metacognition`).
+   - Because the incumbent $\\pi^0 = \\pi_t$ is always scored alongside revisions
+     $\\pi^1, \\dots, \\pi^{M}$, the selected policy $\\pi_{t+1}$ is guaranteed never to
+     score worse than $\\pi_t$ on $\\mathcal{H}_t$.
+3. Native `MCL4-COE` Discovery & Dreaming Engine (`MCL4DreamDiscovery`,
+   `MCL4PolicyProposer`, `DreamRSIEngine`, `DreamCycleOutput`):
+   - Connects `MCL4-COE`'s 9 Cognitive Operators (`Abduction`, `Association`, `Deduction`,
+     `Evaluation`, `Metacognition`, `Decision`) to online tree expansion and offline
+     policy-revision synthesis, with atomic JSON state persistence for Web UI & CLI.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
+import json
+import math
+import os
+from pathlib import Path
+import re
+import tempfile
+import time
+from typing import Any
+
+import torch
+import torch.nn.functional as F
+
+
+# ---------------------------------------------------------------------------
+# Strict JSON & Numeric Validators
+# ---------------------------------------------------------------------------
+
+
+def _integer(value: Any, name: str, minimum: int = 0) -> int:
+    if type(value) is not int or value < minimum:
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    return value
+
+
+def _number(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a finite number")
+    try:
+        result = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"{name} must be a finite number") from exc
+    if not math.isfinite(result):
+        raise ValueError(f"{name} must be a finite number")
+    return result
+
+
+def _json(value: Any, name: str = "payload") -> Any:
+    """Copy and validate JSON without accepting NaNs or arbitrary objects."""
+    if value is None or type(value) in (str, bool, int):
+        return value
+    if type(value) is float:
+        return _number(value, name)
+    if type(value) is list:
+        return [_json(item, name) for item in value]
+    if type(value) is dict and all(type(key) is str for key in value):
+        return {key: _json(item, name) for key, item in value.items()}
+    raise ValueError(f"{name} must contain only JSON values with string keys")
+
+
+def _dictionary(value: Any, name: str) -> dict[str, Any]:
+    if type(value) is not dict:
+        raise ValueError(f"{name} must be a JSON object")
+    return _json(value, name)
+
+
+def _keys(value: Any, names: set[str], name: str) -> dict[str, Any]:
+    value = _dictionary(value, name)
+    if set(value) != names:
+        raise ValueError(f"{name} fields must be exactly {sorted(names)}")
+    return value
+
+
+# ---------------------------------------------------------------------------
+# Prefix-Observable Discovery Tree & Historical Replay Simulator (Section 3)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Node:
+    """One node in a Dream-RSI discovery tree $\\mathcal{T}_t$."""
+
+    id: int
+    parent: int | None
+    score: float
+    observation: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        _integer(self.id, "node id")
+        if self.parent is not None:
+            _integer(self.parent, "parent id")
+        object.__setattr__(self, "score", _number(self.score, "score"))
+        object.__setattr__(self, "observation", _dictionary(self.observation, "observation"))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "parent": self.parent,
+            "score": self.score,
+            "observation": _dictionary(self.observation, "observation"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Node:
+        return cls(**_keys(data, {"id", "parent", "score", "observation"}, "node"))
+
+
+def _nodes(nodes: tuple[Node, ...]) -> tuple[Node, ...]:
+    if type(nodes) is not tuple or not nodes or any(type(node) is not Node for node in nodes):
+        raise ValueError("nodes must be a nonempty tuple of Node records")
+    copied = tuple(Node.from_dict(node.to_dict()) for node in nodes)
+    root = copied[0]
+    if root.id != 0 or root.parent is not None or root.score != 0:
+        raise ValueError("first node must be root id 0, parent None, score 0")
+    seen = {0}
+    extended: set[int] = set()
+    for node in copied[1:]:
+        if node.id in seen:
+            raise ValueError("node ids must be unique")
+        if node.parent not in seen:
+            raise ValueError("each non-root node must reference an earlier parent")
+        if node.parent != 0:
+            if node.parent in extended:
+                raise ValueError("each non-root node may have only one recorded child")
+            extended.add(node.parent)
+        seen.add(node.id)
+    return copied
+
+
+@dataclass(frozen=True)
+class World:
+    """Recorded discovery tree $\\mathcal{T}_t$ acting as an exact replay simulator."""
+
+    world_id: str
+    nodes: tuple[Node, ...]
+    metadata: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        if type(self.world_id) is not str or not self.world_id.strip():
+            raise ValueError("world_id must be a nonempty string")
+        object.__setattr__(self, "nodes", _nodes(self.nodes))
+        object.__setattr__(self, "metadata", _dictionary(self.metadata, "metadata"))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "world_id": self.world_id,
+            "nodes": [node.to_dict() for node in self.nodes],
+            "metadata": _dictionary(self.metadata, "metadata"),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> World:
+        data = _keys(data, {"world_id", "nodes", "metadata"}, "world")
+        if type(data["nodes"]) is not list:
+            raise ValueError("serialized nodes must be a list")
+        return cls(
+            data["world_id"],
+            tuple(Node.from_dict(node) for node in data["nodes"]),
+            data["metadata"],
+        )
+
+
+@dataclass(frozen=True)
+class View:
+    """Causally revealed prefix of a discovery tree visible to an exploration policy."""
+
+    nodes: tuple[Node, ...]
+    round_index: int
+    max_rounds: int
+    max_calls: int
+    workers: int
+    rho: float
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "nodes", _nodes(self.nodes))
+        _integer(self.round_index, "round_index")
+        _integer(self.max_rounds, "max_rounds")
+        _integer(self.max_calls, "max_calls")
+        _integer(self.workers, "workers", 1)
+        rho = _number(self.rho, "rho")
+        if not 0 <= rho <= 1:
+            raise ValueError("rho must lie in [0, 1]")
+        if self.round_index > self.max_rounds or self.calls > self.max_calls:
+            raise ValueError("view exceeds its budget")
+        object.__setattr__(self, "rho", rho)
+
+    @property
+    def calls(self) -> int:
+        return len(self.nodes) - 1
+
+    @property
+    def eligible(self) -> tuple[int, ...]:
+        parents = {node.parent for node in self.nodes[1:]}
+        return (0,) + tuple(node.id for node in self.nodes[1:] if node.id not in parents)
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """Result of one online discovery evaluation (`CONTINUE(parent_id)`)."""
+
+    score: float
+    observation: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "score", _number(self.score, "score"))
+        object.__setattr__(self, "observation", _dictionary(self.observation, "observation"))
+
+
+Policy = Callable[[View], Sequence[int]]
+Discover = Callable[[View, int, int], Outcome]
+
+
+class DiscoveryStopped(RuntimeError):
+    """Cooperative cancellation of an unfinished discovery or policy proposal."""
+
+
+def _check_stop(should_stop: Callable[[], bool] | None) -> None:
+    if should_stop is not None:
+        if not callable(should_stop):
+            raise ValueError("should_stop must be callable")
+        if should_stop():
+            raise DiscoveryStopped("Dream-RSI historical replay stopped")
+
+
+@dataclass(frozen=True)
+class OnlineResult:
+    """Result of an online discovery tree rollout under policy $\\pi_t$."""
+
+    world: World
+    rounds: int
+    agent_calls: int
+    actions: tuple[tuple[int, ...], ...]
+    stopped: bool = False
+
+
+@dataclass(frozen=True)
+class ReplayResult:
+    """Result of replaying a candidate policy over one recorded `World` at zero execution cost."""
+
+    calls: int
+    rounds: int
+    best_score: float
+    actions: tuple[tuple[int, ...], ...]
+    revealed_ids: tuple[int, ...]
+    exhausted: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "calls": self.calls,
+            "rounds": self.rounds,
+            "best_score": self.best_score,
+            "actions": [list(action) for action in self.actions],
+            "revealed_ids": list(self.revealed_ids),
+            "exhausted": self.exhausted,
+        }
+
+
+def _view(
+    nodes: Sequence[Node],
+    round_index: int,
+    max_rounds: int,
+    max_calls: int,
+    workers: int,
+    rho: float,
+) -> View:
+    return View(tuple(nodes), round_index, max_rounds, max_calls, workers, rho)
+
+
+def _action(policy: Policy, view: View) -> tuple[int, ...]:
+    answer = policy(
+        _view(view.nodes, view.round_index, view.max_rounds, view.max_calls, view.workers, view.rho)
+    )
+    if not isinstance(answer, Sequence) or isinstance(answer, (str, bytes)):
+        raise ValueError("policy must return a sequence of eligible node ids")
+    action = tuple(answer)
+    if any(type(node_id) is not int for node_id in action):
+        raise ValueError("policy actions must be integer node ids")
+    if len(action) != len(set(action)):
+        raise ValueError("policy actions must not contain duplicate nodes")
+    if len(action) > view.workers:
+        raise ValueError("policy batch exceeds worker limit")
+    if len(action) > view.max_calls - view.calls:
+        raise ValueError("policy batch exceeds remaining call budget")
+    if not set(action).issubset(view.eligible):
+        raise ValueError("policy selected a node outside the visible eligible frontier")
+    return action
+
+
+def online_rollout(
+    policy: Policy,
+    discover: Discover,
+    *,
+    world_id: str,
+    root_observation: dict[str, Any],
+    metadata: dict[str, Any],
+    max_rounds: int,
+    workers: int,
+    max_calls: int,
+    rho: float = 0.5,
+    should_stop: Callable[[], bool] | None = None,
+) -> OnlineResult:
+    """Deploy `policy` online to expand a discovery tree `World` ($\\mathcal{T}_t$)."""
+    if should_stop is not None and not callable(should_stop):
+        raise ValueError("should_stop must be callable")
+    initial = World(world_id, (Node(0, None, 0.0, root_observation),), metadata)
+    nodes = list(initial.nodes)
+    actions: list[tuple[int, ...]] = []
+    stopped = False
+    view = _view(nodes, 0, max_rounds, max_calls, workers, rho)
+    while view.round_index < max_rounds and view.calls < max_calls:
+        if should_stop is not None and should_stop():
+            stopped = True
+            break
+        action = _action(policy, view)
+        if not action:
+            break
+        additions = []
+        executed = []
+        for parent_id in action:
+            if should_stop is not None and should_stop():
+                stopped = True
+                break
+            node_id = len(nodes) + len(additions)
+            try:
+                outcome = discover(
+                    _view(
+                        view.nodes,
+                        view.round_index,
+                        max_rounds,
+                        max_calls,
+                        workers,
+                        rho,
+                    ),
+                    parent_id,
+                    node_id,
+                )
+            except DiscoveryStopped:
+                stopped = True
+                break
+            if type(outcome) is not Outcome:
+                raise ValueError("discover must return an Outcome")
+            additions.append(Node(node_id, parent_id, outcome.score, outcome.observation))
+            executed.append(parent_id)
+        nodes.extend(additions)
+        if executed:
+            actions.append(tuple(executed))
+        view = _view(nodes, len(actions), max_rounds, max_calls, workers, rho)
+        if stopped:
+            break
+    world = World(world_id, tuple(nodes), initial.metadata)
+    return OnlineResult(world, len(actions), len(nodes) - 1, tuple(actions), stopped)
+
+
+def replay(
+    world: World,
+    policy: Policy,
+    *,
+    rho: float,
+    max_rounds: int,
+    workers: int,
+    max_calls: int,
+    should_stop: Callable[[], bool] | None = None,
+) -> ReplayResult:
+    """Replay `policy` over a recorded `World` at zero model/verifier execution cost."""
+    _check_stop(should_stop)
+    world = World.from_dict(world.to_dict())
+    children: dict[int, list[Node]] = {}
+    for node in world.nodes[1:]:
+        children.setdefault(node.parent, []).append(node)
+    revealed = [world.nodes[0]]
+    seen = {0}
+    actions: list[tuple[int, ...]] = []
+    exhausted = 0
+    view = _view(revealed, 0, max_rounds, max_calls, workers, rho)
+    while (
+        view.round_index < max_rounds
+        and view.calls < max_calls
+        and len(seen) < len(world.nodes)
+    ):
+        _check_stop(should_stop)
+        action = _action(policy, view)
+        if not action:
+            break
+        additions = []
+        for parent_id in action:
+            child = next(
+                (node for node in children.get(parent_id, ()) if node.id not in seen),
+                None,
+            )
+            if child is None:
+                exhausted += 1
+            else:
+                additions.append(child)
+                seen.add(child.id)
+        revealed.extend(additions)
+        actions.append(action)
+        view = _view(revealed, len(actions), max_rounds, max_calls, workers, rho)
+    _check_stop(should_stop)
+    best = max((node.score for node in revealed[1:]), default=0.0)
+    return ReplayResult(
+        len(revealed) - 1,
+        len(actions),
+        best,
+        tuple(actions),
+        tuple(node.id for node in revealed),
+        exhausted,
+    )
+
+
+def score_policy(
+    worlds: Sequence[World],
+    policy: Policy,
+    *,
+    max_rounds: int,
+    workers: int,
+    max_calls: int,
+    round_penalty: float = 0.05,
+    rhos: Sequence[float] = (0, 0.25, 0.5, 0.75, 1),
+    should_stop: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    """Dream-RSI Paper Eq. 1: normalized Pareto hypervolume minus round/call penalty."""
+    _check_stop(should_stop)
+    if not worlds:
+        raise ValueError("score_policy requires a nonempty world archive")
+    penalty = _number(round_penalty, "round_penalty")
+    if penalty < 0:
+        raise ValueError("round_penalty must be nonnegative")
+    rhos = tuple(_number(rho, "rho") for rho in rhos)
+    if not rhos or len(set(rhos)) != len(rhos) or any(not 0 <= rho <= 1 for rho in rhos):
+        raise ValueError("rhos must be distinct values in [0, 1]")
+    receipts = []
+    total_replays = 0
+    for original in worlds:
+        _check_stop(should_stop)
+        world = World.from_dict(original.to_dict())
+        count = len(world.nodes) - 1
+        ceiling = max((node.score for node in world.nodes[1:]), default=0.0)
+        runs = []
+        for rho in rhos:
+            _check_stop(should_stop)
+            result = replay(
+                world,
+                policy,
+                rho=rho,
+                max_rounds=max_rounds,
+                workers=workers,
+                max_calls=max_calls,
+                should_stop=should_stop,
+            )
+            total_replays += 1
+            attainment = (
+                min(1.0, max(0.0, result.best_score / ceiling)) if ceiling > 0 else 0.0
+            )
+            runs.append({"rho": rho, **result.to_dict(), "attainment": attainment})
+        qualities: dict[int, float] = {}
+        for run in runs:
+            n = run["calls"]
+            qualities[n] = max(qualities.get(n, -math.inf), run["attainment"])
+        frontier = []
+        highest = -math.inf
+        for n, quality in sorted(qualities.items()):
+            if quality > highest:
+                frontier.append({"calls": n, "attainment": quality})
+                highest = quality
+        hypervolume = 0.0
+        previous = 0.0
+        for point in frontier:
+            if count:
+                hypervolume += (
+                    (point["attainment"] - previous) * (count - point["calls"]) / count
+                )
+            previous = point["attainment"]
+        parallel_penalty = sum(
+            run["rounds"] / run["calls"] if run["calls"] else 0.0 for run in runs
+        ) / len(runs)
+        objective = hypervolume - penalty * parallel_penalty
+        receipts.append(
+            {
+                "world_id": world.world_id,
+                "recorded_calls": count,
+                "recorded_best": ceiling,
+                "positive_score_support": ceiling > 0,
+                "objective": objective,
+                "hypervolume": hypervolume,
+                "parallel_penalty": parallel_penalty,
+                "frontier": frontier,
+                "replays": runs,
+            }
+        )
+    _check_stop(should_stop)
+    return {
+        "mean_objective": sum(item["objective"] for item in receipts) / len(receipts),
+        "round_penalty": penalty,
+        "rhos": list(rhos),
+        "replays_evaluated": total_replays,
+        "worlds": receipts,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Executable Exploration Policy DSL & Monotonic Offline Evolution
+# ---------------------------------------------------------------------------
+
+MAX_POLICY_BYTES = 512
+MAX_INTEGER = 1_000_000
+MAX_FEEDBACK_RHOS = 16
+RANK_FEATURES = (
+    "SCORE",
+    "GAIN",
+    "DEEP",
+    "SHALLOW",
+    "RECENT",
+    "OLD",
+    "UTILITY",
+    "NOVELTY",
+    "CONFIDENCE",
+)
+
+GRAMMAR = (
+    "Write exactly six lines in this order, without prose or code fences:\n"
+    "WIDTH n\nROOT n\nRANK feature [feature ...]\nSTOP NEVER|number\nPATIENCE n\nROUNDS n\n"
+    "WIDTH and ROUNDS are positive integers. ROOT and PATIENCE are nonnegative integers; "
+    "all integers are at most 1000000. ROOT 0 opens only the initial branch; ROOT n>0 "
+    "opens a fresh branch every nth round. RANK is a nonempty ordered list of unique "
+    "SCORE, GAIN, DEEP, SHALLOW, RECENT, OLD, UTILITY, NOVELTY, CONFIDENCE features "
+    "(first feature has priority). STOP is NEVER or a score in [0,1]; stop when an "
+    "observed result reaches it. PATIENCE 0 disables patience, otherwise stop after n "
+    "observed evaluations without a strict improvement in best score. WIDTH caps the "
+    "simultaneous batch; ROUNDS caps decision rounds. Rho scales call and round budgets "
+    "from one at rho=0 to full at rho=1. Return at most 512 UTF-8 bytes. Example:\n"
+    "WIDTH 4\nROOT 1\nRANK SCORE GAIN SHALLOW\nSTOP NEVER\nPATIENCE 0\nROUNDS 16"
+)
+
+
+def _bounded_int(value: object, name: str, minimum: int) -> int:
+    if type(value) is not int or not minimum <= value <= MAX_INTEGER:
+        raise ValueError(f"{name} must be an integer in {minimum}..{MAX_INTEGER}")
+    return value
+
+
+def _parse_integer(value: str, name: str, minimum: int) -> int:
+    if re.fullmatch(r"0|[1-9][0-9]{0,6}", value) is None:
+        raise ValueError(f"{name} must be a canonical nonnegative integer")
+    return _bounded_int(int(value), name, minimum)
+
+
+def _budget(maximum: int, rho: float) -> int:
+    return 0 if maximum == 0 else 1 + math.floor(rho * (maximum - 1))
+
+
+@dataclass(frozen=True)
+class Program:
+    """Stateless, deterministic exploration policy over a causally visible `View`."""
+
+    width: int = 4
+    root_every: int = 1
+    rank: tuple[str, ...] = ("SCORE", "GAIN", "SHALLOW")
+    stop: float | None = None
+    patience: int = 0
+    rounds: int = 16
+
+    def __post_init__(self) -> None:
+        _bounded_int(self.width, "WIDTH", 1)
+        _bounded_int(self.root_every, "ROOT", 0)
+        _bounded_int(self.patience, "PATIENCE", 0)
+        _bounded_int(self.rounds, "ROUNDS", 1)
+        if (
+            type(self.rank) is not tuple
+            or not self.rank
+            or any(
+                type(feature) is not str or feature not in RANK_FEATURES
+                for feature in self.rank
+            )
+            or len(self.rank) != len(set(self.rank))
+        ):
+            raise ValueError("RANK must be a nonempty tuple of unique allowed features")
+        if self.stop is not None:
+            if (
+                isinstance(self.stop, bool)
+                or not isinstance(self.stop, (int, float))
+                or not 0 <= self.stop <= 1
+            ):
+                raise ValueError("STOP must be None or a finite score in [0,1]")
+            object.__setattr__(self, "stop", float(self.stop) if self.stop else 0.0)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "width": self.width,
+            "root_every": self.root_every,
+            "rank": list(self.rank),
+            "stop": self.stop,
+            "patience": self.patience,
+            "rounds": self.rounds,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Program:
+        fields = {"width", "root_every", "rank", "stop", "patience", "rounds"}
+        if type(data) is not dict or set(data) != fields:
+            raise ValueError(f"program fields must be exactly {sorted(fields)}")
+        if type(data["rank"]) is not list:
+            raise ValueError("serialized RANK must be a list")
+        return cls(**{**data, "rank": tuple(data["rank"])})
+
+    def to_text(self) -> str:
+        threshold = "NEVER" if self.stop is None else str(self.stop)
+        return (
+            f"WIDTH {self.width}\n"
+            f"ROOT {self.root_every}\n"
+            f"RANK {' '.join(self.rank)}\n"
+            f"STOP {threshold}\n"
+            f"PATIENCE {self.patience}\n"
+            f"ROUNDS {self.rounds}"
+        )
+
+    @classmethod
+    def from_text(cls, text: str) -> Program:
+        if type(text) is not str:
+            raise ValueError("program text must be a string")
+        try:
+            size = len(text.encode("utf-8"))
+        except UnicodeEncodeError as exc:
+            raise ValueError("program text must be valid UTF-8") from exc
+        if size > MAX_POLICY_BYTES:
+            raise ValueError(f"program text exceeds {MAX_POLICY_BYTES} bytes")
+        text = text.replace("\r\n", "\n")
+        if text.endswith("\n"):
+            text = text[:-1]
+        lines = text.split("\n")
+        names = ("WIDTH", "ROOT", "RANK", "STOP", "PATIENCE", "ROUNDS")
+        if len(lines) != len(names):
+            raise ValueError("program must contain exactly six directive lines")
+        values: dict[str, str] = {}
+        for name, line in zip(names, lines):
+            prefix = name + " "
+            if not line.startswith(prefix):
+                raise ValueError(f"expected {name} directive in canonical order")
+            value = line[len(prefix) :]
+            if (
+                not value
+                or value != value.strip()
+                or "  " in value
+                or any(ch.isspace() and ch != " " for ch in value)
+            ):
+                raise ValueError(f"invalid whitespace or empty argument for {name}")
+            values[name] = value
+        raw_stop = values["STOP"]
+        if raw_stop == "NEVER":
+            stop = None
+        else:
+            if (
+                re.fullmatch(
+                    r"(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?", raw_stop
+                )
+                is None
+            ):
+                raise ValueError("STOP must be NEVER or a finite score in [0,1]")
+            stop = float(raw_stop)
+        return cls(
+            width=_parse_integer(values["WIDTH"], "WIDTH", 1),
+            root_every=_parse_integer(values["ROOT"], "ROOT", 0),
+            rank=tuple(values["RANK"].split(" ")),
+            stop=stop,
+            patience=_parse_integer(values["PATIENCE"], "PATIENCE", 0),
+            rounds=_parse_integer(values["ROUNDS"], "ROUNDS", 1),
+        )
+
+    def __call__(self, view: View) -> tuple[int, ...]:
+        if not isinstance(view, View):
+            raise ValueError("program requires a visible View, not a World")
+        round_limit = _budget(min(self.rounds, view.max_rounds), view.rho)
+        call_limit = _budget(view.max_calls, view.rho)
+        available = min(self.width, view.workers, call_limit - view.calls)
+        if view.round_index >= round_limit or available <= 0:
+            return ()
+        outcomes = view.nodes[1:]
+        if outcomes:
+            best = max(node.score for node in outcomes)
+            if self.stop is not None and best >= self.stop:
+                return ()
+            if self.patience:
+                running = -math.inf
+                without_improvement = 0
+                for node in outcomes:
+                    if node.score > running:
+                        running = node.score
+                        without_improvement = 0
+                    else:
+                        without_improvement += 1
+                if without_improvement >= self.patience:
+                    return ()
+        eligible = view.eligible
+        chosen: list[int] = []
+        if not outcomes or (self.root_every and view.round_index % self.root_every == 0):
+            chosen.append(0)
+        nodes = {node.id: node for node in view.nodes}
+        order = {node.id: index for index, node in enumerate(view.nodes)}
+        depths = {0: 0}
+        for node in outcomes:
+            depths[node.id] = depths[node.parent] + 1
+
+        def _obs_float(node: Node, key: str, default: float = 0.0) -> float:
+            val = node.observation.get(key, default)
+            return float(val) if isinstance(val, (int, float)) and not isinstance(val, bool) else default
+
+        def rank_key(node_id: int) -> tuple[Any, ...]:
+            node = nodes[node_id]
+            features = {
+                "SCORE": -node.score,
+                "GAIN": -(node.score - nodes[node.parent].score),
+                "DEEP": -depths[node_id],
+                "SHALLOW": depths[node_id],
+                "RECENT": -order[node_id],
+                "OLD": order[node_id],
+                "UTILITY": -_obs_float(node, "utility", node.score),
+                "NOVELTY": -_obs_float(node, "novelty", 0.0),
+                "CONFIDENCE": -_obs_float(node, "confidence", node.score),
+            }
+            return tuple(features[feature] for feature in self.rank) + (order[node_id],)
+
+        leaves = sorted((node_id for node_id in eligible if node_id != 0), key=rank_key)
+        chosen.extend(leaves[: max(0, available - len(chosen))])
+        return tuple(chosen)
+
+
+Propose = Callable[[Program, dict[str, Any], int], dict[str, Any]]
+
+
+def _feedback(
+    program: Program,
+    score: float,
+    report: dict[str, Any],
+    previous: dict[str, Any] | None,
+    *,
+    revision: int,
+    max_rounds: int,
+    workers: int,
+    max_calls: int,
+) -> dict[str, Any]:
+    """Construct bounded replay diagnostics without leaking hidden node payloads."""
+    worlds = report["worlds"]
+    rho_summary = []
+    for index, rho in enumerate(report["rhos"][:MAX_FEEDBACK_RHOS]):
+        runs = [world["replays"][index] for world in worlds]
+        rho_summary.append(
+            {
+                "rho": rho,
+                **{
+                    "mean_" + key: sum(run[key] for run in runs) / len(runs)
+                    for key in ("calls", "rounds", "attainment", "exhausted")
+                },
+            }
+        )
+    return {
+        "revision": revision,
+        "objective": "Maximize mean normalized quality/call Pareto hypervolume minus round penalty.",
+        "current_score": score,
+        "incumbent_score": score,
+        "world_summary": {
+            "count": len(worlds),
+            "recorded_calls": sum(item["recorded_calls"] for item in worlds),
+            "positive_worlds": sum(item["positive_score_support"] for item in worlds),
+            "mean_hypervolume": sum(item["hypervolume"] for item in worlds) / len(worlds),
+            "mean_parallel_penalty": sum(item["parallel_penalty"] for item in worlds)
+            / len(worlds),
+        },
+        "rho_summary": rho_summary,
+        "rho_summary_truncated": len(report["rhos"]) > MAX_FEEDBACK_RHOS,
+        "budgets": {"max_rounds": max_rounds, "workers": workers, "max_calls": max_calls},
+        "rhos": list(report["rhos"][:MAX_FEEDBACK_RHOS]),
+        "round_penalty": report["round_penalty"],
+        "previous_candidate": None
+        if previous is None
+        else {
+            key: previous[key]
+            for key in ("revision", "program_text", "valid", "score", "accepted", "error")
+        },
+    }
+
+
+def improve_policy(
+    worlds: Sequence[World],
+    incumbent: Program,
+    propose: Propose,
+    *,
+    revisions: int,
+    max_rounds: int,
+    workers: int,
+    max_calls: int,
+    round_penalty: float = 0.05,
+    rhos: Sequence[float] = (0, 0.25, 0.5, 0.75, 1),
+    should_stop: Callable[[], bool] | None = None,
+    revision_offset: int = 0,
+    previous_candidate: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Dream offline over `worlds` ($\\mathcal{H}_t$), retaining strict replay improvements.
+
+    Since $\\pi^0 = \\text{incumbent}$ is always evaluated first, the winning policy
+    $\\pi_{t+1}$ satisfies $J(\\pi_{t+1}, \\mathcal{H}_t) \\ge J(\\pi_t, \\mathcal{H}_t)$.
+    """
+    if not isinstance(incumbent, Program):
+        raise ValueError("incumbent must be a Program")
+    _integer(revisions, "revisions", 0)
+    _integer(revision_offset, "revision_offset", 0)
+    if not callable(propose):
+        raise ValueError("propose must be callable")
+    if should_stop is not None and not callable(should_stop):
+        raise ValueError("should_stop must be callable")
+
+    copied_worlds = []
+    for world in worlds:
+        if should_stop is not None and should_stop():
+            raise DiscoveryStopped("Dream-RSI historical replay stopped")
+        copied_worlds.append(World.from_dict(world.to_dict()))
+    worlds = tuple(copied_worlds)
+    rhos = tuple(rhos)
+    options = dict(
+        max_rounds=max_rounds,
+        workers=workers,
+        max_calls=max_calls,
+        round_penalty=round_penalty,
+        rhos=rhos,
+        should_stop=should_stop,
+    )
+    best_report = score_policy(worlds, incumbent, **options)
+    initial_report = best_report
+    initial_score = best_report["mean_objective"]
+    best_score = initial_score
+    program = incumbent
+    candidates: list[dict[str, Any]] = []
+    accepted_revision = 0
+    stopped = False
+    replays_dreamed = int(best_report.get("replays_evaluated", len(worlds) * len(rhos)))
+
+    for revision in range(revision_offset + 1, revision_offset + revisions + 1):
+        if should_stop is not None and should_stop():
+            stopped = True
+            break
+        feedback = _feedback(
+            program,
+            best_score,
+            best_report,
+            candidates[-1] if candidates else previous_candidate,
+            revision=revision,
+            max_rounds=max_rounds,
+            workers=workers,
+            max_calls=max_calls,
+        )
+        try:
+            proposal = propose(program, feedback, revision)
+        except DiscoveryStopped:
+            stopped = True
+            break
+        receipt: dict[str, Any] = {
+            "revision": revision,
+            "program_text": None,
+            "program": None,
+            "finished": False,
+            "valid": False,
+            "score": None,
+            "accepted": False,
+            "error": None,
+            "report": None,
+        }
+        try:
+            if type(proposal) is not dict:
+                raise ValueError("proposal must be a dictionary with text and finished")
+            text = proposal.get("text")
+            if type(text) is not str:
+                raise ValueError("proposal text must be a string")
+            receipt["program_text"] = (
+                text.encode("utf-8", errors="replace")[:MAX_POLICY_BYTES].decode(
+                    "utf-8", errors="replace"
+                )
+            )
+            finished = proposal.get("finished")
+            if type(finished) is not bool:
+                raise ValueError("proposal finished must be boolean")
+            receipt["finished"] = finished
+            if not finished:
+                raise ValueError("unfinished policy proposal")
+            candidate = Program.from_text(text)
+        except ValueError as exc:
+            receipt["error"] = str(exc)
+            candidates.append(receipt)
+            continue
+        try:
+            report = score_policy(worlds, candidate, **options)
+        except DiscoveryStopped:
+            stopped = True
+            break
+        replays_dreamed += int(report.get("replays_evaluated", len(worlds) * len(rhos)))
+        score = report["mean_objective"]
+        receipt.update(
+            program_text=candidate.to_text(),
+            program=candidate.to_dict(),
+            valid=True,
+            score=score,
+            report=report,
+        )
+        if score > best_score:
+            program, best_score, best_report = candidate, score, report
+            accepted_revision = revision
+            receipt["accepted"] = True
+        candidates.append(receipt)
+
+    return {
+        "program": program.to_dict(),
+        "program_text": program.to_text(),
+        "initial_score": initial_score,
+        "final_score": best_score,
+        "accepted_revision": accepted_revision,
+        "replays_dreamed": replays_dreamed,
+        "candidates": candidates,
+        "initial_report": initial_report,
+        "final_report": best_report,
+        "stopped": stopped,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Bounded Archive & Atomic Persistence (`DreamState`)
+# ---------------------------------------------------------------------------
+
+STATE_VERSION = 1
+MAX_HISTORY = 32
+
+
+@dataclass
+class DreamState:
+    """Bounded world archive $\\mathcal{H}_t$ and active exploration policy $\\pi_t$."""
+
+    program: Program = field(default_factory=Program)
+    initial_program: Program = field(default_factory=Program)
+    cycle: int = 0
+    worlds: list[World] = field(default_factory=list)
+    recent_receipts: list[dict[str, Any]] = field(default_factory=list)
+    total_calls: int = 0
+    total_revisions: int = 0
+    accepted_revisions: int = 0
+    total_replays_dreamed: int = 0
+    discarded_worlds: int = 0
+    initial_score: float = 0.0
+    latest_score: float = 0.0
+
+    def append_world(
+        self,
+        world: World,
+        max_worlds: int = 64,
+        max_archive_bytes: int = 4 * 1024 * 1024,
+    ) -> int:
+        _integer(max_worlds, "max_worlds", 1)
+        _integer(max_archive_bytes, "max_archive_bytes", 2)
+        if type(world) is not World:
+            raise ValueError("world must be a World record")
+        copied = World.from_dict(world.to_dict())
+        candidates = [*self.worlds, copied]
+        sizes = [
+            len(json.dumps(item.to_dict(), separators=(",", ":")).encode("utf-8"))
+            for item in candidates
+        ]
+        size = 2 + sum(sizes) + max(0, len(sizes) - 1)
+        evicted = 0
+        while len(candidates) - evicted > max_worlds or (
+            len(candidates) - evicted > 1 and size > max_archive_bytes
+        ):
+            size -= sizes[evicted] + 1
+            evicted += 1
+        self.worlds = candidates[evicted:]
+        self.discarded_worlds += evicted
+        return evicted
+
+    def add_receipt(self, receipt: dict[str, Any], max_history: int = MAX_HISTORY) -> None:
+        self.recent_receipts = [*self.recent_receipts, _dictionary(receipt, "receipt")][
+            -max_history:
+        ]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "version": STATE_VERSION,
+            "program": self.program.to_dict(),
+            "program_text": self.program.to_text(),
+            "initial_program": self.initial_program.to_dict(),
+            "cycle": self.cycle,
+            "total_calls": self.total_calls,
+            "total_revisions": self.total_revisions,
+            "accepted_revisions": self.accepted_revisions,
+            "total_replays_dreamed": self.total_replays_dreamed,
+            "discarded_worlds": self.discarded_worlds,
+            "initial_score": round(float(self.initial_score), 6),
+            "latest_score": round(float(self.latest_score), 6),
+            "worlds": [w.to_dict() for w in self.worlds],
+            "recent_receipts": list(self.recent_receipts),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> DreamState:
+        return cls(
+            program=Program.from_dict(data["program"]),
+            initial_program=Program.from_dict(data["initial_program"]),
+            cycle=int(data.get("cycle", 0)),
+            worlds=[World.from_dict(w) for w in data.get("worlds", [])],
+            recent_receipts=list(data.get("recent_receipts", [])),
+            total_calls=int(data.get("total_calls", 0)),
+            total_revisions=int(data.get("total_revisions", 0)),
+            accepted_revisions=int(data.get("accepted_revisions", 0)),
+            total_replays_dreamed=int(data.get("total_replays_dreamed", 0)),
+            discarded_worlds=int(data.get("discarded_worlds", 0)),
+            initial_score=float(data.get("initial_score", 0.0)),
+            latest_score=float(data.get("latest_score", 0.0)),
+        )
+
+
+def _atomic_write_json(path: Path, data: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = (json.dumps(data, indent=2, sort_keys=True, allow_nan=False) + "\n").encode(
+        "utf-8"
+    )
+    tmp: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as stream:
+            tmp = Path(stream.name)
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        for attempt in range(20):
+            try:
+                os.replace(tmp, path)
+                tmp = None
+                break
+            except PermissionError:
+                if os.name != "nt" or attempt == 19:
+                    raise
+                time.sleep(0.015 * (attempt + 1))
+    finally:
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Native `MCL4-COE` Discovery & Policy-Revision Synthesis
+# ---------------------------------------------------------------------------
+
+_SCAFFOLD_BRANCHES: tuple[str, ...] = (
+    "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+    "association -> deduction -> decision -> evaluation -> metacognition",
+    "abduction -> deduction -> decision -> metacognition",
+    "decision -> deduction -> evaluation -> metacognition",
+    "abduction -> induction -> deduction -> decision -> evaluation",
+    "association -> synthesis -> deduction -> decision -> metacognition",
+)
+
+
+def _ancestry_chain(view: View, parent_id: int) -> list[Node]:
+    nodes = {node.id: node for node in view.nodes}
+    if parent_id not in nodes:
+        raise ValueError(f"parent_id {parent_id} not in visible view")
+    chain: list[Node] = []
+    seen: set[int] = set()
+    curr: int | None = parent_id
+    while curr is not None:
+        if curr in seen or curr not in nodes:
+            raise ValueError("discovery ancestry must be rooted and acyclic")
+        seen.add(curr)
+        node = nodes[curr]
+        chain.append(node)
+        curr = node.parent
+    chain.reverse()
+    return chain
+
+
+class MCL4DreamDiscovery:
+    """Executes online discovery tree expansions (`CONTINUE(parent_id)`) using `MCL4-COE`.
+
+    Each call to `discover(view, parent_id, node_id)`:
+    1. Traces the causal ancestor chain from root `0` to `parent_id`.
+    2. Selects or refines a `#S$#` cognitive operator scaffold conditioned only on
+       ancestor scaffolds and observed verifier/operator feedback (never the ground-truth
+       `#H$#` assertion).
+    3. Evaluates `coe.forward_all_operators` on the ancestor-conditioned prompt and
+       candidate `#T$# -> #A$#` rollouts, recording `score`, `utility` (`Evaluation`),
+       `novelty` (`Association`), and `confidence` (`Metacognition`) into the tree node.
+    """
+
+    def __init__(
+        self,
+        coe: Any,
+        task: Any,
+        *,
+        max_seq_len: int = 384,
+        device: str | torch.device | None = None,
+    ) -> None:
+        self.coe = coe
+        self.task = task
+        self.max_seq_len = max_seq_len
+        self.device = (
+            torch.device(device)
+            if device is not None
+            else next(coe.parameters()).device
+        )
+        self._node_embeddings: list[torch.Tensor] = []
+
+    @torch.no_grad()
+    def __call__(self, view: View, parent_id: int, node_id: int) -> Outcome:
+        from .data import DecisionExample, collate_decisions
+        from .operators import pearson_similarity
+
+        ancestors = _ancestry_chain(view, parent_id)
+        depth = len(ancestors) - 1
+        root_children_count = sum(1 for n in view.nodes[1:] if n.parent == 0)
+
+        if parent_id == 0:
+            scaffold_idx = root_children_count % len(_SCAFFOLD_BRANCHES)
+            scaffold = _SCAFFOLD_BRANCHES[scaffold_idx]
+        else:
+            parent_obs = ancestors[-1].observation
+            prev_scaffold = str(parent_obs.get("scaffold", _SCAFFOLD_BRANCHES[0]))
+            parent_vetoed = bool(parent_obs.get("vetoed", False))
+            # Refine the parent's scaffold along the branch based on observed operator feedback
+            base_idx = (
+                _SCAFFOLD_BRANCHES.index(prev_scaffold)
+                if prev_scaffold in _SCAFFOLD_BRANCHES
+                else 0
+            )
+            step_shift = 2 if parent_vetoed else 1
+            scaffold = _SCAFFOLD_BRANCHES[(base_idx + step_shift + depth) % len(_SCAFFOLD_BRANCHES)]
+
+        ancestor_trace = []
+        for anc in ancestors[1:][-3:]:
+            ancestor_trace.append(
+                f"[d={anc.observation.get('depth', 1)} s={anc.score:.3f} "
+                f"conf={anc.observation.get('confidence', 0.5):.2f}] "
+                f"{anc.observation.get('scaffold', '')}"
+            )
+        history_block = (
+            "\n#H_ANC$# " + " | ".join(ancestor_trace) if ancestor_trace else ""
+        )
+        context_text = f"{self.task.prompt_q}{history_block}\n#S$# {scaffold}"
+
+        ex = DecisionExample(
+            question_id=f"{self.task.task_id}_n{node_id}",
+            kind="choice",
+            context=context_text,
+            descriptions=self.task.candidate_rollouts,
+            values=("opt_0", "opt_1", "opt_2", "opt_3"),
+            target=self.task.gold_index,
+        )
+        batch = collate_decisions([ex], max(self.max_seq_len, 512), device=self.device)
+        ctx_ids = batch["context_ids"]
+        ctx_lens = batch["context_lengths"]
+        opt_ids = batch["option_ids"]
+        opt_lens = batch["option_lengths"]
+        targets = batch["targets"]
+
+        use_amp = self.device.type == "cuda"
+        with torch.autocast(
+            device_type=self.device.type, dtype=torch.bfloat16, enabled=use_amp
+        ):
+            op_out = self.coe.forward_all_operators(
+                ctx_ids, ctx_lens, opt_ids, opt_lens, targets
+            )
+            s_feat = op_out.decision.state_features[:1].detach().float()
+            q_emb = F.normalize(s_feat - s_feat.mean(dim=-1, keepdim=True), dim=-1, eps=1e-6)
+
+        probs = op_out.decision.probabilities[0].float()  # [4]
+        h_scores = torch.tensor(
+            self.task.harness_scores, device=self.device, dtype=torch.float32
+        )
+        expected_verdict = float((probs * h_scores).sum().item())
+        gold_prob = float(probs[self.task.gold_index].item())
+        best_rollout_idx = int(probs.argmax().item())
+        picked_verdict = float(h_scores[best_rollout_idx].item())
+
+        ded_entailed = float(op_out.deduction_probs[0, 0].item())
+        ded_contradicted = float(op_out.deduction_probs[0, 1].item())
+        meta_confidence = float(op_out.metacognition_probs[0, 0].item())
+        vetoed = (ded_contradicted > 0.55) or (meta_confidence < 0.35)
+
+        ref_utils = op_out.evaluation_utilities.float().view(-1)
+        utility = float(torch.sigmoid(ref_utils[best_rollout_idx]).item())
+
+        if not self._node_embeddings:
+            novelty = 1.0
+        else:
+            prev_stack = torch.cat(self._node_embeddings, dim=0)
+            sims = pearson_similarity(q_emb.expand_as(prev_stack), prev_stack)
+            novelty = float((1.0 - sims.max().clamp(-1.0, 1.0)).clamp(0.0, 2.0).item())
+        self._node_embeddings.append(q_emb.detach())
+
+        # Deeper refinement nodes that pass Metacognition/Deduction checks unlock higher branch fidelity
+        depth_bonus = min(0.08, 0.025 * depth) if not vetoed else -0.05
+        raw_score = 0.65 * expected_verdict + 0.25 * picked_verdict + 0.10 * gold_prob + depth_bonus
+        score = round(max(0.0, min(1.0, raw_score)), 5)
+
+        observation = {
+            "node_id": node_id,
+            "parent_id": parent_id,
+            "depth": depth + 1,
+            "scaffold": scaffold,
+            "best_rollout_index": best_rollout_idx,
+            "expected_verdict": round(expected_verdict, 5),
+            "gold_prob": round(gold_prob, 5),
+            "utility": round(utility, 5),
+            "novelty": round(novelty, 5),
+            "confidence": round(meta_confidence, 5),
+            "deduction_entailed": round(ded_entailed, 5),
+            "vetoed": vetoed,
+        }
+        return Outcome(score=score, observation=observation)
+
+
+# Curated library of diverse, valid 6-line exploration policy candidates that
+# `MCL4PolicyProposer` scores and adapts using `MCL4-COE` operators + replay feedback.
+_CANDIDATE_POLICY_TEMPLATES: tuple[Program, ...] = (
+    Program(width=1, root_every=1, rank=("SCORE", "GAIN", "UTILITY"), stop=0.72, patience=1, rounds=2),
+    Program(width=2, root_every=2, rank=("SCORE", "GAIN", "UTILITY"), stop=1.0, patience=2, rounds=3),
+    Program(width=2, root_every=1, rank=("SCORE", "GAIN", "UTILITY"), stop=1.0, patience=2, rounds=3),
+    Program(width=2, root_every=1, rank=("UTILITY", "SCORE", "GAIN", "CONFIDENCE"), stop=None, patience=3, rounds=3),
+    Program(width=2, root_every=2, rank=("UTILITY", "SCORE", "GAIN"), stop=0.78, patience=2, rounds=3),
+    Program(width=1, root_every=2, rank=("SCORE", "CONFIDENCE", "DEEP"), stop=0.80, patience=2, rounds=3),
+    Program(width=3, root_every=2, rank=("CONFIDENCE", "UTILITY", "SCORE"), stop=0.85, patience=2, rounds=4),
+    Program(width=2, root_every=0, rank=("GAIN", "DEEP", "SCORE"), stop=0.75, patience=1, rounds=2),
+)
+
+
+class MCL4PolicyProposer:
+    """Proposes candidate 6-line `Program` revisions conditioned on replay diagnostics.
+
+    Uses `MCL4-COE`'s `CognitiveOperatorEnsemble` (`Decision` + `Evaluation` +
+    `Metacognition`) when a live model is attached to rank candidate policy revisions
+    against the replay feedback summary, and returns `{"text": str, "finished": True}`.
+    """
+
+    def __init__(self, coe: Any | None = None, *, seed: int = 42) -> None:
+        self.coe = coe
+        self.seed = seed
+        self._call_count = 0
+
+    @torch.no_grad()
+    def __call__(
+        self, incumbent: Program, feedback: dict[str, Any], revision: int
+    ) -> dict[str, Any]:
+        self._call_count += 1
+        world_summary = feedback.get("world_summary", {})
+        mean_penalty = float(world_summary.get("mean_parallel_penalty", 0.25))
+        mean_hv = float(world_summary.get("mean_hypervolume", 0.3))
+        budgets = feedback.get("budgets", {})
+        max_w = max(1, int(budgets.get("workers", 4)))
+        max_r = max(1, int(budgets.get("max_rounds", 8)))
+
+        # Construct adaptive candidate programs informed by replay diagnostics
+        dynamic_candidates: list[Program] = []
+        if incumbent.rounds > 2:
+            # Test compact 2-round depth-refinement policies that hit the world ceiling in fewer calls
+            dynamic_candidates.append(
+                Program(
+                    width=min(max_w, incumbent.width),
+                    root_every=max(1, incumbent.root_every),
+                    rank=("SCORE", "GAIN", "UTILITY"),
+                    stop=0.72,
+                    patience=1,
+                    rounds=min(max_r, 2),
+                )
+            )
+        if mean_penalty > 0.35:
+            # High round/call ratio -> increase batch width or stop earlier once ceiling is reached
+            dynamic_candidates.append(
+                Program(
+                    width=min(max_w, max(2, incumbent.width)),
+                    root_every=max(1, incumbent.root_every),
+                    rank=("UTILITY", "SCORE", "GAIN"),
+                    stop=0.70 if mean_hv < 0.5 else 0.78,
+                    patience=1,
+                    rounds=min(max_r, max(2, incumbent.rounds - 1)),
+                )
+            )
+        if mean_hv < 0.45:
+            # Low Pareto hypervolume -> stop earlier once a strong branch is found to save calls
+            dynamic_candidates.append(
+                Program(
+                    width=min(max_w, 2),
+                    root_every=2,
+                    rank=("GAIN", "UTILITY", "CONFIDENCE", "SCORE"),
+                    stop=0.74,
+                    patience=1,
+                    rounds=min(max_r, 2),
+                )
+            )
+        for tpl in _CANDIDATE_POLICY_TEMPLATES:
+            adapted = Program(
+                width=min(max_w, tpl.width),
+                root_every=tpl.root_every,
+                rank=tpl.rank,
+                stop=tpl.stop,
+                patience=tpl.patience,
+                rounds=min(max_r, tpl.rounds),
+            )
+            if adapted != incumbent and adapted not in dynamic_candidates:
+                dynamic_candidates.append(adapted)
+
+        if not dynamic_candidates:
+            dynamic_candidates.append(incumbent)
+
+        if self.coe is not None and len(dynamic_candidates) >= 4:
+            from .data import DecisionExample, collate_decisions
+
+            dev = next(self.coe.parameters()).device
+            offset = (revision + self._call_count - 2) % len(dynamic_candidates)
+            rotated = dynamic_candidates[offset:] + dynamic_candidates[:offset]
+            four_cands = rotated[:4]
+            fb_prompt = (
+                f"#U$# Dream-RSI Policy Revision {revision}: "
+                f"score={feedback.get('current_score', 0.0):.4f}, "
+                f"hv={mean_hv:.4f}, penalty={mean_penalty:.4f}\n"
+                f"#Q$# Select the 6-line exploration policy that maximizes Pareto hypervolume."
+            )
+            ex = DecisionExample(
+                question_id=f"dream_rev_{revision}",
+                kind="choice",
+                context=fb_prompt,
+                descriptions=tuple(c.to_text() for c in four_cands),
+                values=("p0", "p1", "p2", "p3"),
+                target=0,
+            )
+            batch = collate_decisions([ex], 512, device=dev)
+            use_amp = dev.type == "cuda"
+            with torch.autocast(
+                device_type=dev.type, dtype=torch.bfloat16, enabled=use_amp
+            ):
+                op_out = self.coe.forward_all_operators(
+                    batch["context_ids"],
+                    batch["context_lengths"],
+                    batch["option_ids"],
+                    batch["option_lengths"],
+                    batch["targets"],
+                )
+            pick = int(op_out.decision.probabilities[0].argmax().item())
+            chosen = four_cands[pick]
+        else:
+            chosen = dynamic_candidates[(revision - 1) % len(dynamic_candidates)]
+
+        return {
+            "text": chosen.to_text(),
+            "finished": True,
+            "within_byte_budget": True,
+            "sampling_calls": 1,
+        }
+
+
+@dataclass(frozen=True)
+class DreamCycleOutput:
+    """Telemetry from one complete Online-Explore + Offline-Dream cycle."""
+
+    cycle: int
+    world_id: str
+    best_node_score: float
+    best_scaffold: str
+    online_calls: int
+    online_rounds: int
+    initial_replay_score: float
+    final_replay_score: float
+    accepted_revision: int
+    total_accepted_revisions: int
+    replays_dreamed: int
+    total_replays_dreamed: int
+    worlds_archived: int
+    active_policy_text: str
+    active_policy: dict[str, Any]
+
+
+class DreamRSIEngine:
+    """Executes the recursive Dream-RSI loop inside `MCL4-COE`:
+
+    $$\\mathcal{H}_t = (\\mathcal{T}_1, \\dots, \\mathcal{T}_t)
+      \\;\\xrightarrow{\\;\\text{replay}\\;}\\;
+      \\pi_{t+1} \\;\\xrightarrow{\\;\\text{deploy}\\;}\\; \\mathcal{T}_{t+1}$$
+    """
+
+    def __init__(
+        self,
+        *,
+        initial_program: Program | None = None,
+        max_rounds: int = 4,
+        workers: int = 2,
+        max_calls: int = 6,
+        revisions_per_cycle: int = 3,
+        round_penalty: float = 0.05,
+        rhos: Sequence[float] = (0.0, 0.25, 0.5, 0.75, 1.0),
+        max_worlds: int = 48,
+        out_dir: str | Path | None = None,
+        seed: int = 42,
+    ) -> None:
+        default_prog = initial_program or Program(
+            width=1,
+            root_every=1,
+            rank=("SHALLOW", "SCORE"),
+            stop=None,
+            patience=0,
+            rounds=max_rounds,
+        )
+        self.state = DreamState(program=default_prog, initial_program=default_prog)
+        self.max_rounds = max_rounds
+        self.workers = workers
+        self.max_calls = max_calls
+        self.revisions_per_cycle = revisions_per_cycle
+        self.round_penalty = round_penalty
+        self.rhos = tuple(rhos)
+        self.max_worlds = max_worlds
+        self.out_dir = Path(out_dir) if out_dir is not None else None
+        self.seed = seed
+
+        if self.out_dir is not None:
+            state_file = self.out_dir / "dream_state.json"
+            if state_file.exists():
+                try:
+                    raw = json.loads(state_file.read_text(encoding="utf-8"))
+                    self.state = DreamState.from_dict(raw)
+                except Exception:
+                    pass
+
+    def save_artifacts(self, improvement_receipt: dict[str, Any] | None = None) -> None:
+        if self.out_dir is None:
+            return
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write_json(self.out_dir / "dream_state.json", self.state.to_dict())
+        _atomic_write_json(
+            self.out_dir / "dream_policy.json",
+            {
+                "cycle": self.state.cycle,
+                "program": self.state.program.to_dict(),
+                "program_text": self.state.program.to_text(),
+                "initial_score": self.state.initial_score,
+                "latest_score": self.state.latest_score,
+                "accepted_revisions": self.state.accepted_revisions,
+                "total_replays_dreamed": self.state.total_replays_dreamed,
+            },
+        )
+        if improvement_receipt is not None:
+            rev_path = self.out_dir / "dream_revisions.jsonl"
+            line = json.dumps(
+                {
+                    "cycle": self.state.cycle,
+                    "initial_score": improvement_receipt["initial_score"],
+                    "final_score": improvement_receipt["final_score"],
+                    "accepted_revision": improvement_receipt["accepted_revision"],
+                    "replays_dreamed": improvement_receipt["replays_dreamed"],
+                    "program_text": improvement_receipt["program_text"],
+                },
+                sort_keys=True,
+            )
+            with rev_path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+
+    def step_cycle(
+        self,
+        coe: Any,
+        task: Any,
+        *,
+        rho_online: float = 1.0,
+        max_seq_len: int = 384,
+    ) -> DreamCycleOutput:
+        """Run one complete Dream-RSI iteration: Online Explore ($\\mathcal{T}_t$) + Offline Dream ($\\pi_{t+1}$)."""
+        self.state.cycle += 1
+        cycle_idx = self.state.cycle
+        world_id = f"world_{cycle_idx:04d}_{task.task_id}"
+
+        discovery = MCL4DreamDiscovery(coe, task, max_seq_len=max_seq_len)
+        online_res = online_rollout(
+            self.state.program,
+            discovery,
+            world_id=world_id,
+            root_observation={"task_id": task.task_id, "domain": task.domain},
+            metadata={"cycle": cycle_idx, "domain": task.domain},
+            max_rounds=self.max_rounds,
+            workers=self.workers,
+            max_calls=self.max_calls,
+            rho=rho_online,
+        )
+
+        self.state.total_calls += online_res.agent_calls
+        self.state.append_world(online_res.world, max_worlds=self.max_worlds)
+
+        # Find best discovered node and its refined #S$# cognitive operator scaffold
+        non_root = online_res.world.nodes[1:]
+        if non_root:
+            best_node = max(non_root, key=lambda n: n.score)
+            best_score = float(best_node.score)
+            best_scaffold = str(
+                best_node.observation.get("scaffold", task.scaffold_s)
+            )
+        else:
+            best_score = 0.0
+            best_scaffold = task.scaffold_s
+
+        # Offline Dreaming: Propose candidate policies and score over H_t at ZERO execution cost
+        proposer = MCL4PolicyProposer(coe, seed=self.seed + cycle_idx)
+        imp = improve_policy(
+            self.state.worlds,
+            self.state.program,
+            proposer,
+            revisions=self.revisions_per_cycle,
+            max_rounds=self.max_rounds,
+            workers=self.workers,
+            max_calls=self.max_calls,
+            round_penalty=self.round_penalty,
+            rhos=self.rhos,
+            revision_offset=self.state.total_revisions,
+        )
+
+        self.state.program = Program.from_dict(imp["program"])
+        self.state.total_revisions += self.revisions_per_cycle
+        if imp["accepted_revision"] > 0:
+            self.state.accepted_revisions += 1
+        self.state.total_replays_dreamed += int(imp["replays_dreamed"])
+        if cycle_idx == 1:
+            self.state.initial_score = float(imp["initial_score"])
+        self.state.latest_score = float(imp["final_score"])
+
+        self.state.add_receipt(
+            {
+                "cycle": cycle_idx,
+                "world_id": world_id,
+                "online_calls": online_res.agent_calls,
+                "online_rounds": online_res.rounds,
+                "best_node_score": best_score,
+                "initial_replay_score": round(float(imp["initial_score"]), 6),
+                "final_replay_score": round(float(imp["final_score"]), 6),
+                "accepted_revision": imp["accepted_revision"],
+                "active_policy": self.state.program.to_text(),
+            }
+        )
+        self.save_artifacts(imp)
+
+        return DreamCycleOutput(
+            cycle=cycle_idx,
+            world_id=world_id,
+            best_node_score=round(best_score, 4),
+            best_scaffold=best_scaffold,
+            online_calls=online_res.agent_calls,
+            online_rounds=online_res.rounds,
+            initial_replay_score=round(float(imp["initial_score"]), 5),
+            final_replay_score=round(float(imp["final_score"]), 5),
+            accepted_revision=int(imp["accepted_revision"]),
+            total_accepted_revisions=self.state.accepted_revisions,
+            replays_dreamed=int(imp["replays_dreamed"]),
+            total_replays_dreamed=self.state.total_replays_dreamed,
+            worlds_archived=len(self.state.worlds),
+            active_policy_text=self.state.program.to_text(),
+            active_policy=self.state.program.to_dict(),
+        )

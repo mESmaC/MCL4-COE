@@ -1,0 +1,457 @@
+"""Block-aligned byte tokenization, 0x8000 prompt masking, and typed decision collation.
+
+Unifies:
+- `mini/src/mini_moe/data.py` (`ByteTokenizer`, `TokenBlockDataset` with `0x8000`
+  high-bit prompt masking, `EpochBlockSampler`, `HostBatchPrefetcher`), and
+- `mcattn/src/mcattn/decision.py` (`DecisionExample`, `parse_request`, `collate_decisions`,
+  `format_answers`).
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import operator
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+
+
+TRACE_MARKERS: dict[str, str] = {
+    "user": "#U$#",
+    "question": "#Q$#",
+    "schedule": "#S$#",
+    "hypothesis": "#H$#",
+    "thought": "#T$#",
+    "answer": "#A$#",
+}
+
+
+class ByteTokenizer:
+    """UTF-8 byte tokenizer with special control IDs (`pad=256, bos=257, eos=258, unk=259`)."""
+
+    pad_id: int = 256
+    bos_id: int = 257
+    eos_id: int = 258
+    unk_id: int = 259
+    vocab_size: int = 260
+    prompt_mask_bit: int = 0x8000
+
+    def encode(
+        self,
+        text: str,
+        *,
+        add_bos: bool = True,
+        add_eos: bool = True,
+    ) -> list[int]:
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
+        tokens: list[int] = []
+        if add_bos:
+            tokens.append(self.bos_id)
+        tokens.extend(text.encode("utf-8"))
+        if add_eos:
+            tokens.append(self.eos_id)
+        return tokens
+
+    def encode_masked_turn(
+        self,
+        prompt: str,
+        thought: str,
+        answer: str,
+        *,
+        seq_len: int | None = None,
+    ) -> list[int]:
+        """Encode a `#U$# -> #T$# -> #A$#` micro-trace with `0x8000` high-bit masking on `#U$#`.
+
+        Why 4-byte symmetric markers (`#U$#`, `#Q$#`, `#S$#`, `#H$#`, `#T$#`, `#A$#`):
+        - Zero collision with programming-language identifiers, shell/Perl/PHP `$VAR` syntax,
+          or regex end-of-line `T$` anchors.
+        - Exact 4-byte footprint (`[35, X, 36, 35]`) fits 100% inside a single `MCL4`
+          mandatory local window (`markov_local_tokens = 4`, `{q, q-1, q-2, q-3}`) at Layer 0.
+        - Rule for `MCL4-COE`: 100% of reasoning traces must include a non-empty `#T$#`
+          scratchpad before `#A$#` (no blind `#U$# -> #A$#` guessing).
+        """
+        if not prompt.strip():
+            raise ValueError("prompt (#U$#) must be non-empty")
+        if not thought.strip():
+            raise ValueError("thought (#T$#) scratchpad is mandatory in MCL4-COE micro-traces")
+        if not answer.strip():
+            raise ValueError("answer (#A$#) must be non-empty")
+
+        prefix_str = f"#U$# {prompt.strip()}\n"
+        completion_str = f"#T$# {thought.strip()}\n#A$# {answer.strip()}"
+
+        prefix_ids = [self.bos_id, *prefix_str.encode("utf-8")]
+        masked_prefix = [tok | self.prompt_mask_bit for tok in prefix_ids]
+        completion_ids = [*completion_str.encode("utf-8"), self.eos_id]
+        full = masked_prefix + completion_ids
+
+        if seq_len is not None:
+            if len(full) > seq_len:
+                raise ValueError(
+                    f"Micro-trace length ({len(full)}) exceeds block seq_len={seq_len}; "
+                    "never sever traces mid-thought across blocks"
+                )
+            full.extend([self.pad_id] * (seq_len - len(full)))
+        return full
+
+    def decode(self, token_ids: list[int] | torch.Tensor) -> str:
+        if isinstance(token_ids, torch.Tensor):
+            token_ids = token_ids.detach().cpu().tolist()
+        raw_bytes = bytearray()
+        for tid in token_ids:
+            clean = int(tid) & 0x7FFF
+            if 0 <= clean < 256:
+                raw_bytes.append(clean)
+        return raw_bytes.decode("utf-8", errors="replace")
+
+
+class TokenBlockDataset(Dataset):
+    """Memory-mapped uint16 block dataset with 0x8000 high-bit prompt masking."""
+
+    def __init__(self, path: str | Path, seq_len: int, *, include_partial: bool = False) -> None:
+        if isinstance(seq_len, bool) or not isinstance(seq_len, int) or seq_len <= 0:
+            raise ValueError("seq_len must be a positive integer")
+        self.path = Path(path).expanduser().resolve(strict=True)
+        self.seq_len = seq_len
+        self.include_partial = include_partial
+        size = self.path.stat().st_size
+        if size % np.dtype("<u2").itemsize:
+            raise ValueError(f"Malformed uint16 token file (odd byte length): {self.path}")
+        self.token_count = size // np.dtype("<u2").itemsize
+        minimum_tokens = 2 if include_partial else self.seq_len + 1
+        if self.token_count < minimum_tokens:
+            raise ValueError(
+                f"Insufficient tokens in {self.path}: found {self.token_count}, need >= {minimum_tokens}"
+            )
+        self._tokens: np.memmap | None = None
+
+    def __len__(self) -> int:
+        targets = self.token_count - 1
+        return (
+            (targets + self.seq_len - 1) // self.seq_len
+            if self.include_partial
+            else targets // self.seq_len
+        )
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        index = operator.index(index)
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        batch = self.batch([index])
+        return {name: tensor[0] for name, tensor in batch.items()}
+
+    def batch(self, indices, *, pin_memory: bool = False) -> dict[str, torch.Tensor]:
+        indices = np.asarray(indices, dtype=np.int64)
+        if indices.ndim != 1 or not indices.size:
+            raise ValueError("indices must be a nonempty 1D sequence")
+        if np.any(indices < 0) or np.any(indices >= len(self)):
+            raise IndexError("Block index out of range")
+        if self._tokens is None:
+            self._tokens = np.memmap(self.path, mode="r", dtype="<u2")
+        offsets = indices[:, None] * self.seq_len + np.arange(self.seq_len + 1)
+        valid = offsets < self.token_count
+        raw_block = np.asarray(
+            self._tokens[np.minimum(offsets, self.token_count - 1)], dtype=np.int64
+        )
+        masked_targets = (raw_block[:, 1:] & 0x8000) != 0
+        block = raw_block & 0x7FFF
+        inputs = np.array(block[:, :-1], copy=True)
+        labels = np.array(block[:, 1:], copy=True)
+        inputs[~valid[:, :-1]] = ByteTokenizer.pad_id
+        labels[
+            (~valid[:, 1:])
+            | masked_targets
+            | (labels == ByteTokenizer.pad_id)
+            | (inputs == ByteTokenizer.pad_id)
+        ] = -100
+        result = {"input_ids": torch.from_numpy(inputs), "labels": torch.from_numpy(labels)}
+        return (
+            {name: tensor.pin_memory() for name, tensor in result.items()} if pin_memory else result
+        )
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = self.__dict__.copy()
+        state["_tokens"] = None
+        return state
+
+
+class EpochBlockSampler:
+    """Deterministic full-epoch block shuffle with resumable cursor."""
+
+    def __init__(self, num_blocks: int, seed: int = 42) -> None:
+        if num_blocks < 1:
+            raise ValueError("num_blocks must be positive")
+        self.num_blocks = num_blocks
+        self.seed = seed
+        self.epoch = 0
+        self.cursor = 0
+        self._order: torch.Tensor | None = None
+
+    def peek(self, count: int) -> torch.Tensor:
+        if count < 1:
+            raise ValueError("count must be positive")
+        if self.cursor == self.num_blocks:
+            return torch.empty(0, dtype=torch.int64)
+        if self._order is None:
+            generator = torch.Generator(device="cpu").manual_seed(self.seed + self.epoch)
+            self._order = torch.randperm(self.num_blocks, generator=generator)
+        end = min(self.cursor + count, self.num_blocks)
+        return self._order[self.cursor : end]
+
+    def take(self, count: int) -> torch.Tensor:
+        if count < 1:
+            raise ValueError("count must be positive")
+        if self.cursor == self.num_blocks:
+            self.epoch += 1
+            self.cursor = 0
+            self._order = None
+        indices = self.peek(count)
+        self.cursor += len(indices)
+        return indices
+
+
+class HostBatchPrefetcher:
+    """Single-worker background host batch prefetcher with optional pinned memory."""
+
+    def __init__(self, dataset: TokenBlockDataset, micro_batch_size: int, *, pin_memory: bool = True):
+        if isinstance(micro_batch_size, bool) or not isinstance(micro_batch_size, int) or micro_batch_size < 1:
+            raise ValueError("micro_batch_size must be a positive integer")
+        self.dataset = dataset
+        self.micro_batch_size = micro_batch_size
+        self.pin_memory = pin_memory
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mcl4-coe-prefetch")
+        self._pending: Future | None = None
+        self._indices: np.ndarray | None = None
+        self._closed = False
+
+    def _load(self, indices: np.ndarray) -> list[dict[str, torch.Tensor]]:
+        return [
+            self.dataset.batch(
+                indices[start : start + self.micro_batch_size], pin_memory=self.pin_memory
+            )
+            for start in range(0, len(indices), self.micro_batch_size)
+        ]
+
+    def schedule(self, indices) -> None:
+        if self._closed:
+            raise RuntimeError("HostBatchPrefetcher is closed")
+        requested = np.asarray(indices, dtype=np.int64).copy()
+        if self._pending is not None and np.array_equal(self._indices, requested):
+            return
+        if self._pending is not None:
+            self._pending.cancel()
+            self._pending = None
+        if requested.size:
+            self._indices = requested
+            self._pending = self._executor.submit(self._load, requested)
+
+    def get(self, indices) -> list[dict[str, torch.Tensor]]:
+        self.schedule(indices)
+        assert self._pending is not None
+        try:
+            return self._pending.result()
+        finally:
+            self._pending = None
+            self._indices = None
+
+    def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            self._executor.shutdown(wait=True, cancel_futures=True)
+
+
+@dataclass(frozen=True)
+class DecisionExample:
+    question_id: str
+    kind: str
+    context: str
+    descriptions: tuple[str, ...]
+    values: tuple
+    target: int | None = None
+
+
+def _text(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a nonempty string")
+    return value
+
+
+def _json(value: Any) -> str:
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+
+
+def parse_request(
+    request: dict,
+    *,
+    require_targets: bool = False,
+    compact_framing: bool = True,
+) -> list[DecisionExample]:
+    """Parse a typed decision request (`choice`, `noul`, `score`) into DecisionExamples."""
+    if not isinstance(request, dict) or not {"state", "questions"} <= request.keys():
+        raise ValueError("A request requires state and questions")
+    if set(request) - {"state", "questions", "targets"}:
+        raise ValueError("Unknown request fields")
+    if not isinstance(request["state"], (str, dict, list)):
+        raise ValueError("state must be text, a JSON object, or a JSON array")
+    state_str = (
+        request["state"] if isinstance(request["state"], str) else _json(request["state"])
+    )
+    questions, targets = request["questions"], request.get("targets", {})
+    if not isinstance(questions, dict) or not questions:
+        raise ValueError("questions must be a nonempty object")
+    if not isinstance(targets, dict) or set(targets) - set(questions):
+        raise ValueError("targets must map known question IDs to answers")
+
+    examples: list[DecisionExample] = []
+    for question_id, question in questions.items():
+        _text(question_id, "question ID")
+        if not isinstance(question, dict):
+            raise ValueError("Each question must be an object")
+        kind = question.get("type")
+        instructions = _text(question.get("instructions"), "instructions")
+        common = {"type", "instructions"}
+        if kind == "choice":
+            if set(question) - common - {"options"}:
+                raise ValueError("Unknown choice fields")
+            options = question.get("options")
+            if not isinstance(options, list) or len(options) < 2:
+                raise ValueError("choice requires at least two options")
+            if any(
+                not isinstance(item, dict) or set(item) != {"id", "description"} for item in options
+            ):
+                raise ValueError("Each option requires exactly id and description")
+            values = tuple(_text(item["id"], "option ID") for item in options)
+            descriptions = tuple(_text(item["description"], "description") for item in options)
+            if len(set(values)) != len(values):
+                raise ValueError("Choice IDs must be unique")
+        elif kind == "noul":
+            if set(question) - common - {"false_description", "true_description"}:
+                raise ValueError("Unknown noul fields")
+            values = (False, True)
+            descriptions = (
+                _text(question.get("false_description", "The answer is no."), "false_description"),
+                _text(question.get("true_description", "The answer is yes."), "true_description"),
+            )
+        elif kind == "score":
+            if set(question) - common - {"levels"}:
+                raise ValueError("Unknown score fields")
+            levels = question.get("levels")
+            if not isinstance(levels, list) or len(levels) < 2:
+                raise ValueError("score requires at least two ordered levels")
+            if any(
+                not isinstance(item, dict) or set(item) != {"value", "description"}
+                for item in levels
+            ):
+                raise ValueError("Each level requires exactly value and description")
+            values = tuple(item["value"] for item in levels)
+            if any(
+                isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+                for v in values
+            ):
+                raise ValueError("Score values must be finite numbers")
+            if any(a >= b for a, b in zip(values, values[1:])):
+                raise ValueError("Score levels must be strictly increasing")
+            descriptions = tuple(_text(item["description"], "description") for item in levels)
+        else:
+            raise ValueError("Question type must be choice, noul, or score")
+
+        if compact_framing:
+            context = f"#U$# {state_str}\n#Q$# [{kind}] {instructions}"
+        else:
+            context = _json({"state": request["state"], "question": instructions, "type": kind})
+
+        target = None
+        if question_id in targets:
+            value = targets[question_id]
+            if kind == "noul" and not isinstance(value, bool):
+                raise ValueError("noul targets must be booleans")
+            if kind == "score" and (isinstance(value, bool) or not isinstance(value, (int, float))):
+                raise ValueError("score targets must be declared numerical levels")
+            if value not in values:
+                raise ValueError(f"Target for {question_id} is not a declared answer")
+            target = values.index(value)
+        elif require_targets:
+            raise ValueError(f"Missing target for {question_id}")
+        examples.append(DecisionExample(question_id, kind, context, descriptions, values, target))
+    return examples
+
+
+def collate_decisions(
+    examples: list[DecisionExample],
+    max_length: int,
+    *,
+    device: str | torch.device = "cpu",
+) -> dict[str, torch.Tensor]:
+    if not examples:
+        raise ValueError("At least one decision is required")
+    tokenizer = ByteTokenizer()
+    contexts = [tokenizer.encode(item.context) for item in examples]
+    candidates = [
+        [tokenizer.encode(description) for description in item.descriptions] for item in examples
+    ]
+    if any(len(row) > max_length for row in contexts) or any(
+        len(row) > max_length for options in candidates for row in options
+    ):
+        raise ValueError(f"Decision context or candidate exceeds {max_length} byte tokens")
+
+    batch, count = len(examples), max(map(len, candidates))
+    context_ids = torch.full((batch, max(map(len, contexts))), tokenizer.pad_id, dtype=torch.long)
+    option_ids = torch.full(
+        (batch, count, max(len(row) for options in candidates for row in options)),
+        tokenizer.pad_id,
+        dtype=torch.long,
+    )
+    context_lengths = torch.tensor(list(map(len, contexts)), dtype=torch.long)
+    option_lengths = torch.zeros(batch, count, dtype=torch.long)
+    for index, (context, options) in enumerate(zip(contexts, candidates)):
+        context_ids[index, : len(context)] = torch.tensor(context, dtype=torch.long)
+        for option_index, tokens in enumerate(options):
+            option_ids[index, option_index, : len(tokens)] = torch.tensor(tokens, dtype=torch.long)
+            option_lengths[index, option_index] = len(tokens)
+    batch_data = dict(
+        context_ids=context_ids,
+        context_lengths=context_lengths,
+        option_ids=option_ids,
+        option_lengths=option_lengths,
+    )
+    if all(item.target is not None for item in examples):
+        batch_data["targets"] = torch.tensor([item.target for item in examples], dtype=torch.long)
+    elif any(item.target is not None for item in examples):
+        raise ValueError("A batch must have either all targets or none")
+    return {key: value.to(device) for key, value in batch_data.items()}
+
+
+def format_answers(
+    examples: list[DecisionExample],
+    probabilities: list[list[float]],
+    similarities: list[list[float]],
+) -> dict[str, dict[str, Any]]:
+    answers: dict[str, dict[str, Any]] = {}
+    for example, probs, scores in zip(examples, probabilities, similarities):
+        rows = [
+            dict(value=value, probability=float(p), association_score=float(s))
+            for value, p, s in zip(example.values, probs, scores)
+        ]
+        answer: dict[str, Any] = {
+            "type": example.kind,
+            "ranking": sorted(rows, key=lambda row: row["probability"], reverse=True),
+        }
+        if example.kind == "choice":
+            answer["choice"] = answer["ranking"][0]["value"]
+        elif example.kind == "noul":
+            answer["noul"] = rows[1]["probability"]
+        else:
+            answer["score"] = sum(row["value"] * row["probability"] for row in rows)
+        answers[example.question_id] = answer
+    return answers

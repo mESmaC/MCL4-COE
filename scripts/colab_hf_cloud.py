@@ -1047,6 +1047,10 @@ def main() -> None:
         )
         print(json.dumps(res, indent=2))
 
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
+
 
 if __name__ == "__main__":
     main()

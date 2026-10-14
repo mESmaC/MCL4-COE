@@ -488,10 +488,10 @@ def run_cloud_training(
                 pass
         existing_ckpts = list_checkpoints(run_dir)
         if existing_ckpts and not config.resume_checkpoint:
-            latest_meta = existing_ckpts[-1]
-            ckpt_pt = Path(str(latest_meta["checkpoint_path"]))
+            latest_meta = existing_ckpts[0]
+            ckpt_pt = Path(str(latest_meta.get("pt_file") or latest_meta.get("checkpoint_path") or ""))
             if not ckpt_pt.is_file():
-                ckpt_pt = run_dir / ckpt_pt.name
+                ckpt_pt = run_dir / "checkpoints" / ckpt_pt.name
             if ckpt_pt.is_file():
                 config.resume_checkpoint = str(ckpt_pt)
                 print(f"[cloud-train] Resuming from checkpoint: {ckpt_pt.name} (step={latest_meta['step']})")

@@ -253,11 +253,12 @@ def build_cloud_shards(
     seq_len: int = 2048,
     max_blocks_per_shard: int = 2048,
     records_per_source: int = 4000,
+    val_ratio: float = 0.05,
     hf_token: str | None = None,
     hf_dataset_repo: str | None = None,
     drive_root: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Stream datasets from Hugging Face Hub directly into `.bin` shards + `index_receipt.json`."""
+    """Stream datasets from Hugging Face Hub directly into train/val `.bin` shards + `index_receipt.json`."""
     token = resolve_hf_token(hf_token)
     _configure_hf_transfer()
     out_root = Path(shards_root).expanduser().resolve()
@@ -269,17 +270,26 @@ def build_cloud_shards(
         load_dataset = None
 
     summary: dict[str, Any] = {"shards_root": str(out_root), "tracks": {}}
-    decision_pool: list[DecisionExample] = []
+    train_decision_pool: list[DecisionExample] = []
+    val_decision_pool: list[DecisionExample] = []
+    val_mod = max(5, int(round(1.0 / max(0.01, min(0.25, val_ratio))))) if val_ratio > 0 else 0
 
     for track, sources in DEFAULT_HF_TRACK_SOURCES.items():
         t_dir = out_root / track
         t_dir.mkdir(parents=True, exist_ok=True)
-        writer = BlockAlignedShardWriter(
+        train_writer = BlockAlignedShardWriter(
             t_dir,
             track=track,
             split="train",
             seq_len=seq_len,
             max_blocks_per_shard=max_blocks_per_shard,
+        )
+        val_writer = BlockAlignedShardWriter(
+            t_dir,
+            track=track,
+            split="val",
+            seq_len=seq_len,
+            max_blocks_per_shard=max(64, max_blocks_per_shard // 4),
         )
         track_accepted = 0
         track_rejected = 0
@@ -297,12 +307,15 @@ def build_cloud_shards(
                     ds_path, ds_name, ds_split, records_per_source, token, load_dataset
                 ):
                     row_idx += 1
+                    is_val_row = bool(val_mod > 0 and ((accepted + 1) % val_mod == 0))
+                    active_writer = val_writer if is_val_row else train_writer
+
                     if track == "pretrain_lm":
                         text, rej = extract_pretrain_text(row)
                         if rej or not text:
                             rejected += 1
                         else:
-                            writer.add_pretrain_document(text)
+                            active_writer.add_pretrain_document(text)
                             accepted += 1
                     elif track == "uta_trace":
                         eps = extract_uta_episodes(row, max_seq_len=seq_len)
@@ -311,7 +324,7 @@ def build_cloud_shards(
                         else:
                             added_any = False
                             for u_s, t_s, a_s in eps:
-                                if writer.add_uta_episode(u_s, t_s, a_s):
+                                if active_writer.add_uta_episode(u_s, t_s, a_s):
                                     added_any = True
                             if added_any:
                                 accepted += 1
@@ -319,16 +332,27 @@ def build_cloud_shards(
                                 rejected += 1
                     else:
                         uta = extract_typed_decision_uta(row, max_seq_len=seq_len)
+                        total_dec_seen = len(train_decision_pool) + len(val_decision_pool)
                         dec_ex = _convert_record_to_decision_example(
-                            row, len(decision_pool), max_seq_len=min(512, seq_len)
+                            row, total_dec_seen, max_seq_len=min(512, seq_len)
                         )
-                        if dec_ex is not None and len(decision_pool) < 4096:
-                            decision_pool.append(dec_ex)
-                        if uta is not None and writer.add_uta_episode(*uta):
+                        if dec_ex is not None:
+                            # Route every 5th 4-way MCQA example into the uncontaminated held-out benchmark (up to 512)
+                            if (
+                                len(dec_ex.descriptions) == 4
+                                and len(val_decision_pool) < 512
+                                and (total_dec_seen % 5 == 0)
+                            ):
+                                val_decision_pool.append(dec_ex)
+                                active_writer = val_writer
+                            elif len(train_decision_pool) < 8192:
+                                train_decision_pool.append(dec_ex)
+                                active_writer = train_writer
+                        if uta is not None and active_writer.add_uta_episode(*uta):
                             accepted += 1
                         else:
                             eps = extract_uta_episodes(row, max_seq_len=seq_len)
-                            if eps and writer.add_uta_episode(*eps[0]):
+                            if eps and active_writer.add_uta_episode(*eps[0]):
                                 accepted += 1
                             else:
                                 rejected += 1
@@ -337,7 +361,7 @@ def build_cloud_shards(
                 continue
 
             if accepted > 0 or rejected > 0:
-                writer.record_provenance(
+                train_writer.record_provenance(
                     corpus=ds_path,
                     source_file=f"hf://{ds_path}/{ds_name or ds_split}",
                     row_start=1,
@@ -349,20 +373,31 @@ def build_cloud_shards(
                 track_rejected += rejected
                 print(f"  -> accepted={accepted:,}, rejected_stage0={rejected:,}")
 
-        writer.flush_shard()
+        train_writer.flush_shard()
+        val_writer.flush_shard()
+        final_idx = json.loads((t_dir / "index_receipt.json").read_text(encoding="utf-8"))
+        t_totals = dict(final_idx.get("totals", {}))
         summary["tracks"][track] = {
             "accepted_episodes": track_accepted,
             "rejected_stage0": track_rejected,
-            "num_blocks": writer.index_receipt.totals.get("num_blocks", 0),
-            "num_tokens": writer.index_receipt.totals.get("num_tokens", 0),
-            "num_shards": writer.index_receipt.totals.get("num_shards", 0),
+            "num_blocks": t_totals.get("num_blocks", 0),
+            "num_tokens": t_totals.get("num_tokens", 0),
+            "train_blocks": t_totals.get("train_blocks", 0),
+            "val_blocks": t_totals.get("val_blocks", 0),
+            "num_shards": t_totals.get("num_shards", 0),
         }
 
-    if decision_pool:
+    if train_decision_pool:
         dec_cache = out_root / "typed_decision" / "decision_examples_cache.pt"
         dec_cache.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(decision_pool, dec_cache)
-        summary["decision_examples_cached"] = len(decision_pool)
+        torch.save(train_decision_pool, dec_cache)
+        summary["decision_examples_train_cached"] = len(train_decision_pool)
+
+    if val_decision_pool:
+        val_dec_cache = out_root / "typed_decision" / "decision_examples_val_cache.pt"
+        val_dec_cache.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(val_decision_pool, val_dec_cache)
+        summary["decision_examples_val_cached"] = len(val_decision_pool)
 
     # Guarantee every track has at least 1 valid .bin shard (portable self-healing fallback)
     healed = ensure_sharded_tracks_ready(out_root, seq_len=seq_len)
@@ -534,11 +569,19 @@ def run_cloud_training(
         step = int(metrics.get("step", 0))
         loss = float(metrics.get("total_loss", 0.0))
         lm = float(metrics.get("lm_loss", 0.0))
-        tps = float(metrics.get("tokens_per_sec", 0.0))
-        if step == 1 or step % 5 == 0 or step == config.total_steps:
+        tps = float(metrics.get("tok_per_s", metrics.get("tokens_per_sec", 0.0)))
+        if step == 1 or step % 10 == 0 or step == config.total_steps:
+            val_str = ""
+            if "val_bpb" in metrics:
+                val_str += f" | val_bpb={float(metrics['val_bpb']):.4f}"
+            if "val_mcqa_acc" in metrics:
+                val_str += (
+                    f" | val_mcqa={float(metrics['val_mcqa_acc']) * 100.0:.1f}%"
+                    f" (n={metrics.get('val_mcqa_n', 0)})"
+                )
             print(
                 f"  [step {step:>4}/{config.total_steps}] "
-                f"total_loss={loss:.4f} | lm_loss={lm:.4f} | tok/s={tps:,.0f}"
+                f"total_loss={loss:.4f} | lm_loss={lm:.4f}{val_str} | tok/s={tps:,.0f}"
             )
         cur_ckpts = len(list_checkpoints(run_dir))
         if cur_ckpts > last_synced_ckpt_count:
@@ -737,32 +780,103 @@ def evaluate_trained_checkpoint(
     model.to(device).eval()
 
     mcqa_eval: dict[str, Any] = {}
-    dec_cache = Path(shards_root).expanduser().resolve() / "typed_decision" / "decision_examples_cache.pt"
+    shards_dir = Path(shards_root).expanduser().resolve()
+    val_dec_cache = shards_dir / "typed_decision" / "decision_examples_val_cache.pt"
+    dec_cache = val_dec_cache if val_dec_cache.is_file() else (shards_dir / "typed_decision" / "decision_examples_cache.pt")
+    split_tag = "held_out_val" if val_dec_cache.is_file() else "train_pool_fallback"
     if not dec_cache.is_file():
         alt = REPO_ROOT / "data_shards" / "typed_decision" / "decision_examples_cache.pt"
         if alt.is_file():
             dec_cache = alt
     if dec_cache.is_file():
         dec_pool = torch.load(dec_cache, map_location="cpu", weights_only=False)
-        held_out = [ex for ex in dec_pool if len(ex.descriptions) == 4][:24]
+        max_len = min(512, b_cfg.max_seq_len)
+        held_out = [
+            ex
+            for ex in dec_pool
+            if len(ex.descriptions) == 4
+            and len(ex.context.encode("utf-8")) + 2 <= max_len
+            and all(len(d.encode("utf-8")) + 2 <= max_len for d in ex.descriptions)
+        ][:500]
         if held_out:
-            raw_b = collate_decisions(held_out, max_length=512)
-            dec_batch = {k: v.to(device) for k, v in raw_b.items()}
+            bsz_eval = 16
+            total_correct = 0
+            total_n = 0
+            sum_ce = 0.0
+            sum_ded = 0.0
+            sum_eval = 0.0
+            sum_meta = 0.0
+            sum_abs = 0.0
             with torch.no_grad():
-                op_out = model.forward_all_operators(**dec_batch)
-                mcqa_eval = {
-                    "num_examples": len(held_out),
-                    "decision_ce_loss": round(float(op_out.decision.ce_loss.item()), 4),
-                    "random_4way_ce_baseline": 1.3863,
-                    "decision_top1_accuracy": round(
-                        float((op_out.decision.logits.argmax(dim=-1) == dec_batch["targets"]).float().mean().item()),
-                        4,
-                    ),
-                    "deduction_loss": round(float(op_out.deduction_loss.item()), 4),
-                    "evaluation_loss": round(float(op_out.evaluation_loss.item()), 4),
-                    "metacognition_loss": round(float(op_out.metacognition_loss.item()), 4),
-                    "abstraction_loss": round(float(op_out.abstraction_loss.item()), 4),
-                }
+                for i in range(0, len(held_out), bsz_eval):
+                    chunk = held_out[i : i + bsz_eval]
+                    raw_b = collate_decisions(chunk, max_length=max_len)
+                    dec_batch = {k: v.to(device) for k, v in raw_b.items()}
+                    op_out = model.forward_all_operators(**dec_batch)
+                    n_c = len(chunk)
+                    total_correct += int((op_out.decision.logits.argmax(dim=-1) == dec_batch["targets"]).sum().item())
+                    total_n += n_c
+                    sum_ce += float(op_out.decision.ce_loss.item()) * n_c
+                    sum_ded += float(op_out.deduction_loss.item()) * n_c
+                    sum_eval += float(op_out.evaluation_loss.item()) * n_c
+                    sum_meta += float(op_out.metacognition_loss.item()) * n_c
+                    sum_abs += float(op_out.abstraction_loss.item()) * n_c
+            mcqa_eval = {
+                "split": split_tag,
+                "num_examples": total_n,
+                "decision_ce_loss": round(sum_ce / max(1, total_n), 4),
+                "random_4way_ce_baseline": 1.3863,
+                "decision_top1_accuracy": round(total_correct / max(1, total_n), 4),
+                "deduction_loss": round(sum_ded / max(1, total_n), 4),
+                "evaluation_loss": round(sum_eval / max(1, total_n), 4),
+                "metacognition_loss": round(sum_meta / max(1, total_n), 4),
+                "abstraction_loss": round(sum_abs / max(1, total_n), 4),
+            }
+
+    # Evaluate held-out validation BPB per track if val shards exist
+    import math
+    from mcl4_coe.pipeline import ShardedTokenBlockDataset
+
+    val_bpb_eval: dict[str, Any] = {}
+    ln2 = math.log(2.0)
+    total_val_nll = 0.0
+    total_val_toks = 0
+    for t_name in ("pretrain_lm", "uta_trace", "typed_decision"):
+        idx_p = shards_dir / t_name / "index_receipt.json"
+        if not idx_p.is_file():
+            continue
+        try:
+            v_ds = ShardedTokenBlockDataset(idx_p, track=t_name, split="val")
+        except Exception:
+            continue
+        n_b = min(len(v_ds), 32)
+        if n_b <= 0:
+            continue
+        t_nll = 0.0
+        t_toks = 0
+        with torch.no_grad():
+            for s_i in range(0, n_b, 8):
+                sub = v_ds.batch(list(range(s_i, min(n_b, s_i + 8))), pin_memory=False)
+                inp = sub["input_ids"][:, : b_cfg.max_seq_len].to(device)
+                lbl = sub["labels"][:, : b_cfg.max_seq_len].to(device)
+                cnt = int((lbl != -100).sum().item())
+                if cnt <= 0:
+                    continue
+                lm_out = model.forward_inference(inp, targets=lbl)
+                assert lm_out.ce_loss is not None
+                t_nll += float(lm_out.ce_loss.item()) * cnt
+                t_toks += cnt
+        if t_toks > 0:
+            ce_m = t_nll / t_toks
+            val_bpb_eval[f"val_loss_{t_name}"] = round(ce_m, 5)
+            val_bpb_eval[f"val_bpb_{t_name}"] = round(ce_m / ln2, 5)
+            total_val_nll += t_nll
+            total_val_toks += t_toks
+    if total_val_toks > 0:
+        overall_ce = total_val_nll / total_val_toks
+        val_bpb_eval["val_lm_loss"] = round(overall_ce, 5)
+        val_bpb_eval["val_bpb"] = round(overall_ce / ln2, 5)
+        val_bpb_eval["val_tokens_evaluated"] = total_val_toks
 
     store = index_python_repo_to_atxy(REPO_ROOT, subsystems=("src",))
     router = COEAddressRouter(store, max_seq_len=128)
@@ -783,6 +897,7 @@ def evaluate_trained_checkpoint(
     return {
         "checkpoint_path": str(ckpt_path),
         "generative_uta": gen_eval,
+        "held_out_val_bpb": val_bpb_eval,
         "held_out_mcqa": mcqa_eval,
         "atxy_routing": atxy_eval,
     }
@@ -797,6 +912,7 @@ def main() -> None:
     p_build.add_argument("--seq-len", type=int, default=2048)
     p_build.add_argument("--max-blocks-per-shard", type=int, default=2048)
     p_build.add_argument("--records-per-source", type=int, default=4000)
+    p_build.add_argument("--val-ratio", type=float, default=0.05)
     p_build.add_argument("--hf-dataset-repo", default=None)
     p_build.add_argument("--drive-root", default=None)
 
@@ -812,13 +928,19 @@ def main() -> None:
     p_train.add_argument("--runs-root", default="/content/runs")
     p_train.add_argument("--total-steps", type=int, default=200)
     p_train.add_argument("--checkpoint-every", type=int, default=50)
+    p_train.add_argument("--eval-every", type=int, default=100)
+    p_train.add_argument("--seq-len", type=int, default=2048)
+    p_train.add_argument("--lr", type=float, default=1.5e-3)
     p_train.add_argument("--d-model", type=int, default=384)
     p_train.add_argument("--n-heads", type=int, default=6)
     p_train.add_argument("--n-encoder-layers", type=int, default=4)
     p_train.add_argument("--n-decoder-layers", type=int, default=4)
     p_train.add_argument("--num-experts", type=int, default=8)
+    p_train.add_argument("--recurrence-steps", type=int, default=1)
     p_train.add_argument("--batch-size", type=int, default=8)
     p_train.add_argument("--micro-batch-size", type=int, default=4)
+    p_train.add_argument("--ornith-warmup-ratio", type=float, default=0.80)
+    p_train.add_argument("--use-nvfp4", action="store_true")
     p_train.add_argument("--hf-run-repo", default=None)
     p_train.add_argument("--drive-root", default=None)
 
@@ -851,6 +973,7 @@ def main() -> None:
             seq_len=args.seq_len,
             max_blocks_per_shard=args.max_blocks_per_shard,
             records_per_source=args.records_per_source,
+            val_ratio=args.val_ratio,
             hf_dataset_repo=args.hf_dataset_repo,
             drive_root=args.drive_root,
         )
@@ -870,7 +993,10 @@ def main() -> None:
             runs_root=args.runs_root,
             total_steps=args.total_steps,
             checkpoint_every=args.checkpoint_every,
+            eval_every=args.eval_every,
             sample_every=max(10, args.checkpoint_every // 2),
+            max_seq_len=args.seq_len,
+            lr=args.lr,
             d_model=args.d_model,
             n_heads=args.n_heads,
             n_encoder_layers=args.n_encoder_layers,
@@ -879,10 +1005,13 @@ def main() -> None:
             expert_hidden_dim=args.d_model * 2,
             num_experts=args.num_experts,
             top_k=min(2, args.num_experts),
+            recurrence_steps=args.recurrence_steps,
+            use_nvfp4=bool(args.use_nvfp4),
             batch_size=args.batch_size,
             micro_batch_size=args.micro_batch_size,
             enable_ornith_rl=True,
             ornith_every=10,
+            ornith_warmup_ratio=args.ornith_warmup_ratio,
             enable_dream_rsi=True,
             dream_every=25,
         )

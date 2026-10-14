@@ -163,6 +163,7 @@ class TrainingRunConfig:
     enable_ornith_rl: bool = True
     ornith_every: int = 2
     ornith_weight: float = 0.15
+    ornith_warmup_ratio: float = 0.0
     enable_dream_rsi: bool = True
     dream_every: int = 2
     dream_max_rounds: int = 3
@@ -170,8 +171,10 @@ class TrainingRunConfig:
     dream_workers: int = 2
     dream_revisions: int = 3
 
-    # Checkpointing & live telemetry
+    # Checkpointing, held-out validation & live telemetry
     checkpoint_every: int = 10
+    eval_every: int = 0
+    val_max_batches_per_track: int = 8
     sample_every: int = 10
     sample_prompt: str = "How do plants use capillary action to transport water?"
 
@@ -351,14 +354,14 @@ class MCL4COETrainer:
         self._decision_cursor = 0
         dec_cache = shards_root / "typed_decision" / "decision_examples_cache.pt"
         ts_dir = Path(self.config.corpora_root) / "text" / "tasksource-jev-typed-decisions"
+        dec_seq_len = min(384, self.config.max_seq_len)
         if dec_cache.is_file() or ts_dir.is_dir():
-            dec_seq_len = min(384, self.config.max_seq_len)
             self.decision_streamer = TypedDecisionShardStreamer(
                 self.config.corpora_root,
                 max_seq_len=dec_seq_len,
                 max_options=6,
                 cache_path=dec_cache,
-                max_cached_examples=512,
+                max_cached_examples=2048,
             )
             pool = list(self.decision_streamer.iter_decision_examples())
             bsz = max(1, self.config.decision_batch_size)
@@ -368,12 +371,130 @@ class MCL4COETrainer:
                     collated = {k: v.pin_memory() for k, v in collated.items()}
                 self.decision_batches.append(collated)
 
+        # Held-out validation datasets (split="val") and uncontaminated MCQA val cache
+        from .pipeline import ShardedTokenBlockDataset
+
+        self.val_track_datasets: dict[str, ShardedTokenBlockDataset] = {}
+        for t_name, idx_path in track_receipts.items():
+            try:
+                v_ds = ShardedTokenBlockDataset(idx_path, track=t_name, split="val")
+                if len(v_ds) > 0:
+                    self.val_track_datasets[t_name] = v_ds
+            except Exception:
+                continue
+
+        self.val_decision_batches: list[dict[str, torch.Tensor]] = []
+        self.val_decision_count = 0
+        val_dec_cache = shards_root / "typed_decision" / "decision_examples_val_cache.pt"
+        if val_dec_cache.is_file():
+            try:
+                val_raw = torch.load(val_dec_cache, map_location="cpu", weights_only=False)
+                val_filtered = [
+                    ex
+                    for ex in val_raw
+                    if len(ex.descriptions) == 4
+                    and len(ex.context.encode("utf-8")) + 2 <= dec_seq_len
+                    and all(len(d.encode("utf-8")) + 2 <= dec_seq_len for d in ex.descriptions)
+                ][:512]
+                bsz_val = max(4, self.config.decision_batch_size * 2)
+                for i in range(0, len(val_filtered), bsz_val):
+                    chunk = val_filtered[i : i + bsz_val]
+                    if chunk:
+                        self.val_decision_batches.append(
+                            collate_decisions(chunk, dec_seq_len, device="cpu")
+                        )
+                        self.val_decision_count += len(chunk)
+            except Exception:
+                pass
+
     def _next_decision_batch(self) -> dict[str, torch.Tensor] | None:
         if not self.decision_batches:
             return None
         batch_cpu = self.decision_batches[self._decision_cursor % len(self.decision_batches)]
         self._decision_cursor += 1
         return {k: v.to(self.device, non_blocking=True) for k, v in batch_cpu.items()}
+
+    @torch.no_grad()
+    def _evaluate_validation(self) -> dict[str, Any]:
+        """Compute held-out validation Bits-Per-Byte (`val_bpb`) per track and uncontaminated MCQA accuracy."""
+        if not self.val_track_datasets and not self.val_decision_batches:
+            return {}
+
+        was_training = self.model.training
+        self.model.eval()
+        use_amp = self.device.type == "cuda"
+        ln2 = math.log(2.0)
+        val_metrics: dict[str, Any] = {}
+
+        try:
+            total_val_nll = 0.0
+            total_val_toks = 0
+            mb_sz = max(1, min(self.config.micro_batch_size, self.config.batch_size))
+            max_batches = max(1, self.config.val_max_batches_per_track)
+
+            for t_name, v_ds in self.val_track_datasets.items():
+                n_blocks = min(len(v_ds), mb_sz * max_batches)
+                t_nll = 0.0
+                t_toks = 0
+                for start_i in range(0, n_blocks, mb_sz):
+                    idxs = list(range(start_i, min(n_blocks, start_i + mb_sz)))
+                    sub = v_ds.batch(idxs, pin_memory=False)
+                    inp = sub["input_ids"].to(self.device, non_blocking=True)
+                    lbl = sub["labels"].to(self.device, non_blocking=True)
+                    tok_cnt = int((lbl != -100).sum().item())
+                    if tok_cnt <= 0:
+                        continue
+                    with torch.autocast(
+                        device_type=self.device.type,
+                        dtype=torch.bfloat16,
+                        enabled=use_amp,
+                    ):
+                        lm_out = self.model.forward_inference(inp, targets=lbl)
+                        assert lm_out.ce_loss is not None
+                        ce_val = float(lm_out.ce_loss.detach().float().item())
+                    t_nll += ce_val * tok_cnt
+                    t_toks += tok_cnt
+
+                if t_toks > 0:
+                    mean_ce = t_nll / t_toks
+                    val_metrics[f"val_loss_{t_name}"] = round(mean_ce, 5)
+                    val_metrics[f"val_bpb_{t_name}"] = round(mean_ce / ln2, 5)
+                    total_val_nll += t_nll
+                    total_val_toks += t_toks
+
+            if total_val_toks > 0:
+                overall_val_ce = total_val_nll / total_val_toks
+                val_metrics["val_lm_loss"] = round(overall_val_ce, 5)
+                val_metrics["val_bpb"] = round(overall_val_ce / ln2, 5)
+                val_metrics["val_tokens_evaluated"] = total_val_toks
+
+            if self.val_decision_batches:
+                correct = 0
+                total_ex = 0
+                total_dec_ce = 0.0
+                for b_cpu in self.val_decision_batches:
+                    b_dev = {k: v.to(self.device, non_blocking=True) for k, v in b_cpu.items()}
+                    bsz_cur = int(b_dev["targets"].shape[0])
+                    with torch.autocast(
+                        device_type=self.device.type,
+                        dtype=torch.bfloat16,
+                        enabled=use_amp,
+                    ):
+                        op_out = self.model.forward_all_operators(**b_dev)
+                        assert op_out.decision.ce_loss is not None
+                        preds = op_out.decision.logits.argmax(dim=-1)
+                        correct += int((preds == b_dev["targets"]).sum().item())
+                        total_dec_ce += float(op_out.decision.ce_loss.detach().float().item()) * bsz_cur
+                        total_ex += bsz_cur
+                if total_ex > 0:
+                    val_metrics["val_mcqa_acc"] = round(correct / total_ex, 4)
+                    val_metrics["val_mcqa_ce_loss"] = round(total_dec_ce / total_ex, 5)
+                    val_metrics["val_mcqa_n"] = total_ex
+        finally:
+            if was_training:
+                self.model.train()
+
+        return val_metrics
 
     def _build_model_and_optimizer(self) -> None:
         self.backbone_cfg = MCL4CEDConfig(
@@ -771,9 +892,14 @@ class MCL4COETrainer:
                 }
 
                 ornith_telemetry: dict[str, Any] = {}
+                ornith_active = progress >= float(self.config.ornith_warmup_ratio)
                 run_ornith = bool(
                     self.config.enable_ornith_rl
-                    and (step % max(1, self.config.ornith_every) == 0 or step == 1)
+                    and ornith_active
+                    and (
+                        step % max(1, self.config.ornith_every) == 0
+                        or (step == 1 and float(self.config.ornith_warmup_ratio) <= 0.0)
+                    )
                 )
 
                 use_amp = self.device.type == "cuda"
@@ -916,6 +1042,20 @@ class MCL4COETrainer:
                         if ok in self.latest_metrics:
                             ornith_telemetry[ok] = self.latest_metrics[ok]
 
+                run_val = (
+                    step == 1
+                    or (self.config.eval_every > 0 and step % self.config.eval_every == 0)
+                    or step % self.config.checkpoint_every == 0
+                    or step == self.config.total_steps
+                )
+                val_telemetry: dict[str, Any] = {}
+                if run_val:
+                    val_telemetry = self._evaluate_validation()
+                if not val_telemetry and self.latest_metrics:
+                    for vk in list(self.latest_metrics.keys()):
+                        if vk.startswith("val_"):
+                            val_telemetry[vk] = self.latest_metrics[vk]
+
                 vram_alloc_mb = (
                     torch.cuda.memory_allocated(0) / (1024**2) if self.device.type == "cuda" else 0.0
                 )
@@ -935,6 +1075,7 @@ class MCL4COETrainer:
                     "lr": round(lr, 6),
                     "total_loss": round(step_total_loss, 5),
                     "lm_loss": round(step_lm_loss, 5),
+                    "train_bpb": round(step_lm_loss / math.log(2.0), 5),
                     "decision_loss": round(step_dec_loss, 5),
                     "deduction_loss": round(step_ded_loss, 5),
                     "evaluation_loss": round(step_eval_loss, 5),
@@ -954,6 +1095,7 @@ class MCL4COETrainer:
                     "nvfp4_gemms": gemm_counts["forward"] + gemm_counts["dgrad"] + gemm_counts["wgrad"],
                     "nvfp4_sparse_2to4_gemms": gemm_counts.get("sparse_2to4", 0),
                     **ornith_telemetry,
+                    **val_telemetry,
                     **{k: round(v, 5) for k, v in avg_track_losses.items()},
                 }
                 self.latest_metrics = record

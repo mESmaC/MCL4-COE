@@ -988,7 +988,20 @@ class BlockAlignedShardWriter:
         if not self._current_blocks:
             return None
 
-        shard_idx = len(self.index_receipt.shards)
+        if self.index_path.exists():
+            try:
+                latest_idx = IndexReceipt.from_file(self.index_path)
+                self.index_receipt.shards = list(latest_idx.shards)
+                merged_totals = dict(latest_idx.totals)
+                merged_totals["rejected_stage0"] = max(
+                    merged_totals.get("rejected_stage0", 0),
+                    self.index_receipt.totals.get("rejected_stage0", 0),
+                )
+                self.index_receipt.totals = merged_totals
+            except Exception:
+                pass
+
+        shard_idx = sum(1 for s in self.index_receipt.shards if s.get("split") == self.split)
         shard_id = f"{self.track}_{self.split}_shard_{shard_idx:05d}"
         bin_name = f"{shard_id}.bin"
         receipt_name = f"{shard_id}.receipt.json"
@@ -1039,6 +1052,8 @@ class BlockAlignedShardWriter:
         totals["unmasked_target_tokens"] = (
             totals.get("unmasked_target_tokens", 0) + self._current_unmasked_targets
         )
+        totals[f"{self.split}_blocks"] = totals.get(f"{self.split}_blocks", 0) + num_blocks
+        totals[f"{self.split}_tokens"] = totals.get(f"{self.split}_tokens", 0) + num_tokens
         _atomic_write_json(self.index_path, self.index_receipt.to_dict())
 
         self._current_blocks.clear()

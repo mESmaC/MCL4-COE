@@ -533,11 +533,12 @@ def extract_uta_episodes(record: Any) -> list[tuple[str, str, str]]:
                     )
                     return [_compact_uta_triplet(u, t_clean, a_clean)]
 
-    # Case 4: `messages` or `conversations` array (`AM-DeepSeek-R1`, `Mega-Brain`, `no_robots`, etc.)
+    # Case 4: `messages` or `conversations` array (`AM-DeepSeek-R1`, `Nemotron-Cascade-2`, `Nemotron-Post-Training`, etc.)
     msg_list = record.get("messages") or record.get("conversations")
     if isinstance(msg_list, list) and msg_list:
         episodes: list[tuple[str, str, str]] = []
         current_user: list[str] = []
+        has_real_user = False
         for msg in msg_list:
             if not isinstance(msg, dict):
                 continue
@@ -552,13 +553,15 @@ def extract_uta_episodes(record: Any) -> list[tuple[str, str, str]]:
             ).strip()
             if role in ("system", "developer") and content:
                 current_user.append(content)
-            elif role in ("user", "human", "prompter") and content:
+            elif role in ("user", "human", "prompter") and content and content != "-" and len(content) >= 4:
                 current_user.append(content)
-            elif role in ("assistant", "gpt", "model", "bot") and (content or reasoning) and current_user:
+                has_real_user = True
+            elif role in ("assistant", "gpt", "model", "bot") and (content or reasoning) and has_real_user:
                 prompt_str = "\n\n".join(current_user)
                 t_clean, a_clean = _split_thought_and_answer(content, explicit_thought=reasoning)
                 episodes.append(_compact_uta_triplet(prompt_str, t_clean, a_clean))
                 current_user.clear()
+                has_real_user = False
         return episodes
 
     # Case 5: Anthropic hh-rlhf (`chosen` multi-turn `Human:` / `Assistant:` transcript)
@@ -585,35 +588,201 @@ def extract_uta_episodes(record: Any) -> list[tuple[str, str, str]]:
         if before and comment and after:
             return [_compact_uta_triplet(f"Review and patch code:\n{before}", comment, after)]
 
+    # Case 7: Nemotron SFT (`text` formatted as `input: ... output: ...`)
+    raw_text = record.get("text")
+    if isinstance(raw_text, str) and raw_text.lstrip().lower().startswith("input:"):
+        parts = re.split(r"\s+output\s*:\s*", raw_text.lstrip()[len("input:") :], maxsplit=1, flags=re.IGNORECASE)
+        if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+            t_clean, a_clean = _split_thought_and_answer(parts[1].strip())
+            return [_compact_uta_triplet(parts[0].strip(), t_clean, a_clean)]
+
     return []
 
 
-def extract_typed_decision_uta(record: Any) -> tuple[str, str, str] | None:
-    """Convert a `tasksource-jev-typed-decisions` record into a `#U$#/#Q$#/#H$# -> #T$# -> #A$#` episode."""
+_MCQA_OPTION_LINE_RE = re.compile(r"^([A-Z])[\.\:]\s+(.+)$")
+_MCQA_ANSWER_LINE_RE = re.compile(r"^Answer\s*:\s*([A-Z])\b", re.IGNORECASE)
+_GPT2_DECODER: Any = None
+
+
+def _decode_gpt2_tokens(tokens: list[int]) -> str | None:
+    """Decode GPT-2 BPE token IDs (e.g. from `nvidia/Nemotron-ClimbMix`) into UTF-8 text."""
+    global _GPT2_DECODER
+    if _GPT2_DECODER is False:
+        return None
+    if _GPT2_DECODER is None:
+        try:
+            import tiktoken  # type: ignore[import-not-found]
+
+            _GPT2_DECODER = ("tiktoken", tiktoken.get_encoding("gpt2"))
+        except Exception:
+            try:
+                from transformers import AutoTokenizer  # type: ignore[import-not-found]
+
+                _GPT2_DECODER = (
+                    "transformers",
+                    AutoTokenizer.from_pretrained("gpt2", model_max_length=1_000_000),
+                )
+            except Exception:
+                _GPT2_DECODER = False
+                return None
+    kind, dec = _GPT2_DECODER
+    try:
+        if kind == "tiktoken":
+            return str(dec.decode(tokens))
+        return str(dec.decode(tokens, skip_special_tokens=True))
+    except Exception:
+        return None
+
+
+def parse_mcqa_decision_fields(
+    record: Any,
+) -> tuple[str, str, str, list[str], int, str | None] | None:
+    """Normalize heterogeneous MCQA / decision records into `(state, kind, question, options, best_idx, rationale)`.
+
+    Supports:
+    1. `jev/typed-decisions` (`state`, `kind`, `question`, `options`, `target`)
+    2. `nvidia/Nemotron-RL-knowledge-mcqa` (`responses_create_params`, `options` list of letter dicts, `expected_answer`)
+    3. `nvidia/Nemotron-CrossThink` (`meta_data.question` + `reward_model.ground_truth`)
+    4. `nvidia/Nemotron-Pretraining-Specialized-v1.1` (`Nemotron-Pretraining-Multiple-Choice` `text` with `Answer: X` + rationale)
+    """
     if not isinstance(record, dict):
         return None
-    state = str(record.get("state") or "").strip()
+
+    # Schema 2: `nvidia/Nemotron-RL-knowledge-mcqa`
+    if "responses_create_params" in record and "expected_answer" in record and isinstance(record.get("options"), list):
+        rcp = record.get("responses_create_params")
+        raw_input = rcp.get("input") if isinstance(rcp, dict) else None
+        raw_content = (
+            str(raw_input[0].get("content") or "").strip()
+            if isinstance(raw_input, list) and raw_input and isinstance(raw_input[0], dict)
+            else ""
+        )
+        letters: list[str] = []
+        opts: list[str] = []
+        for item in record["options"]:
+            if isinstance(item, dict):
+                for k, v in sorted(item.items()):
+                    if isinstance(v, str) and v.strip():
+                        letters.append(str(k).strip().upper())
+                        opts.append(sanitize_trace_markers(v.strip()))
+                        break
+        exp_ans = str(record.get("expected_answer") or "").strip().upper()
+        if raw_content and len(opts) >= 2 and exp_ans in letters:
+            best_idx = letters.index(exp_ans)
+            lines = [ln.rstrip() for ln in raw_content.splitlines()]
+            stem_lines: list[str] = []
+            for ln in lines:
+                s_ln = ln.strip()
+                if s_ln.startswith("Answer the following multiple choice question"):
+                    continue
+                if _MCQA_OPTION_LINE_RE.match(s_ln):
+                    break
+                stem_lines.append(ln)
+            state = "\n".join(stem_lines).strip() or raw_content
+            return state, "mcqa", "Select the option that best answers the question.", opts, best_idx, None
+
+    # Schema 3: `nvidia/Nemotron-CrossThink`
+    if "reward_model" in record and isinstance(record.get("reward_model"), dict):
+        meta = record.get("meta_data") if isinstance(record.get("meta_data"), dict) else {}
+        q_raw = str(meta.get("question") or "").strip()
+        if not q_raw and isinstance(record.get("prompt"), list) and record["prompt"]:
+            first_p = record["prompt"][0]
+            if isinstance(first_p, dict):
+                q_raw = str(first_p.get("content") or "").strip()
+        gt = str(record["reward_model"].get("ground_truth") or "").strip()
+        gt_letter = gt.split(":", 1)[0].split(".", 1)[0].strip().upper()
+        if q_raw and gt_letter:
+            stem_lines = []
+            letters = []
+            opts = []
+            in_opts = False
+            for ln in q_raw.splitlines():
+                m = _MCQA_OPTION_LINE_RE.match(ln.strip())
+                if m:
+                    in_opts = True
+                    letters.append(m.group(1).upper())
+                    opts.append(sanitize_trace_markers(m.group(2).strip()))
+                elif not in_opts:
+                    stem_lines.append(ln)
+            if len(opts) >= 2 and gt_letter in letters:
+                best_idx = letters.index(gt_letter)
+                state = "\n".join(stem_lines).strip()
+                if "User:" in state:
+                    state = state.split("User:", 1)[-1].strip()
+                return state, "mcqa", "Select the best hypothesis.", opts, best_idx, None
+
+    # Schema 4: `nvidia/Nemotron-Pretraining-Specialized-v1.1` (`Nemotron-Pretraining-Multiple-Choice`)
+    if isinstance(record.get("text"), str) and "\nAnswer:" in record["text"]:
+        lines = record["text"].strip().splitlines()
+        stem_lines = []
+        letters = []
+        opts = []
+        ans_letter = ""
+        rationale_lines: list[str] = []
+        mode = "stem"
+        for ln in lines:
+            s_ln = ln.strip()
+            if mode in ("stem", "opts"):
+                m_ans = _MCQA_ANSWER_LINE_RE.match(s_ln)
+                if m_ans:
+                    ans_letter = m_ans.group(1).upper()
+                    mode = "rationale"
+                    continue
+                m_opt = _MCQA_OPTION_LINE_RE.match(s_ln)
+                if m_opt:
+                    mode = "opts"
+                    letters.append(m_opt.group(1).upper())
+                    opts.append(sanitize_trace_markers(m_opt.group(2).strip()))
+                    continue
+                if mode == "stem":
+                    stem_lines.append(ln)
+                elif opts:
+                    opts[-1] = f"{opts[-1]} {sanitize_trace_markers(s_ln)}".strip()
+            else:
+                rationale_lines.append(ln)
+        if len(opts) >= 2 and ans_letter in letters:
+            best_idx = letters.index(ans_letter)
+            state = "\n".join(stem_lines).strip()
+            rationale = "\n".join(rationale_lines).strip() or None
+            if state:
+                return state, "mcqa", "Determine the correct multiple-choice option.", opts, best_idx, rationale
+
+    # Schema 1: `jev/typed-decisions` / `tasksource`
+    state = str(record.get("state") or record.get("inputs") or record.get("instruction") or "").strip()
     kind = str(record.get("kind") or "choice").strip()
-    question = str(record.get("question") or "").strip()
-    options = record.get("options")
-    target = record.get("target")
-    if not state or not question or not isinstance(target, list) or not target:
-        return None
+    question = str(record.get("question") or "Select the best hypothesis.").strip()
+    options = record.get("options") or record.get("choices")
+    target = record.get("target") or record.get("label")
 
     if kind == "noul" and (not isinstance(options, list) or len(options) == 0):
         options = ["The answer is no.", "The answer is yes."]
-        if len(target) == 1:
+        if isinstance(target, list) and len(target) == 1:
             p = float(target[0])
             target = [1.0 - p, p]
 
-    if not isinstance(options, list) or len(options) < 2 or len(target) != len(options):
+    if not state or not isinstance(options, list) or len(options) < 2:
+        return None
+
+    best_idx = -1
+    if isinstance(target, list) and len(target) == len(options) and target:
+        best_idx = int(np.argmax(np.asarray(target, dtype=np.float64)))
+    elif isinstance(target, int) and 0 <= target < len(options):
+        best_idx = target
+    if best_idx < 0:
         return None
 
     clean_opts = [sanitize_trace_markers(str(opt).strip()) for opt in options]
     if any(not opt for opt in clean_opts):
         return None
+    return state, kind, question, clean_opts, best_idx, None
 
-    best_idx = int(np.argmax(np.asarray(target, dtype=np.float64)))
+
+def extract_typed_decision_uta(record: Any) -> tuple[str, str, str] | None:
+    """Convert a typed decision or Nemotron MCQA record into a `#U$#/#Q$#/#H$# -> #T$# -> #A$#` episode."""
+    parsed = parse_mcqa_decision_fields(record)
+    if parsed is None:
+        return None
+    state, kind, question, clean_opts, best_idx, rationale = parsed
     winning_opt = clean_opts[best_idx]
     opt_lines = "\n".join(f"#H$# [{i}] {opt}" for i, opt in enumerate(clean_opts))
     prompt = (
@@ -621,9 +790,13 @@ def extract_typed_decision_uta(record: Any) -> tuple[str, str, str] | None:
         f"#Q$# [{kind}] {sanitize_trace_markers(question)}\n"
         f"{opt_lines}"
     )
-    thought = f"Compare {len(clean_opts)} candidate hypotheses against state evidence -> option [{best_idx}] matches."
+    thought = (
+        sanitize_trace_markers(rationale)
+        if rationale
+        else f"Compare {len(clean_opts)} candidate hypotheses against state evidence -> option [{best_idx}] matches."
+    )
     answer = f"[{best_idx}] {winning_opt}"
-    return prompt, thought, answer
+    return _compact_uta_triplet(prompt, thought, answer)
 
 
 def extract_pretrain_text(
@@ -636,10 +809,13 @@ def extract_pretrain_text(
         return None, True
     raw = (
         record.get("text")
+        or record.get("Text")
         or record.get("code")
         or record.get("report_text")
         or record.get("content")
     )
+    if (not isinstance(raw, str) or not raw.strip()) and isinstance(record.get("tokens"), list) and record["tokens"]:
+        raw = _decode_gpt2_tokens(record["tokens"])
     if not isinstance(raw, str) or not raw.strip():
         return None, True
     decision = evaluate_byte_sieve(raw, sieve_config)

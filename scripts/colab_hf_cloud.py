@@ -52,28 +52,59 @@ from mcl4_coe import (
     extract_uta_episodes,
     index_python_repo_to_atxy,
     list_checkpoints,
+    parse_mcqa_decision_fields,
     prepare_model,
 )
 from mcl4_coe.curation import sanitize_trace_markers
 
-# Default Hugging Face streaming sources mirroring X:\corpora across the 3 tracks
+# Default "Nemotron-Core" 3-Track Hugging Face streaming recipe (`gated: false`)
 DEFAULT_HF_TRACK_SOURCES: dict[str, list[dict[str, Any]]] = {
     "pretrain_lm": [
-        {"path": "wikimedia/wikipedia", "name": "20231101.en", "split": "train"},
-        {"path": "HuggingFaceFW/fineweb-edu", "name": "sample-10BT", "split": "train"},
+        {"path": "nvidia/Nemotron-ClimbMix", "name": None, "split": "train"},
+        {
+            "path": "nvidia/Nemotron-Pretraining-Specialized-v1.1",
+            "name": "Nemotron-Pretraining-Code-Concepts",
+            "split": "train",
+        },
+        {
+            "path": "nvidia/Nemotron-Pretraining-Specialized-v1.1",
+            "name": "Nemotron-Pretraining-Formal-Logic",
+            "split": "train",
+        },
+        {
+            "path": "nvidia/Nemotron-Pretraining-Specialized-v1.1",
+            "name": "Nemotron-Pretraining-Unconditional-Algorithmic",
+            "split": "train",
+        },
+        {
+            "path": "nvidia/Nemotron-Pretraining-Dataset-sample",
+            "name": "Nemotron-CC-High-Quality-Synthetic",
+            "split": "train",
+        },
+        {
+            "path": "nvidia/Nemotron-Pretraining-Dataset-sample",
+            "name": "Nemotron-CC-MATH",
+            "split": "train",
+        },
+        {"path": "nvidia/Nemotron-MIND", "name": None, "split": "train"},
     ],
     "uta_trace": [
-        {"path": "a-m-team/AM-DeepSeek-R1-Distilled-1.4M", "name": None, "split": "train"},
-        {"path": "HuggingFaceH4/no_robots", "name": None, "split": "train"},
-        {"path": "sahil2801/CodeAlpaca-20k", "name": None, "split": "train"},
-        {"path": "meta-math/MetaMathQA", "name": None, "split": "train"},
-        {"path": "TIGER-Lab/MathInstruct", "name": None, "split": "train"},
-        {"path": "OpenAssistant/oasst1", "name": None, "split": "train"},
-        {"path": "Anthropic/hh-rlhf", "name": None, "split": "train"},
+        {"path": "nvidia/Nemotron-Cascade-2-SFT-Data", "name": "math", "split": "train"},
+        {"path": "nvidia/Nemotron-Cascade-2-SFT-Data", "name": "science", "split": "train"},
+        {"path": "nvidia/Nemotron-Cascade-2-SFT-Data", "name": "instruction_following", "split": "train"},
+        {"path": "nvidia/Nemotron-Cascade-2-SFT-Data", "name": "chat", "split": "train"},
+        {"path": "nvidia/Nemotron-Post-Training-Dataset-v1", "name": "default", "split": "math"},
+        {"path": "nvidia/Nemotron-Post-Training-Dataset-v1", "name": "default", "split": "stem"},
+        {"path": "nvidia/Nemotron-Pretraining-Dataset-sample", "name": "Nemotron-SFT-Code", "split": "train"},
     ],
     "typed_decision": [
-        {"path": "jev/typed-decisions", "name": None, "split": "train"},
-        {"path": "tasksource/tasksource-instruct-v0", "name": None, "split": "train"},
+        {"path": "nvidia/Nemotron-RL-knowledge-mcqa", "name": "default", "split": "train"},
+        {"path": "nvidia/Nemotron-CrossThink", "name": "default", "split": "train_qa"},
+        {
+            "path": "nvidia/Nemotron-Pretraining-Specialized-v1.1",
+            "name": "Nemotron-Pretraining-Multiple-Choice",
+            "split": "train",
+        },
     ],
 }
 
@@ -102,34 +133,14 @@ def _convert_record_to_decision_example(
     record: dict[str, Any],
     idx: int,
     max_seq_len: int,
-    max_options: int = 6,
+    max_options: int = 10,
 ) -> DecisionExample | None:
-    """Convert a raw HF record into a bounded `DecisionExample` for `TypedDecisionShardStreamer`."""
-    state = str(record.get("state") or record.get("inputs") or record.get("instruction") or "").strip()
-    kind = str(record.get("kind") or "choice").strip()
-    question = str(record.get("question") or "Select the best hypothesis.").strip()
-    options = record.get("options") or record.get("choices")
-    target = record.get("target") or record.get("label")
-
-    if kind == "noul" and (not isinstance(options, list) or len(options) == 0):
-        options = ["The answer is no.", "The answer is yes."]
-        if isinstance(target, list) and len(target) == 1:
-            p = float(target[0])
-            target = [1.0 - p, p]
-
-    if not state or not isinstance(options, list) or len(options) < 2 or len(options) > max_options:
+    """Convert a raw HF or Nemotron MCQA record into a bounded `DecisionExample` for `MCL4-CED`."""
+    parsed = parse_mcqa_decision_fields(record)
+    if parsed is None:
         return None
-
-    best_idx = 0
-    if isinstance(target, list) and len(target) == len(options):
-        best_idx = max(range(len(target)), key=lambda i: float(target[i]))
-    elif isinstance(target, int) and 0 <= target < len(options):
-        best_idx = target
-    else:
-        return None
-
-    clean_opts = [sanitize_trace_markers(str(o).strip()) for o in options]
-    if any(not o for o in clean_opts):
+    state, kind, question, clean_opts, best_idx, rationale = parsed
+    if len(clean_opts) < 2 or len(clean_opts) > max_options:
         return None
 
     budget = max(64, max_seq_len - 16)
@@ -138,7 +149,11 @@ def _convert_record_to_decision_example(
 
     descs: list[str] = []
     for opt_i, opt_text in enumerate(clean_opts):
-        d_raw = f"#T$# Evaluate option [{opt_i}] against state.\n#A$# {opt_text}"
+        if rationale and opt_i == best_idx:
+            t_line = sanitize_trace_markers(rationale.splitlines()[0][:140])
+            d_raw = f"#T$# {t_line}\n#A$# {opt_text}"
+        else:
+            d_raw = f"#T$# Evaluate option [{opt_i}] against state.\n#A$# {opt_text}"
         d_str = d_raw.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
         descs.append(d_str)
 

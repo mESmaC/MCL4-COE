@@ -1119,5 +1119,107 @@ def test_verify_python_rollout_and_portable_shard_healing(tmp_path) -> None:
     assert (shards_copy / "typed_decision" / "decision_examples_cache.pt").is_file()
 
 
+def test_nemotron_core_schema_extractors() -> None:
+    """Verify Nemotron-Core schema extractors across pretrain_lm, uta_trace, and typed_decision."""
+    from mcl4_coe import (
+        extract_pretrain_text,
+        extract_typed_decision_uta,
+        extract_uta_episodes,
+        parse_mcqa_decision_fields,
+    )
 
+    # 1. Nemotron-MIND (`Text` capital-T column)
+    mind_row = {
+        "Document ID": "OWM-1",
+        "Text": (
+            "Participant 1: Let us derive the eigenvalues of a real symmetric 2x2 matrix step by step.\n"
+            "Participant 2: Because the matrix is symmetric, the discriminant of its characteristic "
+            "polynomial is guaranteed to be non-negative, yielding real eigenvalues."
+        ),
+    }
+    text_out, rej = extract_pretrain_text(mind_row)
+    assert not rej and text_out is not None and "eigenvalues" in text_out
 
+    # 2. Redacted user prompt in Nemotron-Post-Training-Dataset-v1 (`content == "-"`) must be rejected
+    redacted_row = {
+        "messages": [
+            {"role": "user", "content": "-"},
+            {"role": "assistant", "content": "<think>Some thought</think>Some answer"},
+        ]
+    }
+    assert extract_uta_episodes(redacted_row) == []
+
+    # 3. Nemotron-SFT-Code (`text` formatted as `input: ... output: ...`)
+    sft_row = {
+        "text": (
+            "input: Write a Python function to reverse a list.\n"
+            "output: First, slice the list with step -1.\n\ndef rev(xs):\n    return xs[::-1]"
+        )
+    }
+    eps = extract_uta_episodes(sft_row)
+    assert len(eps) == 1
+    assert "reverse a list" in eps[0][0]
+    assert "xs[::-1]" in eps[0][2]
+
+    # 4. Nemotron-RL-knowledge-mcqa
+    rl_mcqa_row = {
+        "responses_create_params": {
+            "input": [
+                {
+                    "role": "user",
+                    "content": (
+                        "Answer the following multiple choice question.\n\n"
+                        "Which mechanism guarantees O(T) complexity in MCL4-COE?\n"
+                        "A: Full quadratic attention\n"
+                        "B: Markov Local-4 Router\n"
+                        "C: Unbounded recursion\n"
+                        "D: Dense all-to-all MLP"
+                    ),
+                }
+            ]
+        },
+        "expected_answer": "B",
+        "options": [
+            {"A": "Full quadratic attention", "B": None, "C": None, "D": None},
+            {"A": None, "B": "Markov Local-4 Router", "C": None, "D": None},
+            {"A": None, "B": None, "C": "Unbounded recursion", "D": None},
+            {"A": None, "B": None, "C": None, "D": "Dense all-to-all MLP"},
+        ],
+    }
+    parsed_rl = parse_mcqa_decision_fields(rl_mcqa_row)
+    assert parsed_rl is not None
+    assert parsed_rl[4] == 1
+    assert parsed_rl[3][1] == "Markov Local-4 Router"
+
+    # 5. Nemotron-CrossThink
+    crossthink_row = {
+        "meta_data": {
+            "question": (
+                "Which transform precedes Lloyd-Max scalar quantization in TurboQuant?\n"
+                "A: Fast Fourier Transform\n"
+                "B: Fast Walsh-Hadamard Transform\n"
+                "C: Discrete Cosine Transform"
+            )
+        },
+        "reward_model": {"ground_truth": "B: Fast Walsh-Hadamard Transform"},
+    }
+    parsed_ct = parse_mcqa_decision_fields(crossthink_row)
+    assert parsed_ct is not None
+    assert parsed_ct[4] == 1
+
+    # 6. Nemotron-Pretraining-Specialized-v1.1 (`Nemotron-Pretraining-Multiple-Choice`)
+    spec_mc_row = {
+        "text": (
+            "In the A.TXY addressing system, how many total addresses exist across 6 planes of 6x6x6 cubes?\n"
+            "A. 216\n"
+            "B. 1296\n"
+            "C. 4096\n"
+            "D. 65536\n"
+            "Answer: B\n"
+            "Because each of the 6 planes contains 6*6*6 = 216 addresses, 6 * 216 = 1296 total addresses."
+        )
+    }
+    uta_mc = extract_typed_decision_uta(spec_mc_row)
+    assert uta_mc is not None
+    assert "1296 total addresses" in uta_mc[1]
+    assert "[1] 1296" in uta_mc[2]

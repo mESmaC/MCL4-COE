@@ -154,6 +154,7 @@ from .pipeline import (
     extract_typed_decision_uta,
     extract_uta_episodes,
     iter_source_records,
+    parse_mcqa_decision_fields,
 )
 from .ple import PerLayerEmbedding, RMSNorm
 from .trainer import (
@@ -287,6 +288,7 @@ __all__ = [
     "pack_atxy",
     "parameter_count",
     "parse_atxy",
+    "parse_mcqa_decision_fields",
     "parse_request",
     "pearson_similarity",
     "prepare_model",

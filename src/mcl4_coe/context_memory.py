@@ -290,7 +290,11 @@ class ContextLMCompressor(nn.Module):
             if not c_val.any():
                 continue
 
-            enc = backbone.encode_state(c_ids, c_val, causal=False)
+            row_has_valid = c_val.any(dim=-1)
+            c_val_safe = c_val.clone()
+            c_val_safe[~row_has_valid, 0] = True
+
+            enc = backbone.encode_state(c_ids, c_val_safe, causal=False)
             total_aux = total_aux + enc.aux_loss
             total_z = total_z + enc.router_z_loss
             loads.append(enc.expert_load)
@@ -300,15 +304,21 @@ class ContextLMCompressor(nn.Module):
             scores = torch.matmul(q.float(), enc.hidden.float().transpose(-1, -2)) / math.sqrt(
                 self.d_model
             )
-            scores = scores.masked_fill(~c_val.unsqueeze(1), -1e9)
+            scores = scores.masked_fill(~c_val_safe.unsqueeze(1), -1e9)
             attn = F.softmax(scores, dim=-1).to(enc.hidden.dtype)
             chunk_gist = self.gist_norm(torch.matmul(attn, enc.hidden).float()).to(enc.hidden.dtype)
 
-            chunk_has_valid = c_val.any(dim=-1, keepdim=True).expand(
+            chunk_has_valid = row_has_valid.unsqueeze(-1).expand(
                 batch_size, self.gist_tokens_per_chunk
             )
+            chunk_gist = chunk_gist.masked_fill(~chunk_has_valid.unsqueeze(-1), 0)
             if running_gist is not None:
-                chunk_gist = backbone.feedback(chunk_gist, running_gist, valid=chunk_has_valid)
+                safe_valid = chunk_has_valid.clone()
+                safe_valid[~row_has_valid, 0] = True
+                updated_gist = backbone.feedback(chunk_gist, running_gist, valid=safe_valid)
+                chunk_gist = torch.where(
+                    chunk_has_valid.unsqueeze(-1), updated_gist, running_gist
+                )
             running_gist = chunk_gist
 
             gist_chunks.append(chunk_gist)

@@ -296,6 +296,8 @@ class MultiPassController(nn.Module):
                             next_logits[trig_b] -= 3.5 * cnt
 
                 # Prevent 3x identical character repeats ("sss") or 2x identical punctuation
+                if step == 0:
+                    next_logits[ord("<")] = -torch.inf
                 if len(tokens) >= 3 and tokens[-1] == tokens[-2] == tokens[-3]:
                     next_logits[tokens[-1]] = -torch.inf
                 elif len(tokens) >= 2 and tokens[-1] == tokens[-2] and not chr(min(126, max(32, tokens[-1]))).isalnum():

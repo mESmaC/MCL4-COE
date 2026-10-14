@@ -37,6 +37,9 @@ from .trainer import (
     list_checkpoints,
     list_runs,
     load_run_metrics,
+    resolve_corpora_root,
+    resolve_runs_root,
+    resolve_shards_root,
 )
 
 
@@ -49,9 +52,9 @@ class TrainingControllerState:
         shards_root: str | Path = r"X:\MCL4-COE\data_shards",
         corpora_root: str | Path = r"X:\corpora",
     ) -> None:
-        self.runs_root = Path(runs_root).expanduser().resolve()
-        self.shards_root = Path(shards_root).expanduser().resolve()
-        self.corpora_root = Path(corpora_root).expanduser().resolve()
+        self.runs_root = resolve_runs_root(runs_root)
+        self.shards_root = resolve_shards_root(shards_root)
+        self.corpora_root = resolve_corpora_root(corpora_root)
         self.runs_root.mkdir(parents=True, exist_ok=True)
 
         self._lock = threading.Lock()

@@ -109,6 +109,24 @@ def compute_2to4_mask(weight: Tensor, mode: str = "2to4_transposable") -> Tensor
     )
 
 
+def has_native_nvfp4(device: torch.device | str = "cuda") -> bool:
+    """Return True if `device` and the active PyTorch build support native Blackwell sm_100+ NVFP4."""
+    if not torch.cuda.is_available():
+        return False
+    dev = torch.device(device)
+    if dev.type != "cuda":
+        return False
+    if not (
+        hasattr(torch, "float4_e2m1fn_x2")
+        and hasattr(F, "scaled_mm")
+        and hasattr(F, "ScalingType")
+        and hasattr(F, "SwizzleType")
+    ):
+        return False
+    major, _ = torch.cuda.get_device_capability(dev)
+    return major >= 10
+
+
 def _swizzle_scales(scales: Tensor) -> Tensor:
     """Pack block scales into cuBLASLt's 128-row by 4-scale tiles with inner 32x4x4 layout."""
     rows, columns = scales.shape
@@ -121,6 +139,18 @@ def _swizzle_scales(scales: Tensor) -> Tensor:
         .contiguous()
         .view(padded_rows, padded_columns)
         .to(torch.float8_e4m3fn)
+    )
+
+
+def _unswizzle_scales(swizzled: Tensor, rows: int, columns: int) -> Tensor:
+    """Invert `SWIZZLE_32_4_4` block scales back to `[rows, columns]` FP32 scales."""
+    padded_rows, padded_columns = swizzled.shape
+    return (
+        swizzled.float()
+        .view(padded_rows // 128, padded_columns // 4, 32, 4, 4)
+        .permute(0, 3, 2, 1, 4)
+        .contiguous()
+        .view(padded_rows, padded_columns)[:rows, :columns]
     )
 
 
@@ -212,12 +242,35 @@ def quantize_nvfp4(
     )
     normalized = values.view(rows, columns // 16, 16) * inverse.unsqueeze(-1)
     codes = _e2m1_codes(normalized.reshape(rows, columns), stochastic)
-    packed = codes[:, 0::2] | (codes[:, 1::2] << 4)
+    packed = (codes[:, 0::2] | (codes[:, 1::2] << 4)).contiguous()
+    fp4_dtype = getattr(torch, "float4_e2m1fn_x2", torch.uint8)
     return (
-        packed.contiguous().view(torch.float4_e2m1fn_x2),
+        packed.view(fp4_dtype),
         _swizzle_scales(block_scales),
         global_scale,
     )
+
+
+@torch.no_grad()
+def _dequantize_nvfp4(
+    packed: Tensor,
+    swizzled_scales: Tensor,
+    global_scale: Tensor,
+    rows: int,
+    columns: int,
+) -> Tensor:
+    """Decode packed E2M1 + swizzled FP8 E4M3 block scales back to FP32 on pre-Blackwell GPUs."""
+    raw_u8 = packed.view(torch.uint8)
+    c0 = raw_u8 & 0x0F
+    c1 = (raw_u8 >> 4) & 0x0F
+    codes = torch.stack((c0, c1), dim=-1).reshape(rows, columns)
+    sign = torch.where((codes & 0x08) != 0, -1.0, 1.0)
+    mag_idx = (codes & 0x07).long()
+    levels = _e2m1_levels(str(packed.device))
+    norm_vals = sign * levels[mag_idx]
+    block_scales = _unswizzle_scales(swizzled_scales, rows, columns // 16)
+    decoding = block_scales * global_scale.float()
+    return (norm_vals.view(rows, columns // 16, 16) * decoding.unsqueeze(-1)).reshape(rows, columns)
 
 
 @torch.no_grad()
@@ -232,40 +285,43 @@ def nvfp4_mm(
     prequantized_b: tuple[Tensor, Tensor, Tensor] | None = None,
     _phase: str = "other",
 ) -> Tensor:
-    """Return `a @ b.T` using real Blackwell NVFP4 CUDA GEMM (`F.scaled_mm`) with FP32 accumulation."""
+    """Return `a @ b.T` using native Blackwell NVFP4 (`F.scaled_mm`) or exact E2M1 emulation on pre-Blackwell CUDA."""
     if a.ndim != 2 or b.ndim != 2 or a.shape[1] != b.shape[1]:
         raise ValueError("NVFP4 matmul expects a[M,K] and b[N,K]")
     if a.device != b.device or a.device.type != "cuda":
         raise ValueError("NVFP4 matmul requires both operands on the same CUDA device")
-    if not hasattr(F, "scaled_mm"):
-        raise RuntimeError("Native NVFP4 requires PyTorch with torch.nn.functional.scaled_mm")
     m, k = a.shape
     n = b.shape[0]
     if min(m, n, k) == 0:
         raise ValueError("NVFP4 matmul requires nonempty operands")
     kp = _round_up(k, 32)
     mp = _round_up(m, 32)
+    np_ = _round_up(n, 32)
     ap = F.pad(a.float(), (0, kp - k, 0, mp - m)) if (kp != k or mp != m) else a.float()
     qa, sa, ga = quantize_nvfp4(ap, stochastic=stochastic_a, causal_row_scale=causal_a)
     if prequantized_b is not None:
         qb, sb, gb = prequantized_b
     else:
-        np_ = _round_up(n, 32)
         bp = F.pad(b.float(), (0, kp - k, 0, np_ - n)) if (kp != k or np_ != n) else b.float()
         qb, sb, gb = quantize_nvfp4(bp, two_dimensional=weight_b, stochastic=stochastic_b)
-    recipe = [F.ScalingType.BlockWise1x16, F.ScalingType.TensorWise]
-    swizzle = [F.SwizzleType.SWIZZLE_32_4_4, F.SwizzleType.NO_SWIZZLE]
-    result = F.scaled_mm(
-        qa,
-        qb.t(),
-        scale_a=[sa, ga],
-        scale_recipe_a=recipe,
-        scale_b=[sb, gb],
-        scale_recipe_b=recipe,
-        swizzle_a=swizzle,
-        swizzle_b=swizzle,
-        output_dtype=torch.float32,
-    )
+    if has_native_nvfp4(a.device):
+        recipe = [F.ScalingType.BlockWise1x16, F.ScalingType.TensorWise]
+        swizzle = [F.SwizzleType.SWIZZLE_32_4_4, F.SwizzleType.NO_SWIZZLE]
+        result = F.scaled_mm(
+            qa,
+            qb.t(),
+            scale_a=[sa, ga],
+            scale_recipe_a=recipe,
+            scale_b=[sb, gb],
+            scale_recipe_b=recipe,
+            swizzle_a=swizzle,
+            swizzle_b=swizzle,
+            output_dtype=torch.float32,
+        )
+    else:
+        deq_a = _dequantize_nvfp4(qa, sa, ga, mp, kp)
+        deq_b = _dequantize_nvfp4(qb, sb, gb, np_, kp)
+        result = torch.matmul(deq_a, deq_b.t())
     _GEMM_COUNTS[_phase] += 1
     return result[:m, :n]
 

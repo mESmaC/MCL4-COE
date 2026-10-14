@@ -16,6 +16,7 @@ Implements all equations and structural self-improvement mechanics from
 
 from __future__ import annotations
 
+import ast
 import math
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -555,6 +556,165 @@ _SCAFFOLD_CANDIDATES: tuple[str, ...] = (
     "decision -> deduction -> evaluation -> metacognition",
 )
 
+_SAFE_AST_NODES = (
+    ast.Module,
+    ast.FunctionDef,
+    ast.arguments,
+    ast.arg,
+    ast.Return,
+    ast.Assert,
+    ast.Expr,
+    ast.Assign,
+    ast.BinOp,
+    ast.UnaryOp,
+    ast.BoolOp,
+    ast.Compare,
+    ast.IfExp,
+    ast.Call,
+    ast.Name,
+    ast.Constant,
+    ast.Subscript,
+    ast.Tuple,
+    ast.List,
+    ast.Load,
+    ast.Store,
+    ast.Add,
+    ast.Sub,
+    ast.Mult,
+    ast.FloorDiv,
+    ast.Mod,
+    ast.Pow,
+    ast.BitXor,
+    ast.BitAnd,
+    ast.BitOr,
+    ast.USub,
+    ast.UAdd,
+    ast.And,
+    ast.Or,
+    ast.Eq,
+    ast.NotEq,
+    ast.Lt,
+    ast.LtE,
+    ast.Gt,
+    ast.GtE,
+)
+_SAFE_BUILTINS: dict[str, Any] = {
+    "abs": abs,
+    "int": int,
+    "len": len,
+    "max": max,
+    "min": min,
+    "range": range,
+    "sum": sum,
+}
+_HACK_STUB_MARKERS: tuple[str, ...] = (
+    "Constant stub",
+    "Default fallback",
+    "Zero delta",
+    "Return base",
+    "Mask overflow",
+    "Uninitialized pointer",
+    "Empty join",
+    "Deadlock immediately",
+    "#T$# 0\n",
+)
+
+
+def verify_python_rollout(
+    trace_text: str,
+    harness_h: str,
+    gold_answer: str = "",
+) -> float:
+    """Deterministically verify a `#T$# ... #A$#` rollout against Python assertion harness `harness_h`.
+
+    Enforces:
+    1. Mandatory non-empty `#T$#` scratchpad before `#A$#` (returns `0.0` if missing).
+    2. Rejection of boundary/constant hack stubs (`0.0`).
+    3. AST-validated sandboxed execution of `def solve(...)` + `assert ...` or relational
+       invariant assertions (`expected == ...`, `delta == ...`, `dp[k] == ...`, etc.).
+    """
+    import re
+
+    if "#T$#" not in trace_text or "#A$#" not in trace_text:
+        return 0.0
+    for marker in _HACK_STUB_MARKERS:
+        if marker in trace_text:
+            return 0.0
+
+    t_part, a_part = trace_text.split("#A$#", 1)
+    t_body = t_part.replace("#T$#", "", 1).strip()
+    a_body = a_part.strip()
+    if not t_body or not a_body:
+        return 0.0
+
+    harness_clean = harness_h.strip()
+
+    # Case 1: Executable Python function + `assert solve(...) == ...`
+    if "def " in a_body and harness_clean.startswith("assert "):
+        code_line = a_body.split("#")[0].strip()
+        program_src = f"{code_line}\n{harness_clean}\n"
+        try:
+            tree = ast.parse(program_src, mode="exec")
+            for node in ast.walk(tree):
+                if not isinstance(node, _SAFE_AST_NODES):
+                    return 0.0
+                if isinstance(node, ast.Call):
+                    if not isinstance(node.func, ast.Name):
+                        return 0.0
+            env: dict[str, Any] = {"__builtins__": dict(_SAFE_BUILTINS)}
+            exec(compile(tree, "<ornith_verifier>", "exec"), env, env)
+            return 1.0
+        except AssertionError:
+            return 0.15 if any(op in t_body for op in ("*", "+", "-")) else 0.0
+        except Exception:
+            return 0.0
+
+    # Case 2: Algebraic / invariant assertion expression (`expected == 30`, `dp[3] == 19`, etc.)
+    nums = [int(m) for m in re.findall(r"-?\d+", a_body)]
+    if nums:
+        first_num = nums[0]
+        if harness_clean.lstrip("-").isdigit():
+            if first_num == int(harness_clean):
+                return 1.0
+            return 0.15 if any(op in t_body for op in ("*", "+", "-")) else 0.0
+
+        env_expr: dict[str, Any] = {
+            "__builtins__": dict(_SAFE_BUILTINS),
+            "expected": first_num,
+            "delta": first_num,
+            "y": first_num,
+            "mid": first_num,
+            "max_rows": first_num,
+            "acquisitions": first_num,
+            "cycles": nums[1] if len(nums) > 1 else 0,
+            "dp": defaultdict_int(first_num),
+        }
+        try:
+            tree_expr = ast.parse(harness_clean, mode="eval")
+            for node in ast.walk(tree_expr):
+                if not isinstance(node, (*_SAFE_AST_NODES, ast.Expression)):
+                    return 0.0
+            passed = bool(eval(compile(tree_expr, "<ornith_expr>", "eval"), env_expr, env_expr))
+            if passed:
+                return 1.0
+        except Exception:
+            pass
+
+    if gold_answer and a_body == gold_answer.strip():
+        return 1.0
+    return 0.15 if any(op in t_body for op in ("*", "+", "-", "=")) else 0.0
+
+
+class defaultdict_int(dict):
+    """Helper mapping any index lookup `dp[k]` to the candidate scalar value during verification."""
+
+    def __init__(self, val: int) -> None:
+        super().__init__()
+        self._val = val
+
+    def __getitem__(self, key: Any) -> int:
+        return self._val
+
 
 class OrnithSelfImprover:
     """Executes the closed-loop Ornith-1.0 Self-Scaffolding, Ornith-1.5 Self-Improvement, and Dream-RSI cycle.
@@ -904,9 +1064,17 @@ class OrnithSelfImprover:
         log_probs = probs.clamp_min(1e-7).log()
         beh_log_probs = log_probs.detach()
 
-        # Build harness score tensor [B, 4] and negative hack-attempt scores [B, 1]
+        # Build verified harness score tensor [B, 4] via sandboxed Python execution + reference scores
+        verified_rows: list[list[float]] = []
+        for t in tasks:
+            row_sc: list[float] = []
+            for cand, ref_s in zip(t.candidate_rollouts, t.harness_scores):
+                v_s = verify_python_rollout(cand, t.harness_h, t.gold_answer)
+                row_sc.append(0.5 * v_s + 0.5 * float(ref_s) if v_s > 0.0 else 0.0)
+            verified_rows.append(row_sc)
+
         h_scores = torch.tensor(
-            [t.harness_scores for t in tasks],
+            verified_rows,
             device=self.device,
             dtype=torch.float32,
         )
@@ -960,8 +1128,40 @@ class OrnithSelfImprover:
             advantages,
             policy_age=0,
         )
-        # Verified gold rollout negative log-likelihood as self-distillation signal
-        self_distill_loss = F.nll_loss(log_probs, targets)
+        # Verified gold rollout negative log-likelihood + 0x8000 prompt-masked decoder self-distillation
+        decision_distill_loss = F.nll_loss(log_probs, targets)
+        max_lm_len = min(eff_seq_len, int(getattr(coe.backbone.config, "max_seq_len", 256)))
+        inp_rows: list[list[int]] = []
+        lbl_rows: list[list[int]] = []
+        for t in tasks:
+            u_clean = t.prompt_q.replace("#U$#", "").strip()
+            raw_turn = self.tokenizer.encode_masked_turn(u_clean, t.gold_thought, t.gold_answer)
+            if len(raw_turn) > max_lm_len + 1:
+                raw_turn = raw_turn[: max_lm_len + 1]
+            inp_rows.append([tok & 0x7FFF for tok in raw_turn[:-1]])
+            lbl_rows.append(
+                [
+                    -100
+                    if (tok & self.tokenizer.prompt_mask_bit)
+                    or (tok & 0x7FFF) == self.tokenizer.pad_id
+                    else (tok & 0x7FFF)
+                    for tok in raw_turn[1:]
+                ]
+            )
+        pad_len = max(len(r) for r in inp_rows)
+        inp_tensor = torch.tensor(
+            [r + [self.tokenizer.pad_id] * (pad_len - len(r)) for r in inp_rows],
+            dtype=torch.long,
+            device=self.device,
+        )
+        lbl_tensor = torch.tensor(
+            [r + [-100] * (pad_len - len(r)) for r in lbl_rows],
+            dtype=torch.long,
+            device=self.device,
+        )
+        lm_distill_out = coe.forward_inference(inp_tensor, targets=lbl_tensor)
+        assert lm_distill_out.loss is not None
+        self_distill_loss = 0.5 * decision_distill_loss + 0.5 * lm_distill_out.loss
 
         total_ornith_loss = op_out.total_loss + 0.5 * grpo_loss + 0.25 * self_distill_loss
         mean_rollout_r = float((probs.detach() * h_scores).sum(dim=-1).mean().item())

@@ -1205,7 +1205,7 @@ class MCL4DreamDiscovery:
         vetoed = (ded_contradicted > 0.55) or (meta_confidence < 0.35)
 
         ref_utils = op_out.evaluation_utilities.float().view(-1)
-        utility = float(torch.sigmoid(ref_utils[best_rollout_idx]).item())
+        utility = float(ref_utils[best_rollout_idx].clamp(0.0, 1.0).item())
 
         if not self._node_embeddings:
             novelty = 1.0

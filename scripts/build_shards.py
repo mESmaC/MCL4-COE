@@ -30,6 +30,8 @@ from mcl4_coe import (
     ShardedTokenBlockDataset,
     build_corpus_shards,
     discover_corpora,
+    resolve_corpora_root,
+    resolve_shards_root,
 )
 
 
@@ -82,20 +84,21 @@ def main() -> None:
     args = parser.parse_args()
 
     t0 = time.perf_counter()
-    specs = discover_corpora(args.corpora_root)
-    out_dir = Path(args.output_dir).expanduser().resolve()
+    corpora_root = resolve_corpora_root(args.corpora_root)
+    out_dir = resolve_shards_root(args.output_dir)
+    specs = discover_corpora(corpora_root)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     inv_path = out_dir / "corpus_inventory_receipt.json"
     inv_payload = {
-        "corpora_root": str(Path(args.corpora_root).resolve()),
+        "corpora_root": str(corpora_root),
         "total_corpora": len(specs),
         "total_bytes": sum(s.total_bytes for s in specs),
         "corpora": [asdict(s) for s in specs],
     }
     inv_path.write_text(json.dumps(inv_payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    print(f"=== Discovered {len(specs)} Valid Corpora in {args.corpora_root} (TinyStories Excluded) ===")
+    print(f"=== Discovered {len(specs)} Valid Corpora in {corpora_root} (TinyStories Excluded) ===")
     for s in specs:
         gb = s.total_bytes / (1024**3)
         print(f"  [{s.track:<14}] {s.name:<48} | files={len(s.files):>6} | {gb:>6.2f} GB ({s.format_hint})")

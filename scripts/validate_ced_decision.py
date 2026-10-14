@@ -134,7 +134,12 @@ def main() -> None:
         print(f"GPU: {torch.cuda.get_device_name(0)} (capability={torch.cuda.get_device_capability(0)})")
 
     # 1. Benchmark on mcattn's exact 27-example association_train.jsonl
-    mcattn_data = Path(r"C:\Users\engin\Desktop\mcattn\examples\association_train.jsonl")
+    sibling_mcattn = Path(__file__).resolve().parents[2] / "mcattn" / "examples" / "association_train.jsonl"
+    mcattn_data = (
+        sibling_mcattn
+        if sibling_mcattn.is_file()
+        else Path(r"C:\Users\engin\Desktop\mcattn\examples\association_train.jsonl")
+    )
     mcattn_examples: list[DecisionExample] = []
     for line in mcattn_data.read_text(encoding="utf-8-sig").splitlines():
         if line.strip():

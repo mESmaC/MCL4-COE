@@ -414,22 +414,55 @@ def _split_thought_and_answer(raw_response: str, explicit_thought: str | None = 
     return f"Evaluate step-by-step: {resp}", resp
 
 
+def _truncate_utf8_bytes(text: str, max_bytes: int) -> str:
+    """Safely compact or truncate `text` so its UTF-8 byte length is `<= max_bytes`."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    if max_bytes > 240:
+        head_c = max(80, int(max_bytes * 0.58))
+        tail_c = max(60, int(max_bytes * 0.32))
+        window = build_head_tail_window(text, head_chars=head_c, tail_chars=tail_c)
+        if len(window.encode("utf-8")) <= max_bytes:
+            return window
+    return encoded[:max_bytes].decode("utf-8", errors="ignore").rstrip()
+
+
 def _compact_uta_triplet(
     u: str,
     t: str,
     a: str,
     *,
     max_total_chars: int = 1900,
+    max_total_bytes: int = 1960,
 ) -> tuple[str, str, str]:
-    """Sanitize and compact verbose `<think>` monologues into head+tail `#T$#` windows."""
-    u_s = sanitize_trace_markers(u)
-    t_s = sanitize_trace_markers(t)
-    a_s = sanitize_trace_markers(a)
-    if len(u_s) + len(t_s) + len(a_s) > max_total_chars and len(t_s) > 360:
-        budget = max(320, max_total_chars - len(u_s) - len(a_s))
-        head_c = max(180, int(budget * 0.62))
-        tail_c = max(120, int(budget * 0.34))
+    """Sanitize and compact `#U$#`, `#T$#`, and `#A$#` so every episode fits inside `seq_len=2048`."""
+    u_s = sanitize_trace_markers(u).strip()
+    t_s = sanitize_trace_markers(t).strip()
+    a_s = sanitize_trace_markers(a).strip()
+
+    # 1. Cap oversized prompt (#U$#) and post-</think> answer (#A$#) windows first
+    if len(u_s) > 720:
+        u_s = build_head_tail_window(u_s, head_chars=460, tail_chars=220)
+    if len(a_s) > 640:
+        a_s = build_head_tail_window(a_s, head_chars=380, tail_chars=220)
+
+    # 2. Compact verbose <think> scratchpad (#T$#) to fit remaining character budget
+    if len(u_s) + len(t_s) + len(a_s) > max_total_chars and len(t_s) > 280:
+        budget = max(280, max_total_chars - len(u_s) - len(a_s))
+        head_c = max(160, int(budget * 0.60))
+        tail_c = max(100, int(budget * 0.34))
         t_s = build_head_tail_window(t_s, head_chars=head_c, tail_chars=tail_c)
+
+    # 3. Guarantee UTF-8 byte length <= max_total_bytes (accounting for multibyte math/Unicode)
+    u_b = len(u_s.encode("utf-8"))
+    t_b = len(t_s.encode("utf-8"))
+    a_b = len(a_s.encode("utf-8"))
+    if u_b + t_b + a_b > max_total_bytes:
+        u_s = _truncate_utf8_bytes(u_s, min(u_b, 640))
+        a_s = _truncate_utf8_bytes(a_s, min(a_b, 560))
+        rem = max(240, max_total_bytes - len(u_s.encode("utf-8")) - len(a_s.encode("utf-8")))
+        t_s = _truncate_utf8_bytes(t_s, rem)
     return (u_s, t_s, a_s)
 
 
@@ -456,16 +489,48 @@ def extract_uta_episodes(record: Any) -> list[tuple[str, str, str]]:
             t_clean, a_clean = _split_thought_and_answer(a, explicit_thought=t)
             return [_compact_uta_triplet(u, t_clean, a_clean)]
 
-    # Case 3: Instruction / Query + Response / Output (`MathInstruct`, `MetaMathQA`, `code-alpaca`, `GPT-5.5-...`)
-    for q_key in ("instruction", "query", "problem", "prompt"):
+    # Case 3: Instruction / Query / Formal Statement + Response / Output / Proof
+    for q_key in (
+        "instruction",
+        "query",
+        "problem",
+        "prompt",
+        "question",
+        "formal_statement",
+        "informal_statement",
+        "theorem",
+        "observation",
+        "task",
+    ):
         if isinstance(record.get(q_key), str) and record[q_key].strip():
-            for a_key in ("response", "output", "solution", "answer"):
+            explicit_t = str(
+                record.get("reasoning")
+                or record.get("thought")
+                or record.get("thinking")
+                or record.get("analysis")
+                or record.get("informal_proof")
+                or ""
+            ).strip()
+            for a_key in (
+                "response",
+                "output",
+                "solution",
+                "answer",
+                "final_answer",
+                "conclusion",
+                "lean4_code",
+                "formal_proof",
+                "proof",
+                "completion",
+            ):
                 if isinstance(record.get(a_key), str) and record[a_key].strip():
                     u = record[q_key].strip()
                     inp_extra = str(record.get("input") or "").strip()
                     if inp_extra and inp_extra not in u:
                         u = f"{u}\n{inp_extra}"
-                    t_clean, a_clean = _split_thought_and_answer(record[a_key])
+                    t_clean, a_clean = _split_thought_and_answer(
+                        record[a_key], explicit_thought=explicit_t or None
+                    )
                     return [_compact_uta_triplet(u, t_clean, a_clean)]
 
     # Case 4: `messages` or `conversations` array (`AM-DeepSeek-R1`, `Mega-Brain`, `no_robots`, etc.)
@@ -477,32 +542,48 @@ def extract_uta_episodes(record: Any) -> list[tuple[str, str, str]]:
             if not isinstance(msg, dict):
                 continue
             role = str(msg.get("role") or msg.get("from") or "").lower()
-            content = str(msg.get("content") or msg.get("value") or "").strip()
-            reasoning = str(msg.get("reasoning_content") or msg.get("thinking") or "").strip()
+            content = str(msg.get("content") or msg.get("value") or msg.get("text") or "").strip()
+            reasoning = str(
+                msg.get("reasoning_content")
+                or msg.get("thinking")
+                or msg.get("reasoning")
+                or msg.get("thought")
+                or ""
+            ).strip()
             if role in ("system", "developer") and content:
                 current_user.append(content)
-            elif role in ("user", "human") and content:
+            elif role in ("user", "human", "prompter") and content:
                 current_user.append(content)
-            elif role in ("assistant", "gpt", "model") and (content or reasoning) and current_user:
+            elif role in ("assistant", "gpt", "model", "bot") and (content or reasoning) and current_user:
                 prompt_str = "\n\n".join(current_user)
                 t_clean, a_clean = _split_thought_and_answer(content, explicit_thought=reasoning)
                 episodes.append(_compact_uta_triplet(prompt_str, t_clean, a_clean))
                 current_user.clear()
         return episodes
 
-    # Case 5: GitHub CodeReview (`before_code`, `reviewer_comment`, `after_code`)
+    # Case 5: Anthropic hh-rlhf (`chosen` multi-turn `Human:` / `Assistant:` transcript)
+    if isinstance(record.get("chosen"), str) and "Human:" in record["chosen"] and "Assistant:" in record["chosen"]:
+        parts = re.split(r"(?:^|\n\n)(Human|Assistant):\s*", record["chosen"].strip())
+        if len(parts) >= 5:
+            last_u = ""
+            last_a = ""
+            for idx in range(1, len(parts) - 1, 2):
+                speaker, body = parts[idx], parts[idx + 1].strip()
+                if speaker == "Human" and body:
+                    last_u = body
+                elif speaker == "Assistant" and body and last_u:
+                    last_a = body
+            if last_u and last_a:
+                t_clean, a_clean = _split_thought_and_answer(last_a)
+                return [_compact_uta_triplet(last_u, t_clean, a_clean)]
+
+    # Case 6: GitHub CodeReview (`before_code`, `reviewer_comment`, `after_code`)
     if "before_code" in record and "reviewer_comment" in record and "after_code" in record:
         before = str(record.get("before_code") or "").strip()
         comment = str(record.get("reviewer_comment") or "").strip()
         after = str(record.get("after_code") or "").strip()
         if before and comment and after:
-            return [
-                (
-                    sanitize_trace_markers(f"Review and patch code:\n{before}"),
-                    sanitize_trace_markers(comment),
-                    sanitize_trace_markers(after),
-                )
-            ]
+            return [_compact_uta_triplet(f"Review and patch code:\n{before}", comment, after)]
 
     return []
 
@@ -1297,10 +1378,13 @@ class TypedDecisionShardStreamer:
             except Exception:
                 pass
         pool = []
-        for ex in self._scan_raw_examples():
-            pool.append(ex)
-            if len(pool) >= self.max_cached_examples:
-                break
+        if self.corpus_dir.is_dir():
+            for ex in self._scan_raw_examples():
+                pool.append(ex)
+                if len(pool) >= self.max_cached_examples:
+                    break
+        if not pool:
+            pool = _build_portable_decision_examples(max_seq_len=self.max_seq_len)
         self._cached_examples = pool
         if self.cache_path is not None and pool:
             try:
@@ -1332,6 +1416,231 @@ class TypedDecisionShardStreamer:
         examples = [pool[(self._cursor + i) % n] for i in range(batch_size)]
         self._cursor = (self._cursor + batch_size) % n
         return collate_decisions(examples, self.max_seq_len, device=device)
+
+
+def _build_portable_decision_examples(max_seq_len: int = 512) -> list[Any]:
+    """Build portable `DecisionExample` records when `X:\\corpora` is not mounted (Laptop / Colab)."""
+    from .data import DecisionExample, parse_request
+
+    examples: list[DecisionExample] = []
+    repo_root = Path(__file__).resolve().parents[2]
+    sibling_mcattn = repo_root.parent / "mcattn" / "examples" / "association_train.jsonl"
+    if sibling_mcattn.is_file():
+        for line in sibling_mcattn.read_text(encoding="utf-8-sig").splitlines():
+            if line.strip():
+                try:
+                    examples.extend(parse_request(json.loads(line), require_targets=True))
+                except Exception:
+                    continue
+
+    animals = ("rabbit", "otter", "falcon", "badger")
+    colors = ("crimson", "cobalt", "emerald", "amber")
+    tools = ("compass", "lantern", "chronometer", "telescope")
+    for a_i, animal in enumerate(animals):
+        for c_i, color in enumerate(colors):
+            t_i = (a_i + c_i) % len(tools)
+            other_a = animals[(a_i + 1) % len(animals)]
+            other_c = colors[(c_i + 1) % len(colors)]
+            other_t = tools[(t_i + 1) % len(tools)]
+            state = (
+                f"The {color} {animal} calibrated the {tools[t_i]} before dawn, "
+                f"while the {other_c} {other_a} inspected the {other_t}."
+            )
+            opts = [
+                f"#T$# Matches the {color} {animal} in the first clause.\n#A$# {tools[t_i]}",
+                f"#T$# Belongs to the {other_c} {other_a}, not the {animal}.\n#A$# {other_t}",
+                f"#T$# Unmentioned instrument.\n#A$# barometer",
+            ]
+            examples.append(
+                DecisionExample(
+                    question_id=f"portable_{a_i}_{c_i}",
+                    kind="choice",
+                    context=f"#U$# {state}\n#Q$# [choice] Which instrument did the {color} {animal} calibrate?",
+                    descriptions=tuple(opts),
+                    values=(tools[t_i], other_t, "barometer"),
+                    target=0,
+                )
+            )
+    return [
+        ex
+        for ex in examples
+        if len(ex.context.encode("utf-8")) + 2 <= max_seq_len
+        and all(len(d.encode("utf-8")) + 2 <= max_seq_len for d in ex.descriptions)
+    ]
+
+
+def _track_shards_complete(index_file: Path) -> bool:
+    if not index_file.is_file():
+        return False
+    try:
+        receipt = IndexReceipt.from_file(index_file)
+        if not receipt.shards:
+            return False
+        base_dir = index_file.parent
+        for s in receipt.shards:
+            if not (base_dir / s["bin_file"]).is_file():
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def ensure_sharded_tracks_ready(
+    shards_root: str | Path,
+    *,
+    corpora_root: str | Path | None = None,
+    seq_len: int = 512,
+) -> dict[str, Path]:
+    """Ensure `pretrain_lm`, `uta_trace`, and `typed_decision` have valid `.bin` shards + `index_receipt.json`.
+
+    Because `*.bin` files are git-ignored, a fresh `git clone` on a laptop or Google Colab
+    contains `index_receipt.json` metadata without the `.bin` binaries. This helper verifies
+    that every referenced `.bin` exists and automatically builds portable `.bin` shards when missing.
+    """
+    root = Path(shards_root).expanduser().resolve()
+    track_names = ("pretrain_lm", "uta_trace", "typed_decision")
+    existing: dict[str, Path] = {}
+    for t_name in track_names:
+        idx = root / t_name / "index_receipt.json"
+        if _track_shards_complete(idx):
+            existing[t_name] = idx
+
+    if len(existing) == len(track_names):
+        return existing
+
+    # If corpora_root is mounted and contains real corpora, build from corpora_root
+    if corpora_root is not None:
+        c_path = Path(corpora_root).expanduser()
+        if c_path.is_dir() and discover_corpora(c_path):
+            build_corpus_shards(
+                c_path,
+                root,
+                tracks=track_names,
+                seq_len=seq_len,
+                max_blocks_per_shard=64,
+                max_files_per_corpus=1,
+                max_records_per_file=200,
+            )
+            for t_name in track_names:
+                idx = root / t_name / "index_receipt.json"
+                if _track_shards_complete(idx):
+                    existing[t_name] = idx
+            if len(existing) == len(track_names):
+                return existing
+
+    # Portable bootstrap for Laptop / Google Colab when X:\corpora is not mounted
+    repo_root = Path(__file__).resolve().parents[2]
+    target_root = (root / "_portable") if root == (repo_root / "data_shards").resolve() else root
+    dec_examples = _build_portable_decision_examples(max_seq_len=max(256, seq_len))
+    main_dec_cache = root / "typed_decision" / "decision_examples_cache.pt"
+    if not main_dec_cache.is_file():
+        main_dec_cache.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(dec_examples, main_dec_cache)
+
+    for t_name in track_names:
+        t_dir = target_root / t_name
+        idx = t_dir / "index_receipt.json"
+        if _track_shards_complete(idx):
+            existing[t_name] = idx
+            continue
+        if t_dir.is_dir():
+            for old_f in t_dir.glob("*"):
+                if old_f.is_file() and old_f.name != "decision_examples_cache.pt":
+                    old_f.unlink(missing_ok=True)
+
+        writer = BlockAlignedShardWriter(
+            t_dir,
+            track=t_name,
+            split="train",
+            seq_len=seq_len,
+            max_blocks_per_shard=16,
+        )
+        if t_name == "pretrain_lm":
+            docs: list[str] = []
+            for md_path in sorted((repo_root / "docs").glob("*.md")):
+                try:
+                    docs.append(md_path.read_text(encoding="utf-8", errors="replace"))
+                except Exception:
+                    continue
+            for py_path in sorted((repo_root / "src" / "mcl4_coe").glob("*.py")):
+                try:
+                    docs.append(py_path.read_text(encoding="utf-8", errors="replace"))
+                except Exception:
+                    continue
+            if not docs:
+                docs = [
+                    (
+                        "In signal processing and machine learning, a matched filter correlates "
+                        "a reference template against an observed state to maximize signal-to-noise ratio. "
+                    )
+                    * 12
+                ]
+            accepted = 0
+            for d_text in docs[:4]:
+                writer.add_pretrain_document(d_text[: max(512, seq_len * 4)])
+                accepted += 1
+            writer.record_provenance(
+                corpus="portable_repo_corpus",
+                source_file="docs+src",
+                row_start=1,
+                row_end=accepted,
+                episodes_accepted=accepted,
+                episodes_rejected_stage0=0,
+            )
+        elif t_name == "uta_trace":
+            accepted = 0
+            for i in range(1, 96):
+                a = 3 + (i * 7) % 23
+                b = 2 + (i * 11) % 17
+                c = 1 + (i * 5) % 9
+                val = a * b + c
+                if seq_len < 256:
+                    u_str = f"solve({a},{b},{c})"
+                    t_str = f"{a}*{b}+{c}={val}"
+                    a_str = f"{val}"
+                else:
+                    u_str = f"Implement `solve(x, y, z) = x * y + z` and evaluate `solve({a}, {b}, {c})`."
+                    t_str = (
+                        f"[plan: abduction -> deduction -> decision -> evaluation] "
+                        f"First compute product {a} * {b} = {a * b}. Next add offset {c} to obtain {val}."
+                    )
+                    a_str = f"def solve(x, y, z):\n    return x * y + z\n# solve({a}, {b}, {c}) == {val}"
+                if writer.add_uta_episode(u_str, t_str, a_str):
+                    accepted += 1
+            writer.record_provenance(
+                corpus="portable_uta_traces",
+                source_file="synthetic_verified_uta",
+                row_start=1,
+                row_end=accepted,
+                episodes_accepted=accepted,
+                episodes_rejected_stage0=0,
+            )
+        else:
+            dec_cache = t_dir / "decision_examples_cache.pt"
+            if not dec_cache.is_file():
+                torch.save(dec_examples, dec_cache)
+            accepted = 0
+            for _ in range(4):
+                for idx_ex, ex in enumerate(dec_examples):
+                    u_str = ex.context.replace("#U$#", "").strip()
+                    gold_desc = ex.descriptions[ex.target]
+                    t_clean, a_clean = _split_thought_and_answer(gold_desc)
+                    if not writer.add_uta_episode(u_str, t_clean, a_clean):
+                        writer.add_uta_episode(f"Q{idx_ex}", "Compare options.", f"[{ex.target}]")
+                    accepted += 1
+            writer.record_provenance(
+                corpus="portable_typed_decisions",
+                source_file="mcattn+compositional",
+                row_start=1,
+                row_end=accepted,
+                episodes_accepted=accepted,
+                episodes_rejected_stage0=0,
+            )
+        writer.flush_shard()
+        existing[t_name] = idx
+
+    return existing
+
 
 
 

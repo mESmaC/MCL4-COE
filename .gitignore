@@ -10,3 +10,4 @@ runs/
 *.pt
 *.bin
 *.log
+data_shards/_portable/

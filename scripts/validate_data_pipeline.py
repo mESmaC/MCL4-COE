@@ -32,7 +32,10 @@ from mcl4_coe import (
     MultiTrackMixtureDataset,
     TypedDecisionShardStreamer,
     compute_joint_coe_loss,
+    ensure_sharded_tracks_ready,
     prepare_model,
+    resolve_corpora_root,
+    resolve_shards_root,
 )
 
 
@@ -42,12 +45,9 @@ def main() -> None:
     if device.type == "cuda":
         print(f"GPU: {torch.cuda.get_device_name(0)} (capability={torch.cuda.get_device_capability(0)})")
 
-    shards_root = Path(r"X:\MCL4-COE\data_shards")
-    track_receipts = {
-        "pretrain_lm": shards_root / "pretrain_lm" / "index_receipt.json",
-        "uta_trace": shards_root / "uta_trace" / "index_receipt.json",
-        "typed_decision": shards_root / "typed_decision" / "index_receipt.json",
-    }
+    shards_root = resolve_shards_root(r"X:\MCL4-COE\data_shards")
+    corpora_root = resolve_corpora_root(r"X:\corpora")
+    track_receipts = ensure_sharded_tracks_ready(shards_root, corpora_root=corpora_root, seq_len=2048)
 
     mix_ds = MultiTrackMixtureDataset(track_receipts)
     print(
@@ -67,7 +67,8 @@ def main() -> None:
     sampler = CurriculumMixtureSampler(mix_ds, schedule, seed=42)
     prefetcher = HostBatchPrefetcher(mix_ds, micro_batch_size=4, pin_memory=(device.type == "cuda"))
 
-    streamer = TypedDecisionShardStreamer(r"X:\corpora", max_seq_len=512, max_options=6)
+    dec_cache = shards_root / "typed_decision" / "decision_examples_cache.pt"
+    streamer = TypedDecisionShardStreamer(corpora_root, max_seq_len=512, max_options=6, cache_path=dec_cache)
     real_decision_batch = streamer.sample_batch(batch_size=4, device=device)
     print(
         f"\n[2] Streamed Real `tasksource-jev-typed-decisions` Batch via TypedDecisionShardStreamer:\n"

@@ -213,7 +213,7 @@ def test_coe_operators_and_novelty_buffer() -> None:
 
 
 def test_cpu_offload_adamw_step() -> None:
-    """Verify CPUOffloadAdamW updates working weights and preserves FP32 masters on CPU."""
+    """Verify CPUOffloadAdamW updates working weights and preserves FP32 masters on CPU and CUDA."""
     model = _tiny_model()
     prepare_model(model, device="cpu", bf16_working_weights=False)
     opt = CPUOffloadAdamW(model.parameters(), lr=1e-2, transfer_mode="per_parameter")
@@ -227,6 +227,23 @@ def test_cpu_offload_adamw_step() -> None:
     out2 = model.backbone(x, targets=x)
     assert out2.loss is not None and out2.loss.item() < initial_loss
     assert pearson_similarity(torch.tensor([1.0, 2.0, 3.0]), torch.tensor([2.0, 4.0, 6.0])).item() == pytest.approx(1.0, abs=1e-5)
+
+    if torch.cuda.is_available():
+        cuda_model = _tiny_model().train()
+        prepare_model(cuda_model, device="cuda", bf16_working_weights=True)
+        cuda_opt = CPUOffloadAdamW(cuda_model.parameters(), lr=5e-3, transfer_mode="batched")
+        x_cuda = x.to("cuda")
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            c_out1 = cuda_model.backbone(x_cuda, targets=x_cuda)
+        assert c_out1.loss is not None
+        c_out1.loss.backward()
+        cuda_opt.step()
+        cuda_opt.zero_grad(set_to_none=True)
+        assert all(torch.isfinite(p).all() for p in cuda_model.parameters())
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            c_out2 = cuda_model.backbone(x_cuda, targets=x_cuda)
+        assert c_out2.loss is not None and torch.isfinite(c_out2.loss)
+        assert c_out2.loss.item() < c_out1.loss.item()
 
 
 def test_multipass_controller_and_joint_coe_loss() -> None:
@@ -767,8 +784,13 @@ def test_forward_all_operators_and_ornith_self_improver() -> None:
     assert ornith_out.scaffolds_cached >= 1
     ornith_out.loss.backward()
 
-    # Verify verbose <think> monologue compaction fits inside seq_len=2048
-    verbose_think = "<think>" + ("Step derivation: let x_i = i^2 + 1.\n" * 80) + "</think>\nFinal answer: 42"
+    # Verify verbose <think> monologue AND oversized post-</think> answer compaction fit inside seq_len=2048
+    verbose_think = (
+        "<think>"
+        + ("Step derivation: let x_i = i^2 + 1.\n" * 80)
+        + "</think>\n"
+        + ("Detailed verification paragraph with UTF-8 math symbols (∀x ∈ ℝ, x² ≥ 0).\n" * 40)
+    )
     eps = extract_uta_episodes(
         {
             "messages": [
@@ -779,8 +801,35 @@ def test_forward_all_operators_and_ornith_self_improver() -> None:
     )
     assert len(eps) == 1
     u, t, a = eps[0]
-    assert len(u) + len(t) + len(a) <= 1950
+    tok_ids = ByteTokenizer().encode_masked_turn(u, t, a, seq_len=2048)
+    assert len(tok_ids) <= 2048
     assert "..." in t
+
+    # Verify Nemotron-Math-Proofs-v2 and hh-rlhf extraction schemas
+    nemotron_eps = extract_uta_episodes(
+        {
+            "problem": "Prove that n + 0 = n in Lean 4.",
+            "lean4_formalization": "theorem add_zero (n : Nat) : n + 0 = n := by rfl",
+            "messages": [
+                {"role": "user", "content": "Formalize and prove n + 0 = n."},
+                {
+                    "role": "assistant",
+                    "reasoning_content": "By definition of Nat.add on the second argument, n + 0 reduces judgmentally to n.",
+                    "content": "```lean4\ntheorem add_zero (n : Nat) : n + 0 = n := by rfl\n```",
+                },
+            ],
+        }
+    )
+    assert len(nemotron_eps) == 1
+    assert "Nat.add" in nemotron_eps[0][1]
+
+    hh_eps = extract_uta_episodes(
+        {
+            "chosen": "\n\nHuman: How do I reverse a list in Python?\n\nAssistant: First consider slicing vs in-place reversal. You can use `my_list[::-1]` to return a reversed copy."
+        }
+    )
+    assert len(hh_eps) == 1
+    assert "reverse a list" in hh_eps[0][0]
 
 
 def test_dream_rsi_simulator_and_mcl4_coe_integration(tmp_path: Path) -> None:
@@ -915,5 +964,160 @@ def test_dream_rsi_simulator_and_mcl4_coe_integration(tmp_path: Path) -> None:
     assert (dream_dir / "dream_policy.json").is_file()
     assert (dream_dir / "dream_revisions.jsonl").is_file()
     out1.loss.backward()
+
+
+def test_context_memory_hierarchy_and_atxy_router(tmp_path) -> None:
+    """Verify Tier 2 (TurboQuant), Tier 3 (ContextLMCompressor), and Tier 4 (A.TXY + COEAddressRouter)."""
+    from mcl4_coe import (
+        ATXYAddress,
+        ATXYFactorizedEmbedding,
+        ATXYPageStore,
+        ATXYPointerExecutor,
+        ATXYRecord,
+        COEAddressRouter,
+        ContextLMCompressor,
+        compress_encoded_state,
+        index_python_repo_to_atxy,
+        parse_atxy,
+        turboquant_compress,
+        turboquant_inner_product,
+        unpack_atxy,
+    )
+
+    model = _tiny_model().train()
+    x = torch.randint(0, 256, (2, 48), dtype=torch.long)
+    valid = torch.ones_like(x, dtype=torch.bool)
+
+    # 1. Tier 2: TurboQuant KV / EncodedState compression
+    enc = model.backbone.encode_state(x, valid)
+    comp_state = compress_encoded_state(enc)
+    assert comp_state.compressed_hidden.compression_ratio > 3.5
+    decomp_enc = comp_state.decompress()
+    cos = torch.nn.functional.cosine_similarity(
+        enc.hidden.flatten(1), decomp_enc.hidden.flatten(1), dim=-1
+    )
+    assert float(cos.mean().item()) > 0.85
+
+    q = torch.randn(2, 6, 32)
+    k = torch.randn(2, 16, 32)
+    ck = turboquant_compress(k)
+    approx_scores = turboquant_inner_product(q, ck)
+    exact_scores = torch.matmul(q, k.transpose(-1, -2))
+    score_corr = torch.nn.functional.cosine_similarity(
+        approx_scores.flatten(1), exact_scores.flatten(1), dim=-1
+    )
+    assert float(score_corr.mean().item()) > 0.85
+
+    # 2. Tier 3: ContextLMCompressor multi-chunk recurrent state compression
+    ctx_lm = ContextLMCompressor(
+        d_model=model.backbone.config.d_model,
+        chunk_size=16,
+        gist_tokens_per_chunk=4,
+    )
+    gist_enc = ctx_lm(model.backbone, x, valid)
+    assert gist_enc.hidden.shape == (2, 12, model.backbone.config.d_model)
+    assert gist_enc.valid.shape == (2, 12)
+
+    # 3. Tier 4: A.TXY Virtual Memory PageStore, N5 WAL, Factorized Embedding, Pointer Executor & COE Router
+    addr = parse_atxy("1.G0B")
+    assert str(addr) == "1.G0B"
+    assert unpack_atxy(addr.packed) == addr
+
+    fact_emb = ATXYFactorizedEmbedding(d_model=model.backbone.config.d_model)
+    emb_out = fact_emb.encode_addresses(["1.G0B", "2.010"])
+    assert emb_out.shape == (2, model.backbone.config.d_model)
+
+    repo_root = Path(__file__).resolve().parents[1]
+    store = index_python_repo_to_atxy(repo_root, subsystems=("src",))
+    assert len(store) > 4
+
+    # Verify N5 append-only WAL persistence + CRC32 verification
+    wal_path = tmp_path / "atxy_wal.log"
+    first_rec = store.records()[0]
+    wal_rec = store.commit_write(
+        ATXYRecord(
+            address=first_rec.address,
+            kind=first_rec.kind,
+            payload="wal_verified_node",
+            summary="Updated via N5 WAL",
+            up=first_rec.up,
+            down=first_rec.down,
+            fields={"lineno": 42},
+        ),
+        wal_path=wal_path,
+    )
+    assert wal_rec.payload == "wal_verified_node"
+    assert wal_rec.version == first_rec.version + 1
+    store_reloaded = ATXYPageStore()
+    replayed = store_reloaded.load_wal(wal_path)
+    assert replayed == 1
+    assert store_reloaded.lookup(first_rec.address).payload == "wal_verified_node"
+
+    # Verify N6 single-register pointer executor
+    executor = ATXYPointerExecutor(store)
+    kind_out, val_out = executor.run(
+        [
+            ("READ", first_rec.address, None),
+            ("PROJECT", first_rec.address, "lineno"),
+            ("FIND", None, {"plane": 1}),
+            ("COUNT", "REG", None),
+        ]
+    )
+    assert kind_out == "scalar"
+    assert isinstance(val_out, int) and val_out > 0
+    assert len(executor.audit) == 4
+
+    # Verify N3b-primary natural-language -> A.TXY routing via COE Association + Decision
+    router = COEAddressRouter(store, max_seq_len=128)
+    route_out = router.route_query(
+        model,
+        "Locate wal_verified_node and module definitions in mcl4_coe",
+        top_k_candidates=4,
+    )
+    assert route_out["address"] in route_out["candidates"]
+    assert len(route_out["candidates"]) <= 4
+
+
+def test_verify_python_rollout_and_portable_shard_healing(tmp_path) -> None:
+    """Verify sandboxed Python code execution reward (`verify_python_rollout`) and portable shard self-healing."""
+    import shutil
+    from mcl4_coe import (
+        MultiTrackMixtureDataset,
+        ensure_sharded_tracks_ready,
+        verify_python_rollout,
+    )
+
+    harness_h = "assert solve(3, 4) == 14 and solve(0, 5) == 2"
+
+    good_rollout = (
+        "#T$#We compute a * b + 2 and verify both assertions.#A$#"
+        "def solve(a, b): return a * b + 2"
+    )
+    assert verify_python_rollout(good_rollout, harness_h) == 1.0
+
+    # Missing #T$# scratchpad must return 0.0
+    no_thought_rollout = "#A$#def solve(a, b): return a * b + 2"
+    assert verify_python_rollout(no_thought_rollout, harness_h) == 0.0
+
+    # Constant boundary-hack stub must be rejected by anti-shortcut validator or second assertion
+    stub_rollout = "#T$#Constant stub return 14.#A$#def solve(a, b): return 14"
+    assert verify_python_rollout(stub_rollout, harness_h) == 0.0
+
+    # Verify ensure_sharded_tracks_ready rebuilds missing .bin shards automatically
+    shards_copy = tmp_path / "data_shards"
+    repo_shards = Path(__file__).resolve().parents[1] / "data_shards"
+    for track in ("pretrain_lm", "uta_trace", "typed_decision"):
+        (shards_copy / track).mkdir(parents=True, exist_ok=True)
+        src_receipt = repo_shards / track / "index_receipt.json"
+        if src_receipt.is_file():
+            shutil.copyfile(src_receipt, shards_copy / track / "index_receipt.json")
+
+    healed_receipts = ensure_sharded_tracks_ready(shards_copy, seq_len=128)
+    assert set(healed_receipts.keys()) == {"pretrain_lm", "uta_trace", "typed_decision"}
+    ds = MultiTrackMixtureDataset(healed_receipts)
+    assert len(ds) > 0
+    assert (shards_copy / "typed_decision" / "decision_examples_cache.pt").is_file()
+
+
 
 

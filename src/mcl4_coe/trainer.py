@@ -39,6 +39,7 @@ from .pipeline import (
     CurriculumMixtureSchedule,
     MultiTrackMixtureDataset,
     TypedDecisionShardStreamer,
+    ensure_sharded_tracks_ready,
 )
 
 
@@ -70,6 +71,33 @@ def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     _safe_replace(tmp, path)
 
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def resolve_runs_root(path: str | Path = r"X:\MCL4-COE\runs") -> Path:
+    """Resolve `runs_root`, falling back to `<repo>/runs` when the `X:` drive is not mounted."""
+    p = Path(path).expanduser()
+    if str(p).upper().startswith("X:") and not Path("X:\\").exists():
+        return (_REPO_ROOT / "runs").resolve()
+    return p.resolve()
+
+
+def resolve_shards_root(path: str | Path = r"X:\MCL4-COE\data_shards") -> Path:
+    """Resolve `shards_root`, falling back to `<repo>/data_shards` when the `X:` drive is not mounted."""
+    p = Path(path).expanduser()
+    if str(p).upper().startswith("X:") and not Path("X:\\").exists():
+        return (_REPO_ROOT / "data_shards").resolve()
+    return p.resolve()
+
+
+def resolve_corpora_root(path: str | Path = r"X:\corpora") -> Path:
+    """Resolve `corpora_root`, falling back to `<repo>/corpora` when the `X:` drive is not mounted."""
+    p = Path(path).expanduser()
+    if str(p).upper().startswith("X:") and not Path("X:\\").exists():
+        return (_REPO_ROOT / "corpora").resolve()
+    return p.resolve()
+
+
 @dataclass
 class TrainingRunConfig:
     """Configuration for an `MCL4-COE` training run."""
@@ -79,6 +107,11 @@ class TrainingRunConfig:
     shards_root: str = r"X:\MCL4-COE\data_shards"
     corpora_root: str = r"X:\corpora"
     resume_checkpoint: str | None = None
+
+    def __post_init__(self) -> None:
+        self.runs_root = str(resolve_runs_root(self.runs_root))
+        self.shards_root = str(resolve_shards_root(self.shards_root))
+        self.corpora_root = str(resolve_corpora_root(self.corpora_root))
 
     # Model architecture
     d_model: int = 128
@@ -255,7 +288,8 @@ class MCL4COETrainer:
         p = Path(checkpoint_path).expanduser().resolve()
         if p.name.endswith(".meta.json"):
             meta = json.loads(p.read_text(encoding="utf-8"))
-            p = Path(meta["pt_file"])
+            pt_candidate = Path(meta["pt_file"])
+            p = pt_candidate if pt_candidate.exists() else p.with_name(pt_candidate.name)
         payload = torch.load(p, map_location="cpu", weights_only=False)
         self._resume_payload = payload
         b_cfg = payload.get("backbone_config", {})
@@ -279,12 +313,11 @@ class MCL4COETrainer:
         from .data import HostBatchPrefetcher, collate_decisions
 
         shards_root = Path(self.config.shards_root).expanduser().resolve()
-        track_receipts: dict[str, Path] = {}
-        for t_name in ("pretrain_lm", "uta_trace", "typed_decision"):
-            candidate = shards_root / t_name / "index_receipt.json"
-            if candidate.exists():
-                track_receipts[t_name] = candidate
-
+        track_receipts = ensure_sharded_tracks_ready(
+            shards_root,
+            corpora_root=self.config.corpora_root,
+            seq_len=min(2048, self.config.max_seq_len),
+        )
         if not track_receipts:
             raise FileNotFoundError(
                 f"No index_receipt.json files found under {shards_root}. "
@@ -555,7 +588,8 @@ class MCL4COETrainer:
         ckpt_resolved = Path(checkpoint_path).expanduser().resolve()
         if ckpt_resolved.name.endswith(".meta.json") and ckpt_resolved.is_file():
             meta = json.loads(ckpt_resolved.read_text(encoding="utf-8"))
-            ckpt_pt_path = Path(meta["pt_file"])
+            pt_candidate = Path(meta["pt_file"])
+            ckpt_pt_path = pt_candidate if pt_candidate.exists() else ckpt_resolved.with_name(pt_candidate.name)
         else:
             ckpt_pt_path = ckpt_resolved
 
@@ -965,7 +999,7 @@ class MCL4COETrainer:
 
 def list_runs(runs_root: str | Path = r"X:\MCL4-COE\runs") -> list[dict[str, Any]]:
     """Return all training runs sorted newest-first from `runs_root`."""
-    root = Path(runs_root).expanduser().resolve()
+    root = resolve_runs_root(runs_root)
     if not root.is_dir():
         return []
     runs: list[dict[str, Any]] = []
@@ -985,7 +1019,7 @@ def delete_run(run_id: str, runs_root: str | Path = r"X:\MCL4-COE\runs") -> bool
     """Delete a specific run directory and its checkpoints from `runs_root`."""
     import shutil
 
-    root = Path(runs_root).expanduser().resolve()
+    root = resolve_runs_root(runs_root)
     target = (root / run_id).resolve()
     if target.parent != root or not target.is_dir():
         return False
@@ -1001,7 +1035,7 @@ def clear_all_runs(
     """Remove all completed/historical run directories under `runs_root`."""
     import shutil
 
-    root = Path(runs_root).expanduser().resolve()
+    root = resolve_runs_root(runs_root)
     if not root.is_dir():
         return 0
     removed = 0
@@ -1021,7 +1055,7 @@ def load_run_metrics(
     runs_root: str | Path = r"X:\MCL4-COE\runs",
 ) -> dict[str, Any]:
     """Load `run_manifest.json`, `metrics.jsonl`, and `samples.jsonl` for a specific `run_id`."""
-    run_dir = Path(runs_root).expanduser().resolve() / run_id
+    run_dir = resolve_runs_root(runs_root) / run_id
     manifest_file = run_dir / "run_manifest.json"
     metrics_file = run_dir / "metrics.jsonl"
     samples_file = run_dir / "samples.jsonl"
@@ -1058,13 +1092,18 @@ def load_run_metrics(
 
 def list_checkpoints(runs_root: str | Path = r"X:\MCL4-COE\runs") -> list[dict[str, Any]]:
     """List all saved checkpoint `.meta.json` receipts across all runs."""
-    root = Path(runs_root).expanduser().resolve()
+    root = resolve_runs_root(runs_root)
     if not root.is_dir():
         return []
     ckpts: list[dict[str, Any]] = []
     for meta_file in root.rglob("*.meta.json"):
         try:
-            ckpts.append(json.loads(meta_file.read_text(encoding="utf-8")))
+            entry = json.loads(meta_file.read_text(encoding="utf-8"))
+            entry["meta_file"] = str(meta_file.resolve())
+            pt_candidate = Path(entry.get("pt_file", ""))
+            if not pt_candidate.exists():
+                entry["pt_file"] = str(meta_file.with_name(pt_candidate.name).resolve())
+            ckpts.append(entry)
         except Exception:
             continue
     ckpts.sort(key=lambda c: (float(c.get("timestamp", 0.0)), int(c.get("step", 0))), reverse=True)
@@ -1082,7 +1121,8 @@ def evaluate_checkpoint_prompt(
     p = Path(meta_or_pt_path).expanduser().resolve()
     if p.name.endswith(".meta.json"):
         meta = json.loads(p.read_text(encoding="utf-8"))
-        pt_path = Path(meta["pt_file"])
+        pt_candidate = Path(meta["pt_file"])
+        pt_path = pt_candidate if pt_candidate.exists() else p.with_name(pt_candidate.name)
     else:
         pt_path = p
         meta = {}

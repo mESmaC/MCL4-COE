@@ -211,7 +211,10 @@ class CPUOffloadAdamW(torch.optim.Optimizer):
             stream = torch.cuda.current_stream(device)
             stream.wait_event(buffers["ready"])
             torch.cat(
-                [parameter.grad.detach().reshape(-1) for parameter in parameters],
+                [
+                    parameter.grad.detach().to(dtype=torch.float32).reshape(-1)
+                    for parameter in parameters
+                ],
                 out=buffers["gradient_device"][:size],
             )
             buffers["gradient_cpu"][:size].copy_(
@@ -259,19 +262,31 @@ class CPUOffloadAdamW(torch.optim.Optimizer):
 
         for device, parameters in by_device.items():
             if device.type != "cuda":
-                torch._foreach_copy_(parameters, [self.state[p]["master"] for p in parameters])
+                by_dtype_cpu: dict[torch.dtype, tuple[list[torch.Tensor], list[torch.Tensor]]] = (
+                    defaultdict(lambda: ([], []))
+                )
+                for p in parameters:
+                    dst_l, src_l = by_dtype_cpu[p.dtype]
+                    dst_l.append(p)
+                    src_l.append(self.state[p]["master"])
+                for dst_l, src_l in by_dtype_cpu.values():
+                    torch._foreach_copy_(dst_l, src_l)
         for parameters, buffers, size, stream in transfers:
-            weight_views = []
+            by_dtype_gpu: dict[torch.dtype, tuple[list[torch.Tensor], list[torch.Tensor]]] = (
+                defaultdict(lambda: ([], []))
+            )
             offset = 0
             for parameter in parameters:
                 count = parameter.numel()
                 buffers["weight_cpu"][offset : offset + count].copy_(
                     self.state[parameter]["master"].reshape(-1)
                 )
-                weight_views.append(
-                    buffers["weight_device"][offset : offset + count].view(parameter.shape)
-                )
+                view = buffers["weight_device"][offset : offset + count].view(parameter.shape)
+                dst_l, src_l = by_dtype_gpu[parameter.dtype]
+                dst_l.append(parameter)
+                src_l.append(view)
                 offset += count
             buffers["weight_device"][:size].copy_(buffers["weight_cpu"][:size], non_blocking=True)
-            torch._foreach_copy_(parameters, weight_views)
+            for dst_l, src_l in by_dtype_gpu.values():
+                torch._foreach_copy_(dst_l, src_l)
             buffers["ready"].record(stream)

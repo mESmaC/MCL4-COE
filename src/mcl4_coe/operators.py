@@ -491,7 +491,7 @@ class CognitiveOperatorEnsemble(nn.Module):
             return (left.float() * right.float()).sum(-1) / math.sqrt(self.config.projection_dim)
 
     def _scale(self) -> Tensor:
-        return self.log_scale.float().clamp(math.log(0.1), math.log(100.0)).exp()
+        return self.log_scale.float().clamp(math.log(0.1), math.log(20.0)).exp()
 
     def forward_decision(
         self,

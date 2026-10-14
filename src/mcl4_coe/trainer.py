@@ -925,7 +925,7 @@ class MCL4COETrainer:
                     ):
                         lm_out = self.model.forward_inference(inp, targets=lbl)
                         assert lm_out.loss is not None and lm_out.ce_loss is not None
-                        lm_scale = (1.0 - w_dec) * mb_frac if dec_batch is not None else mb_frac
+                        lm_scale = mb_frac
                         scaled_lm_loss = lm_out.loss * lm_scale
 
                     step_lm_gpu = step_lm_gpu + (lm_out.ce_loss.detach().float() * mb_frac)

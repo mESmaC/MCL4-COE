@@ -63,12 +63,15 @@ class PerLayerEmbedding(nn.Module):
         self.input_projection = nn.Linear(d_model, ple_dim, bias=False)
         self.projection_norm = RMSNorm(ple_dim, eps=rms_norm_eps)
         self.token_embedding = nn.Embedding(vocab_size, ple_dim, padding_idx=pad_id)
+        self.ngram_conv = nn.Conv1d(ple_dim, ple_dim, kernel_size=4, groups=ple_dim, bias=False)
+        self.ngram_scale = nn.Parameter(torch.full((ple_dim,), 0.15))
         self.state_gate = nn.Linear(d_model, ple_dim, bias=False)
         self.output_projection = nn.Linear(ple_dim, d_model, bias=False)
         self.output_norm = RMSNorm(d_model, eps=rms_norm_eps)
         self.gate_scale = nn.Parameter(torch.full((d_model,), 0.1))
 
         nn.init.normal_(self.token_embedding.weight, mean=0.0, std=0.02)
+        nn.init.constant_(self.ngram_conv.weight, 0.25)
         if 0 <= pad_id < vocab_size:
             with torch.no_grad():
                 self.token_embedding.weight[pad_id].zero_()
@@ -94,6 +97,11 @@ class PerLayerEmbedding(nn.Module):
         if token_ids is not None:
             safe_ids = token_ids.clamp(0, self.vocab_size - 1)
             lookup = self.token_embedding(safe_ids) * math.sqrt(self.ple_dim)
+            lookup = lookup.masked_fill(~active.unsqueeze(-1), 0)
+            if lookup.shape[1] >= 1:
+                padded = F.pad(lookup.transpose(1, 2), (3, 0))
+                ngram_feat = self.ngram_conv(padded).transpose(1, 2)
+                lookup = lookup + ngram_feat * self.ngram_scale.to(lookup.dtype)
             combined = (projected + lookup) / math.sqrt(2.0)
             projected = torch.where(active.unsqueeze(-1), combined, projected)
         return projected.masked_fill(~active.unsqueeze(-1), 0)

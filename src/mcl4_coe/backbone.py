@@ -51,8 +51,8 @@ class MCL4CEDConfig:
     markov_graph_degree: int = 4
     markov_num_walkers: int = 4
     markov_steps: int = 3
-    markov_attend_tokens: int = 16
-    markov_local_tokens: int = 4
+    markov_attend_tokens: int = 24
+    markov_local_tokens: int = 8
     markov_beam_size: int = 8
     markov_restart: float = 0.1
     markov_query_chunk_size: int = 512
@@ -222,6 +222,8 @@ class LocalAttentionBlock(nn.Module):
         self.n_heads = config.n_heads
         self.head_dim = config.d_model // config.n_heads
         self.qkv = nn.Linear(config.d_model, 3 * config.d_model, bias=False)
+        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.out_proj = nn.Linear(config.d_model, config.d_model, bias=False)
         inv_freq = 1.0 / (
             config.rope_theta ** (torch.arange(0, self.head_dim, 2).float() / self.head_dim)
@@ -251,6 +253,7 @@ class LocalAttentionBlock(nn.Module):
         b, n, width = x_norm.shape
         qkv = self.qkv(x_norm).view(b, n, 3, self.n_heads, self.head_dim)
         q, k, v = (part.transpose(1, 2) for part in qkv.unbind(dim=2))
+        q, k = self.q_norm(q), self.k_norm(k)
         positions = torch.arange(n, device=x_norm.device, dtype=torch.float32)
         angles = positions[:, None] * self.inv_freq.float()[None, :]
         cos, sin = angles.cos().to(q.dtype), angles.sin().to(q.dtype)
@@ -350,26 +353,39 @@ class CEDDecoderLayer(nn.Module):
         self.attn_norm = RMSNorm(config.d_model, eps=config.rms_norm_eps)
         self.local_attention = LocalAttentionBlock(config)
 
-        # Global cross-attention into the lower encoder's cached representation with QK-Norm.
+        # Global cross-attention into the lower encoder's cached representation with QK-Norm + RoPE.
         self.global_q_proj = nn.Linear(config.d_model, config.d_model, bias=False)
         self.global_kv_proj = nn.Linear(config.d_model, 2 * config.d_model, bias=False)
         self.global_q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.global_k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.global_context_norm = RMSNorm(config.d_model, eps=config.rms_norm_eps)
         self.global_out_proj = nn.Linear(config.d_model, config.d_model, bias=False)
+        inv_freq = 1.0 / (
+            config.rope_theta ** (torch.arange(0, self.head_dim, 2).float() / self.head_dim)
+        )
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
 
         self.moe_norm = RMSNorm(config.d_model, eps=config.rms_norm_eps)
         self.moe = SparseMoE(config)
         self.dropout = nn.Dropout(config.dropout)
 
+    @staticmethod
+    def _apply_rope(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
+        even, odd = x[..., 0::2], x[..., 1::2]
+        return torch.stack((even * cos - odd * sin, even * sin + odd * cos), dim=-1).flatten(-2)
+
     def project_global_kv(self, encoded_state: Tensor) -> tuple[Tensor, Tensor]:
-        """Project state `[B_state, T_state, d_model]` into `(K_global, V_global)` once."""
+        """Project state `[B_state, T_state, d_model]` into `(K_global, V_global)` once with RoPE."""
         b_state, t_state, _ = encoded_state.shape
         kv = self.global_kv_proj(encoded_state).view(
             b_state, t_state, 2, self.n_heads, self.head_dim
         )
         k_global, v_global = (part.transpose(1, 2).contiguous() for part in kv.unbind(dim=2))
-        return self.global_k_norm(k_global), v_global
+        k_normed = self.global_k_norm(k_global)
+        positions = torch.arange(t_state, device=encoded_state.device, dtype=torch.float32)
+        angles = positions[:, None] * self.inv_freq.float()[None, :]
+        cos, sin = angles.cos().to(k_normed.dtype), angles.sin().to(k_normed.dtype)
+        return self._apply_rope(k_normed, cos, sin), v_global
 
     def _cross_attend(
         self,
@@ -385,6 +401,10 @@ class CEDDecoderLayer(nn.Module):
         r, t_cand, width = q_norm.shape
         q = self.global_q_proj(q_norm).view(r, t_cand, self.n_heads, self.head_dim).transpose(1, 2)
         q = self.global_q_norm(q)
+        positions = torch.arange(t_cand, device=q_norm.device, dtype=torch.float32)
+        angles = positions[:, None] * self.inv_freq.float()[None, :]
+        cos, sin = angles.cos().to(q.dtype), angles.sin().to(q.dtype)
+        q = self._apply_rope(q, cos, sin)
         if owner_rows is not None:
             k = k_global.index_select(0, owner_rows)
             v = v_global.index_select(0, owner_rows)

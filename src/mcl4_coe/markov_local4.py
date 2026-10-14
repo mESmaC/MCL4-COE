@@ -111,7 +111,9 @@ class MarkovLocal4Router(nn.Module):
             semantic = torch.topk(similarity, k=semantic_k, dim=-1).indices
             semantic_valid = eligible.expand(b, h, -1, -1).gather(-1, semantic)
 
-            offsets = torch.tensor([0, -1, 1, -2, 2, -4, 4], device=keys.device)
+            offsets = torch.tensor(
+                [0, -1, 1, -2, 2, -3, -4, 4, -8, -16, -32, -64], device=keys.device
+            )
             raw = position[:, None] + offsets
             local = raw.clamp(0, n - 1).expand(b, h, -1, -1)
             node_valid = key_valid[:, None, :, None].expand(b, h, -1, 1)

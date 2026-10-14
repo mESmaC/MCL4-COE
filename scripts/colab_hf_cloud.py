@@ -95,6 +95,7 @@ DEFAULT_HF_TRACK_SOURCES: dict[str, list[dict[str, Any]]] = {
         {"path": "nvidia/Nemotron-Cascade-2-SFT-Data", "name": "chat", "split": "train"},
         {"path": "nvidia/Nemotron-Post-Training-Dataset-v1", "name": "default", "split": "math"},
         {"path": "nvidia/Nemotron-Post-Training-Dataset-v1", "name": "default", "split": "stem"},
+        {"path": "nvidia/Nemotron-Pretraining-Dataset-sample", "name": "Nemotron-SFT-MATH", "split": "train"},
         {"path": "nvidia/Nemotron-Pretraining-Dataset-sample", "name": "Nemotron-SFT-Code", "split": "train"},
     ],
     "typed_decision": [

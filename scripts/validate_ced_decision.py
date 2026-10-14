@@ -133,7 +133,7 @@ def main() -> None:
     if device.type == "cuda":
         print(f"GPU: {torch.cuda.get_device_name(0)} (capability={torch.cuda.get_device_capability(0)})")
 
-    # 1. Benchmark on mcattn's exact 27-example association_train.jsonl
+    # 1. Benchmark on mcattn's exact 27-example association_train.jsonl (or portable fallback on Colab)
     sibling_mcattn = Path(__file__).resolve().parents[2] / "mcattn" / "examples" / "association_train.jsonl"
     mcattn_data = (
         sibling_mcattn
@@ -141,9 +141,14 @@ def main() -> None:
         else Path(r"C:\Users\engin\Desktop\mcattn\examples\association_train.jsonl")
     )
     mcattn_examples: list[DecisionExample] = []
-    for line in mcattn_data.read_text(encoding="utf-8-sig").splitlines():
-        if line.strip():
-            mcattn_examples.extend(parse_request(json.loads(line), require_targets=True))
+    if mcattn_data.is_file():
+        for line in mcattn_data.read_text(encoding="utf-8-sig").splitlines():
+            if line.strip():
+                mcattn_examples.extend(parse_request(json.loads(line), require_targets=True))
+    else:
+        from mcl4_coe.pipeline import _build_portable_decision_examples
+
+        mcattn_examples = _build_portable_decision_examples(max_seq_len=256)[:27]
 
     torch.manual_seed(42)
     cfg = MCL4CEDConfig(
@@ -166,7 +171,7 @@ def main() -> None:
     optimizer = CPUOffloadAdamW(model.parameters(), lr=base_lr, weight_decay=0.01, transfer_mode="batched")
 
     t0 = time.perf_counter()
-    total_steps_1 = 80
+    total_steps_1 = 80 if device.type == "cuda" else 36
     batch = collate_decisions(mcattn_examples, cfg.max_seq_len, device=device)
     for step in range(1, total_steps_1 + 1):
         model.train()
@@ -203,7 +208,7 @@ def main() -> None:
 
     rng = random.Random(42)
     t1 = time.perf_counter()
-    total_steps_2 = 120
+    total_steps_2 = 120 if device.type == "cuda" else 56
     for step in range(1, total_steps_2 + 1):
         comp_model.train()
         lr = base_lr * (0.1 + 0.9 * 0.5 * (1.0 + math.cos(math.pi * step / total_steps_2)))

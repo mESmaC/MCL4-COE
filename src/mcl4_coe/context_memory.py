@@ -80,21 +80,25 @@ def fast_walsh_hadamard(x: Tensor, signs: Tensor | None = None, *, inverse: bool
     orig_dtype = x.dtype
     h = x.float()
     dim = h.shape[-1]
-    if dim <= 0 or (dim & (dim - 1)) != 0:
-        raise ValueError(f"fast_walsh_hadamard requires power-of-two last dim, got {dim}")
+    if dim <= 0:
+        raise ValueError(f"fast_walsh_hadamard requires positive last dim, got {dim}")
+    block_dim = dim & -dim
 
     if not inverse and signs is not None:
         h = h * signs.to(device=h.device, dtype=torch.float32)
 
-    step = 1
-    while step < dim:
-        h = h.view(*h.shape[:-1], dim // (step * 2), 2, step)
-        a = h[..., 0, :]
-        b = h[..., 1, :]
-        h = torch.stack((a + b, a - b), dim=-2).reshape(*x.shape)
-        step *= 2
+    if block_dim > 1:
+        n_blocks = dim // block_dim
+        h = h.reshape(*x.shape[:-1], n_blocks, block_dim)
+        step = 1
+        while step < block_dim:
+            h = h.view(*x.shape[:-1], n_blocks, block_dim // (step * 2), 2, step)
+            a = h[..., 0, :]
+            b = h[..., 1, :]
+            h = torch.stack((a + b, a - b), dim=-2).reshape(*x.shape[:-1], n_blocks, block_dim)
+            step *= 2
+        h = (h * (1.0 / math.sqrt(block_dim))).reshape(*x.shape)
 
-    h = h * (1.0 / math.sqrt(dim))
     if inverse and signs is not None:
         h = h * signs.to(device=h.device, dtype=torch.float32)
     return h.to(orig_dtype)

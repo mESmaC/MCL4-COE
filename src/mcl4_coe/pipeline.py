@@ -364,9 +364,85 @@ def iter_source_records(path: str | Path, *, batch_size: int = 256) -> Iterator[
 
     if suffix == ".txt":
         text = file_path.read_text(encoding="utf-8-sig", errors="replace")
-        if text.strip():
-            yield 1, {"text": text}
+        for chunk_idx, chunk_text in enumerate(_clean_and_chunk_gutenberg_txt(text), start=1):
+            yield chunk_idx, {"text": chunk_text}
         return
+
+
+_GUTENBERG_LANG_RE = re.compile(r"^Language\s*:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
+_GUTENBERG_START_RE = re.compile(
+    r"\*\*\*\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK[^\r\n]*\*\*\*",
+    re.IGNORECASE,
+)
+_GUTENBERG_END_RE = re.compile(
+    r"\*\*\*\s*END OF (?:THE|THIS) PROJECT GUTENBERG EBOOK[^\r\n]*\*\*\*|"
+    r"End of (?:the )?Project Gutenberg(?:'s)? (?:EBook|Etext)",
+    re.IGNORECASE,
+)
+
+
+def _clean_and_chunk_gutenberg_txt(
+    raw_text: str,
+    *,
+    max_chunk_chars: int = 24_000,
+) -> list[str]:
+    """Filter non-English Project Gutenberg `.txt` books, strip license headers/footers, unwrap 72-char lines, and chunk."""
+    if not raw_text or not raw_text.strip():
+        return []
+
+    header_window = raw_text[:3500]
+    m_lang = _GUTENBERG_LANG_RE.search(header_window)
+    if m_lang and "english" not in m_lang.group(1).lower():
+        return []
+
+    body = raw_text
+    m_start = _GUTENBERG_START_RE.search(body)
+    if m_start:
+        body = body[m_start.end() :]
+    m_end = _GUTENBERG_END_RE.search(body)
+    if m_end:
+        body = body[: m_end.start()]
+
+    body = body.replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not body:
+        return []
+
+    raw_paras = re.split(r"\n\s*\n+", body)
+    clean_paras: list[str] = []
+    for para in raw_paras:
+        lines = [ln for ln in para.splitlines() if ln.strip()]
+        if not lines:
+            continue
+        if any(ln.startswith("  ") or ln.startswith("\t") for ln in lines):
+            clean_paras.append("\n".join(ln.rstrip() for ln in lines))
+        else:
+            clean_paras.append(" ".join(ln.strip() for ln in lines))
+
+    chunks: list[str] = []
+    cur_buf: list[str] = []
+    cur_len = 0
+    for para in clean_paras:
+        p_len = len(para)
+        if p_len > max_chunk_chars:
+            if cur_buf:
+                chunks.append("\n\n".join(cur_buf))
+                cur_buf.clear()
+                cur_len = 0
+            for off in range(0, p_len, max_chunk_chars):
+                sub = para[off : off + max_chunk_chars].strip()
+                if sub:
+                    chunks.append(sub)
+            continue
+        if cur_buf and cur_len + p_len + 2 > max_chunk_chars:
+            chunks.append("\n\n".join(cur_buf))
+            cur_buf = [para]
+            cur_len = p_len
+        else:
+            cur_buf.append(para)
+            cur_len += p_len + (2 if len(cur_buf) > 1 else 0)
+    if cur_buf:
+        chunks.append("\n\n".join(cur_buf))
+    return chunks
 
 
 def _split_thought_and_answer(raw_response: str, explicit_thought: str | None = None) -> tuple[str, str]:

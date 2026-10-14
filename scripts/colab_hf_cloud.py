@@ -237,12 +237,33 @@ def _iter_hf_source_rows(
     token: str | None,
     load_dataset_fn: Any,
 ):
-    """Stream up to `max_rows` records from HF Datasets Server (`/rows`) with `load_dataset` fallback."""
+    """Stream up to `max_rows` records via native Parquet streaming (`load_dataset`) with `/rows` fallback."""
     import urllib.parse
     import urllib.request
 
-    cfg = ds_name or "default"
     yielded = 0
+    if load_dataset_fn is not None:
+        try:
+            stream = load_dataset_fn(
+                ds_path,
+                name=ds_name,
+                split=ds_split,
+                streaming=True,
+                token=token,
+            )
+            for row in stream:
+                if isinstance(row, dict):
+                    yielded += 1
+                    yield row
+                    if yielded >= max_rows:
+                        return
+            if yielded > 0:
+                return
+        except Exception:
+            if yielded >= max_rows:
+                return
+
+    cfg = ds_name or "default"
     try:
         while yielded < max_rows:
             length = min(100, max_rows - yielded)
@@ -271,26 +292,8 @@ def _iter_hf_source_rows(
                         return
             if len(rows) < length:
                 return
-        if yielded > 0:
-            return
     except Exception:
-        if yielded > 0:
-            return
-
-    if load_dataset_fn is not None:
-        stream = load_dataset_fn(
-            ds_path,
-            name=ds_name,
-            split=ds_split,
-            streaming=True,
-            token=token,
-        )
-        for row in stream:
-            if isinstance(row, dict):
-                yielded += 1
-                yield row
-                if yielded >= max_rows:
-                    return
+        return
 
 
 def build_cloud_shards(

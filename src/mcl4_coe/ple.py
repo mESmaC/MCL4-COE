@@ -71,9 +71,11 @@ class PerLayerEmbedding(nn.Module):
         self.gate_scale = nn.Parameter(torch.full((d_model,), 0.1))
 
         nn.init.normal_(self.token_embedding.weight, mean=0.0, std=0.02)
-        nn.init.constant_(self.ngram_conv.weight, 0.25)
-        if 0 <= pad_id < vocab_size:
-            with torch.no_grad():
+        with torch.no_grad():
+            self.ngram_conv.weight.fill_(0.15)
+            for c in range(ple_dim):
+                self.ngram_conv.weight[c, 0, 3 - (c % 4)] += 0.40
+            if 0 <= pad_id < vocab_size:
                 self.token_embedding.weight[pad_id].zero_()
 
     def embed(

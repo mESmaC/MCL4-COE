@@ -1223,3 +1223,57 @@ def test_nemotron_core_schema_extractors() -> None:
     assert uta_mc is not None
     assert "1296 total addresses" in uta_mc[1]
     assert "[1] 1296" in uta_mc[2]
+
+
+def test_antidoom_ftpo_and_housekeeping_fixes() -> None:
+    """Verify LiquidAI Antidoom FTPO loop detection & loss, <think> tag sanitization, and boilerplate removal."""
+    from mcl4_coe import (
+        compute_antidoom_ftpo_loss,
+        detect_doom_loop,
+        extract_typed_decision_uta,
+        sanitize_trace_markers,
+    )
+
+    # 1. Strip <think> and </think> tags
+    cleaned = sanitize_trace_markers("<think> First derive the recurrence. </think> Therefore x = 4.")
+    assert "<think>" not in cleaned and "</think>" not in cleaned
+
+    # 2. Verify no synthetic "state evidence" boilerplate in extract_typed_decision_uta
+    no_rat_row = {
+        "state": "Markov Local-4 routes each token to 4 local causal windows.",
+        "kind": "choice",
+        "question": "Which complexity does Markov Local-4 achieve?",
+        "options": ["O(T^2)", "O(T)", "O(T^3)", "O(2^T)"],
+        "target": 1,
+    }
+    uta_no_rat = extract_typed_decision_uta(no_rat_row, require_rationale=False)
+    assert uta_no_rat is not None
+    assert "state evidence" not in uta_no_rat[1]
+    assert extract_typed_decision_uta(no_rat_row, require_rationale=True) is None
+
+    # 3. Verify Antidoom inner repetition detection and FTPO preference loss
+    repeated_bytes = list(b"Compute step:" + b" state evidence," * 5)
+    loop_hit = detect_doom_loop(repeated_bytes, min_period=4, min_repeats=3)
+    assert loop_hit is not None
+    start_idx, rejected_tok, period = loop_hit
+    assert period == len(b" state evidence,")
+    assert rejected_tok == repeated_bytes[start_idx]
+
+    logits = torch.zeros(1, 260, requires_grad=True)
+    ref_logits = logits.detach().clone()
+    rej_t = torch.tensor([rejected_tok], dtype=torch.long)
+    chosen_t = torch.tensor([[ord("a"), ord("b"), ord("c"), ord("d")]], dtype=torch.long)
+    ftpo_loss, chosen_win = compute_antidoom_ftpo_loss(
+        logits,
+        ref_logits,
+        rej_t,
+        chosen_t,
+        beta=0.5,
+        target_chosen_win=1.0,
+    )
+    assert ftpo_loss.requires_grad
+    ftpo_loss.backward()
+    assert logits.grad is not None
+    assert float(logits.grad[0, rejected_tok].item()) > 0.0  # gradient pushes rejected token logit down
+    assert 0.0 <= chosen_win <= 1.0
+

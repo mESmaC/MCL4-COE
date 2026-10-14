@@ -141,11 +141,11 @@ def _convert_record_to_decision_example(
     max_seq_len: int,
     max_options: int = 10,
 ) -> DecisionExample | None:
-    """Convert a raw HF or Nemotron MCQA record into a bounded `DecisionExample` for `MCL4-CED`."""
+    """Convert a raw HF or Nemotron MCQA record into a bounded, strictly symmetric `DecisionExample`."""
     parsed = parse_mcqa_decision_fields(record)
     if parsed is None:
         return None
-    state, kind, question, clean_opts, best_idx, rationale = parsed
+    state, kind, question, clean_opts, best_idx, _rationale = parsed
     if len(clean_opts) < 2 or len(clean_opts) > max_options:
         return None
 
@@ -154,12 +154,9 @@ def _convert_record_to_decision_example(
     ctx_str = ctx_raw.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
 
     descs: list[str] = []
-    for opt_i, opt_text in enumerate(clean_opts):
-        if rationale and opt_i == best_idx:
-            t_line = sanitize_trace_markers(rationale.splitlines()[0][:140])
-            d_raw = f"#T$# {t_line}\n#A$# {opt_text}"
-        else:
-            d_raw = f"#T$# Evaluate option [{opt_i}] against state.\n#A$# {opt_text}"
+    for opt_text in clean_opts:
+        # Strict candidate symmetry: never leak gold rationale into a single option description
+        d_raw = f"#A$# {sanitize_trace_markers(opt_text)}"
         d_str = d_raw.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
         descs.append(d_str)
 
@@ -171,6 +168,54 @@ def _convert_record_to_decision_example(
         values=tuple(f"opt_{i}" for i in range(len(clean_opts))),
         target=best_idx,
     )
+
+
+def sanitize_decision_caches(shards_root: str | Path) -> dict[str, int]:
+    """Scrub any asymmetric `#T$#` prefixes from cached `DecisionExample` files so all options are `#A$# {opt}`."""
+    root = Path(shards_root).expanduser().resolve()
+    td_dir = root / "typed_decision"
+    updated_counts: dict[str, int] = {}
+    for fname in ("decision_examples_cache.pt", "decision_examples_val_cache.pt"):
+        fpath = td_dir / fname
+        if not fpath.is_file():
+            continue
+        try:
+            pool = torch.load(fpath, map_location="cpu", weights_only=False)
+        except Exception:
+            continue
+        if not isinstance(pool, list) or not pool:
+            continue
+        changed = False
+        cleaned_pool: list[DecisionExample] = []
+        for ex in pool:
+            new_descs: list[str] = []
+            for d in ex.descriptions:
+                if "\n#A$# " in d:
+                    new_d = "#A$# " + d.split("\n#A$# ", 1)[1].strip()
+                    changed = True
+                elif not d.startswith("#A$# "):
+                    new_d = f"#A$# {d.strip()}"
+                    changed = True
+                else:
+                    new_d = d
+                new_descs.append(new_d)
+            cleaned_pool.append(
+                DecisionExample(
+                    question_id=ex.question_id,
+                    kind=ex.kind,
+                    context=ex.context,
+                    descriptions=tuple(new_descs),
+                    values=ex.values,
+                    target=ex.target,
+                )
+            )
+        if changed:
+            tmp = fpath.with_suffix(".pt.tmp")
+            torch.save(cleaned_pool, tmp)
+            os.replace(tmp, fpath)
+        updated_counts[fname] = len(cleaned_pool)
+    return updated_counts
+
 
 
 def _configure_hf_transfer() -> None:
@@ -331,7 +376,7 @@ def build_cloud_shards(
                             else:
                                 rejected += 1
                     else:
-                        uta = extract_typed_decision_uta(row, max_seq_len=seq_len)
+                        uta = extract_typed_decision_uta(row, max_seq_len=seq_len, require_rationale=True)
                         total_dec_seen = len(train_decision_pool) + len(val_decision_pool)
                         dec_ex = _convert_record_to_decision_example(
                             row, total_dec_seen, max_seq_len=min(512, seq_len)
@@ -588,6 +633,7 @@ def run_cloud_training(
             last_synced_ckpt_count = cur_ckpts
             _sync_run_artifacts(step)
 
+    sanitize_decision_caches(config.shards_root)
     trainer = MCL4COETrainer(config, on_step_callback=_on_step)
     manifest = trainer.train()
     _sync_run_artifacts(int(manifest.get("step", config.total_steps)))
@@ -597,31 +643,73 @@ def run_cloud_training(
 def run_context_hierarchy_ablation(
     output_dir: str | Path,
     *,
+    shards_root: str | Path | None = None,
     d_model: int = 192,
     n_heads: int = 6,
     steps: int = 24,
     seq_len: int = 256,
 ) -> dict[str, Any]:
-    """Execute the 4-Arm Context Hierarchy & Backbone Ablation Suite on GPU/CPU."""
+    """Execute the 5-Arm Controlled Context Hierarchy, Attention & NVFP4 Ablation Suite."""
+    from mcl4_coe import ShardedTokenBlockDataset, collate_decisions
+    from mcl4_coe.nvfp4 import convert_linear_to_nvfp4, get_gemm_counts, reset_gemm_counts
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_path = Path(output_dir).expanduser().resolve()
     out_path.mkdir(parents=True, exist_ok=True)
 
-    shards_root = REPO_ROOT / "data_shards"
-    track_receipts = ensure_sharded_tracks_ready(shards_root, seq_len=seq_len)
-    ds = MultiTrackMixtureDataset(track_receipts)
+    if shards_root is not None:
+        resolved_shards = Path(shards_root).expanduser().resolve()
+    elif Path("/content/data_shards_v2").is_dir():
+        resolved_shards = Path("/content/data_shards_v2")
+    else:
+        resolved_shards = REPO_ROOT / "data_shards"
+
+    sanitize_decision_caches(resolved_shards)
+    track_receipts = ensure_sharded_tracks_ready(resolved_shards, seq_len=seq_len)
+    ds = MultiTrackMixtureDataset(track_receipts, split="train")
+
+    val_datasets: dict[str, Any] = {}
+    for t_name, r_path in track_receipts.items():
+        try:
+            val_datasets[t_name] = ShardedTokenBlockDataset(r_path, track=t_name, split="val")
+        except ValueError:
+            val_datasets[t_name] = ds.track_datasets[t_name]
+
+    train_dec_path = resolved_shards / "typed_decision" / "decision_examples_cache.pt"
+    val_dec_path = resolved_shards / "typed_decision" / "decision_examples_val_cache.pt"
+    max_mc_len = min(512, seq_len)
+
+    def _load_filtered_mcqa(p: Path, limit: int) -> list[Any]:
+        if not p.is_file():
+            return []
+        try:
+            loaded_p = torch.load(p, map_location="cpu", weights_only=False)
+            return [
+                ex
+                for ex in loaded_p
+                if len(ex.descriptions) == 4
+                and len(ex.context.encode("utf-8")) + 2 <= max_mc_len
+                and all(len(d.encode("utf-8")) + 2 <= max_mc_len for d in ex.descriptions)
+            ][:limit]
+        except Exception:
+            return []
+
+    train_mcqa_pool = _load_filtered_mcqa(train_dec_path, 256)
+    val_mcqa_pool = _load_filtered_mcqa(val_dec_path if val_dec_path.is_file() else train_dec_path, 128)
 
     arms = [
-        ("Arm_A_Standard_Attention", "standard", False, False),
-        ("Arm_B_MCL4_CED", "markov_local4", False, False),
-        ("Arm_C_MCL4_TurboQuant_ContextLM", "markov_local4", True, False),
-        ("Arm_D_MCL4_Full_4Tier_ATXY", "markov_local4", True, True),
+        ("Arm_A_Standard_Attention", "standard", False, False, False),
+        ("Arm_B_MCL4_CED", "markov_local4", False, False, False),
+        ("Arm_C_MCL4_TurboQuant_ContextLM", "markov_local4", True, False, False),
+        ("Arm_D_MCL4_Full_4Tier_ATXY", "markov_local4", True, True, False),
+        ("Arm_E_MCL4_NVFP4_4Tier_ATXY", "markov_local4", True, True, True),
     ]
 
     store: ATXYPageStore = index_python_repo_to_atxy(REPO_ROOT, subsystems=("src",))
     results: dict[str, Any] = {
         "device": str(device),
         "gpu_name": torch.cuda.get_device_name(0) if device.type == "cuda" else "CPU",
+        "shards_root": str(resolved_shards),
         "d_model": d_model,
         "steps": steps,
         "seq_len": seq_len,
@@ -629,14 +717,16 @@ def run_context_hierarchy_ablation(
         "arms": {},
     }
 
-    for arm_name, attn_type, use_compression, use_atxy in arms:
+    for arm_name, attn_type, use_compression, use_atxy, use_nvfp4 in arms:
         torch.manual_seed(42)
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
         cfg = MCL4CEDConfig(
             d_model=d_model,
             n_heads=n_heads,
             n_encoder_layers=2,
             n_decoder_layers=2,
-            ple_dim=48,
+            ple_dim=min(64, max(32, d_model // 3)),
             expert_hidden_dim=d_model * 2,
             num_experts=4,
             top_k=2,
@@ -645,10 +735,24 @@ def run_context_hierarchy_ablation(
         )
         model = CognitiveOperatorEnsemble(
             MCL4CEDBackbone(cfg),
-            COEConfig(projection_dim=48, initial_scale=15.0, recurrence_steps=1),
+            COEConfig(projection_dim=min(64, max(32, d_model // 3)), initial_scale=15.0, recurrence_steps=1),
         )
-        prepare_model(model, device=device, bf16_working_weights=(device.type == "cuda"))
-        opt = CPUOffloadAdamW(model.parameters(), lr=2.5e-3, weight_decay=0.01, transfer_mode="batched")
+        nvfp4_converted = 0
+        if use_nvfp4 and device.type == "cuda":
+            reset_gemm_counts()
+            nvfp4_converted = convert_linear_to_nvfp4(
+                model,
+                min_features=32,
+                experts_only=True,
+                sparsity_mode="2to4_transposable",
+                sr_ste_decay=1e-4,
+                causal_activation_scale=True,
+            )
+            model.to(device)
+            opt: Any = torch.optim.AdamW(model.parameters(), lr=1.5e-3, weight_decay=0.01)
+        else:
+            prepare_model(model, device=device, bf16_working_weights=(device.type == "cuda"))
+            opt = CPUOffloadAdamW(model.parameters(), lr=1.5e-3, weight_decay=0.01, transfer_mode="batched")
 
         ctx_compressor = (
             ContextLMCompressor(d_model=d_model, chunk_size=64, gist_tokens_per_chunk=8).to(device)
@@ -660,6 +764,7 @@ def run_context_hierarchy_ablation(
         first_loss = 0.0
         final_loss = 0.0
         kv_ratio = 1.0
+        total_toks = 0
 
         for step_idx in range(1, steps + 1):
             batch_items = [ds[(step_idx * 7 + b) % len(ds)] for b in range(4)]
@@ -667,25 +772,77 @@ def run_context_hierarchy_ablation(
             targets = torch.stack([b["labels"][:seq_len] for b in batch_items]).to(device)
 
             opt.zero_grad()
-            lm_out = model.forward_inference(input_ids, targets=targets)
-            loss = lm_out.loss if lm_out.loss is not None else lm_out.aux_loss
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=(device.type == "cuda" and not use_nvfp4)):
+                lm_out = model.forward_inference(input_ids, targets=targets)
+                loss = lm_out.loss if lm_out.loss is not None else lm_out.aux_loss
 
-            if ctx_compressor is not None:
-                valid = input_ids != cfg.pad_id
-                gist_state = ctx_compressor(model.backbone, input_ids, valid)
-                comp_kv = compress_encoded_state(gist_state)
-                kv_ratio = (seq_len / max(1, gist_state.hidden.shape[1])) * comp_kv.compression_ratio
-                loss = loss + 0.05 * gist_state.aux_loss
+                if ctx_compressor is not None:
+                    valid = input_ids != cfg.pad_id
+                    gist_state = ctx_compressor(model.backbone, input_ids, valid)
+                    comp_kv = compress_encoded_state(gist_state)
+                    kv_ratio = (seq_len / max(1, gist_state.hidden.shape[1])) * comp_kv.compression_ratio
+                    loss = loss + 0.05 * gist_state.aux_loss
+
+                if train_mcqa_pool and step_idx % 2 == 0:
+                    mc_start = ((step_idx // 2) * 4) % len(train_mcqa_pool)
+                    mc_sub = [train_mcqa_pool[(mc_start + k) % len(train_mcqa_pool)] for k in range(4)]
+                    mc_b = {k: v.to(device) for k, v in collate_decisions(mc_sub, max_length=min(512, seq_len)).items()}
+                    op_out = model.forward_all_operators(**mc_b)
+                    loss = loss + 0.35 * op_out.total_loss
 
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             opt.step()
 
+            total_toks += int(targets.ne(-100).sum().item())
             lv = float(loss.detach().item())
             if step_idx == 1:
                 first_loss = lv
             final_loss = lv
 
         elapsed = time.perf_counter() - t0
+        tok_per_s = total_toks / max(1e-6, elapsed)
+        vram_mb = (torch.cuda.max_memory_allocated(device) / (1024 * 1024)) if device.type == "cuda" else 0.0
+
+        # Evaluate held-out val_bpb across tracks
+        model.eval()
+        val_nll_sum = 0.0
+        val_tok_sum = 0
+        with torch.no_grad():
+            for t_name, v_ds in val_datasets.items():
+                n_eval = min(16, len(v_ds))
+                if n_eval <= 0:
+                    continue
+                v_batch = v_ds.batch(list(range(n_eval)))
+                v_inp = v_batch["input_ids"][:, :seq_len].to(device)
+                v_lbl = v_batch["labels"][:, :seq_len].to(device)
+                v_toks = int(v_lbl.ne(-100).sum().item())
+                if v_toks <= 0:
+                    continue
+                with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=(device.type == "cuda" and not use_nvfp4)):
+                    v_out = model.forward_inference(v_inp, targets=v_lbl)
+                if v_out.ce_loss is not None:
+                    val_nll_sum += float(v_out.ce_loss.item()) * v_toks
+                    val_tok_sum += v_toks
+        val_ce = val_nll_sum / max(1, val_tok_sum)
+        val_bpb = val_ce / math.log(2.0)
+
+        # Evaluate symmetric held-out MCQA accuracy
+        val_mcqa_acc = 0.0
+        if val_mcqa_pool:
+            mc_correct = 0
+            mc_total = 0
+            with torch.no_grad():
+                for i in range(0, min(64, len(val_mcqa_pool)), 16):
+                    sub = val_mcqa_pool[i : i + 16]
+                    mc_b = {k: v.to(device) for k, v in collate_decisions(sub, max_length=min(512, seq_len)).items()}
+                    with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=(device.type == "cuda" and not use_nvfp4)):
+                        op_out = model.forward_all_operators(**mc_b)
+                    preds = op_out.decision.probabilities.argmax(dim=-1)
+                    mc_correct += int((preds == mc_b["targets"]).sum().item())
+                    mc_total += len(sub)
+            val_mcqa_acc = mc_correct / max(1, mc_total)
+
         atxy_route_conf = 0.0
         atxy_selected = None
         if use_atxy:
@@ -698,17 +855,27 @@ def run_context_hierarchy_ablation(
             atxy_route_conf = float(r_out["confidence"])
             atxy_selected = str(r_out["address"])
 
+        gemm_counts = get_gemm_counts() if use_nvfp4 else {"nvfp4_gemms": 0, "nvfp4_sparse_2to4_gemms": 0}
         results["arms"][arm_name] = {
             "attention_type": attn_type,
+            "use_nvfp4": use_nvfp4,
+            "nvfp4_layers_converted": nvfp4_converted,
+            "nvfp4_sparse_2to4_gemms": int(gemm_counts.get("nvfp4_sparse_2to4_gemms", 0)),
             "first_loss": round(first_loss, 4),
             "final_loss": round(final_loss, 4),
+            "train_bpb": round(final_loss / math.log(2.0), 4),
+            "held_out_val_bpb": round(val_bpb, 4),
+            "symmetric_val_mcqa_acc": round(val_mcqa_acc, 4),
             "effective_context_compression_ratio": round(kv_ratio, 2),
             "atxy_routed_address": atxy_selected,
             "atxy_route_confidence": round(atxy_route_conf, 4),
+            "tok_per_s": round(tok_per_s, 1),
+            "vram_allocated_mb": round(vram_mb, 1),
             "wall_time_sec": round(elapsed, 2),
         }
         print(
-            f"[{arm_name}] loss: {first_loss:.4f} -> {final_loss:.4f} | "
+            f"[{arm_name}] loss: {first_loss:.4f} -> {final_loss:.4f} | val_bpb={val_bpb:.4f} | "
+            f"val_mcqa={val_mcqa_acc*100:.1f}% | tok/s={tok_per_s:,.0f} | "
             f"compression={kv_ratio:.1f}x | atxy={atxy_selected} ({elapsed:.2f}s)"
         )
 
@@ -781,6 +948,7 @@ def evaluate_trained_checkpoint(
 
     mcqa_eval: dict[str, Any] = {}
     shards_dir = Path(shards_root).expanduser().resolve()
+    sanitize_decision_caches(shards_dir)
     val_dec_cache = shards_dir / "typed_decision" / "decision_examples_val_cache.pt"
     dec_cache = val_dec_cache if val_dec_cache.is_file() else (shards_dir / "typed_decision" / "decision_examples_cache.pt")
     split_tag = "held_out_val" if val_dec_cache.is_file() else "train_pool_fallback"
@@ -959,8 +1127,9 @@ def main() -> None:
     )
     p_eval.add_argument("--max-new-tokens", type=int, default=96)
 
-    p_ablate = sub.add_parser("ablate", help="Run 4-Arm Context Hierarchy & Backbone Ablation")
+    p_ablate = sub.add_parser("ablate", help="Run 5-Arm Context Hierarchy, Attention & NVFP4 Ablation")
     p_ablate.add_argument("--output-dir", default="runs/ablations")
+    p_ablate.add_argument("--shards-root", default=None)
     p_ablate.add_argument("--d-model", type=int, default=192)
     p_ablate.add_argument("--n-heads", type=int, default=6)
     p_ablate.add_argument("--steps", type=int, default=24)
@@ -1040,6 +1209,7 @@ def main() -> None:
     elif args.cmd == "ablate":
         res = run_context_hierarchy_ablation(
             args.output_dir,
+            shards_root=args.shards_root,
             d_model=args.d_model,
             n_heads=args.n_heads,
             steps=args.steps,

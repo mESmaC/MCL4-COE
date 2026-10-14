@@ -153,9 +153,9 @@ class TrainingRunConfig:
     )
     end_weights: dict[str, float] = field(
         default_factory=lambda: {
-            "pretrain_lm": 0.15,
-            "uta_trace": 0.50,
-            "typed_decision": 0.35,
+            "pretrain_lm": 0.40,
+            "uta_trace": 0.45,
+            "typed_decision": 0.15,
         }
     )
 

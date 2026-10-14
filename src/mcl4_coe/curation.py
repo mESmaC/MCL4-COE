@@ -73,14 +73,18 @@ class SieveDecision:
     sanitized_text: str | None = None
 
 
+_RAW_THINK_MARKUP_RE = re.compile(r"</?think>", re.IGNORECASE)
+
+
 def sanitize_trace_markers(text: str) -> str:
-    """Escape accidental occurrences of `#U$#`, `#Q$#`, `#S$#`, `#H$#`, `#T$#`, `#A$#` in raw text."""
-    out = text
+    """Escape accidental occurrences of `#U$#`, `#Q$#`, `#S$#`, `#H$#`, `#T$#`, `#A$#` and strip `<think>` tags."""
+    out = _RAW_THINK_MARKUP_RE.sub("", text)
     for marker in TRACE_MARKERS.values():
         if marker in out:
             # Replace `#X$#` with `#X$` so raw corpus content can never spoof a register boundary
             out = out.replace(marker, marker[:-1])
     return out
+
 
 
 def evaluate_byte_sieve(text: str, config: ByteSieveConfig = ByteSieveConfig()) -> SieveDecision:

@@ -801,12 +801,15 @@ def extract_typed_decision_uta(
     record: Any,
     *,
     max_seq_len: int = 2048,
+    require_rationale: bool = False,
 ) -> tuple[str, str, str] | None:
     """Convert a typed decision or Nemotron MCQA record into a `#U$#/#Q$#/#H$# -> #T$# -> #A$#` episode."""
     parsed = parse_mcqa_decision_fields(record)
     if parsed is None:
         return None
     state, kind, question, clean_opts, best_idx, rationale = parsed
+    if require_rationale and not (rationale and rationale.strip()):
+        return None
     winning_opt = clean_opts[best_idx]
     opt_lines = "\n".join(f"#H$# [{i}] {opt}" for i, opt in enumerate(clean_opts))
     prompt = (
@@ -816,8 +819,8 @@ def extract_typed_decision_uta(
     )
     thought = (
         sanitize_trace_markers(rationale)
-        if rationale
-        else f"Compare {len(clean_opts)} candidate hypotheses against state evidence -> option [{best_idx}] matches."
+        if rationale and rationale.strip()
+        else f"{sanitize_trace_markers(question)} -> [{best_idx}] {winning_opt}"
     )
     answer = f"[{best_idx}] {winning_opt}"
     return _compact_uta_triplet(
@@ -827,6 +830,7 @@ def extract_typed_decision_uta(
         max_total_chars=max(160, max_seq_len - 148),
         max_total_bytes=max(180, max_seq_len - 88),
     )
+
 
 
 def extract_pretrain_text(

@@ -236,12 +236,15 @@ class MultiPassController(nn.Module):
 
             step = 0
             while step < max_new_tokens and len(tokens) < max_seq:
-                if not has_emitted_a and step == thought_budget:
-                    if len(tokens) + len(a_tag_tokens) < max_seq:
-                        tokens.extend(a_tag_tokens)
-                        has_emitted_a = True
-                        if len(tokens) >= max_seq:
-                            break
+                if not has_emitted_a and step >= thought_budget:
+                    at_word_boundary = tokens[-1] in (32, 10, ord("."), ord(","), ord(";"), ord(":"))
+                    force_transition = step >= min(max(thought_budget, max_new_tokens - 12), thought_budget + 12)
+                    if at_word_boundary or force_transition:
+                        if len(tokens) + len(a_tag_tokens) < max_seq:
+                            tokens.extend(a_tag_tokens)
+                            has_emitted_a = True
+                            if len(tokens) >= max_seq:
+                                break
 
                 inp = torch.tensor([tokens], dtype=torch.long, device=device)
                 with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
@@ -270,15 +273,32 @@ class MultiPassController(nn.Module):
                     next_logits[32] -= 2.5
                     next_logits[10] -= 2.5
 
-                # Light repetition penalty over the recent generated window to prevent character/n-gram loops
-                recent = tokens[max(prompt_len, len(tokens) - 16) :]
-                for prev_tok in set(recent):
-                    if 32 < prev_tok < 127:
-                        if next_logits[prev_tok] > 0:
-                            next_logits[prev_tok] /= 1.20
-                        else:
-                            next_logits[prev_tok] *= 1.20
-                if len(tokens) >= 2 and tokens[-1] == tokens[-2]:
+                # Antidoom span-loop guard: never penalize individual English letters inside words;
+                # instead, detect and suppress only the exact trigger byte that restarts a repeated
+                # 4-byte or 6-byte span in the generated window.
+                gen_window = tokens[max(prompt_len, len(tokens) - 128) :]
+                if len(gen_window) >= 6:
+                    ctx5 = gen_window[-5:]
+                    for i in range(len(gen_window) - 5):
+                        if gen_window[i : i + 5] == ctx5:
+                            trig_b = gen_window[i + 5]
+                            if 32 <= trig_b < 127:
+                                next_logits[trig_b] -= 6.0
+                if len(gen_window) >= 4:
+                    ctx3 = gen_window[-3:]
+                    hits_3: dict[int, int] = {}
+                    for i in range(len(gen_window) - 3):
+                        if gen_window[i : i + 3] == ctx3:
+                            trig_b = gen_window[i + 3]
+                            hits_3[trig_b] = hits_3.get(trig_b, 0) + 1
+                    for trig_b, cnt in hits_3.items():
+                        if cnt >= 2 and 32 <= trig_b < 127:
+                            next_logits[trig_b] -= 3.5 * cnt
+
+                # Prevent 3x identical character repeats ("sss") or 2x identical punctuation
+                if len(tokens) >= 3 and tokens[-1] == tokens[-2] == tokens[-3]:
+                    next_logits[tokens[-1]] = -torch.inf
+                elif len(tokens) >= 2 and tokens[-1] == tokens[-2] and not chr(min(126, max(32, tokens[-1]))).isalnum():
                     next_logits[tokens[-1]] = -torch.inf
 
                 if temperature <= 0.0:

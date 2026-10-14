@@ -292,6 +292,100 @@ def grpo_clipped_loss(
     return weighted.mean()
 
 
+def detect_doom_loop(
+    tokens: list[int] | tuple[int, ...],
+    *,
+    min_period: int = 4,
+    max_period: int = 128,
+    min_repeats: int = 2,
+    min_total_repeated: int = 10,
+) -> tuple[int, int, int] | None:
+    """Detect an inner repeating token/byte span (LiquidAI Antidoom `find_inner_repetition`).
+
+    Returns `(repeat_start_idx, rejected_token_id, period)` where `repeat_start_idx = start + period`
+    is the exact index of the first token of the first repeat ($y_{\\text{rejected}}$), or `None`
+    if no loop is found.
+    """
+    n = len(tokens)
+    if n < min_period * min_repeats:
+        return None
+    eff_max_p = min(max_period, n // min_repeats)
+    for start in range(0, n - min_period * min_repeats + 1):
+        for period in range(min_period, eff_max_p + 1):
+            if start + period * min_repeats > n:
+                break
+            pattern = tokens[start : start + period]
+            reps = 1
+            pos = start + period
+            while pos + period <= n and tokens[pos : pos + period] == pattern:
+                reps += 1
+                pos += period
+            if reps >= min_repeats and (reps * period) >= min_total_repeated:
+                repeat_start = start + period
+                return repeat_start, int(tokens[repeat_start]), period
+    return None
+
+
+def compute_antidoom_ftpo_loss(
+    logits: Tensor,
+    ref_logits: Tensor,
+    rejected_tokens: Tensor,
+    chosen_tokens: Tensor,
+    *,
+    beta: float = 0.5,
+    active_reg: float = 0.02,
+    other_reg: float = 0.50,
+    target_chosen_win: float = 0.35,
+) -> tuple[Tensor, float]:
+    """Compute LiquidAI Antidoom Final Token Preference Optimization (FTPO) loss in logit space.
+
+    Key properties from LiquidAI Antidoom:
+    1. **Single trigger-token targeting:** Evaluates logits `[B, V]` strictly at the token
+       position immediately preceding a repetition loop (`repeat_start - 1`).
+    2. **Multi-chosen alternatives:** Spreads preference pressure across $K$ plausible
+       continuation tokens (`chosen_tokens` `[B, K]`) vs. the single loop-starting token
+       (`rejected_tokens` `[B]`).
+    3. **Two-part logit-space regularization:** Omits full-vocab softmax in the preference term
+       and tightly anchors unrelated vocabulary tokens (`other_reg`) while allowing chosen/rejected
+       logits (`active_reg`) to move until `chosen_win >= target_chosen_win`.
+    """
+    z = logits.float()
+    z_ref = ref_logits.detach().float()
+    bsz, vocab_size = z.shape
+    rej = rejected_tokens.long().clamp(0, vocab_size - 1)
+    cho = chosen_tokens.long().clamp(0, vocab_size - 1)
+    if cho.ndim == 1:
+        cho = cho.unsqueeze(-1)
+
+    delta = z - z_ref
+    delta_rej = delta.gather(1, rej.unsqueeze(1)).squeeze(1)
+    delta_cho = delta.gather(1, cho).mean(dim=1)
+
+    raw_rej = z.gather(1, rej.unsqueeze(1)).squeeze(1)
+    raw_cho = z.gather(1, cho).mean(dim=1)
+    win_vec = (raw_cho > raw_rej).float()
+    chosen_win = float(win_vec.mean().item())
+
+    # Early-stopping gate per LiquidAI Antidoom: once chosen_win exceeds target_chosen_win (~0.35),
+    # attenuate preference pressure to prevent over-suppressing valid discourse words ("the", "So").
+    pref_vec = -F.logsigmoid(beta * (delta_cho - delta_rej))
+    gate = 0.05 if chosen_win >= target_chosen_win else 1.0
+    pref_loss = gate * pref_vec.mean()
+
+    active_mask = torch.zeros((bsz, vocab_size), dtype=torch.bool, device=z.device)
+    active_mask.scatter_(1, rej.unsqueeze(1), True)
+    active_mask.scatter_(1, cho, True)
+
+    sq_delta = delta.square()
+    active_l2 = (sq_delta * active_mask.float()).sum(dim=-1) / active_mask.float().sum(dim=-1).clamp_min(1.0)
+    other_mask = (~active_mask).float()
+    other_l2 = (sq_delta * other_mask).sum(dim=-1) / other_mask.sum(dim=-1).clamp_min(1.0)
+    reg_loss = active_reg * active_l2.mean() + other_reg * other_l2.mean()
+
+    return pref_loss + reg_loss, chosen_win
+
+
+
 # ---------------------------------------------------------------------------
 # Bounded Structural Self-Improvement (Expert Mitosis & Staleness Pruning)
 # ---------------------------------------------------------------------------
@@ -543,6 +637,8 @@ class OrnithStepOutput:
     dream_replays_dreamed: int = 0
     dream_worlds_archived: int = 0
     dream_active_policy: str = ""
+    antidoom_loss: float = 0.0
+    antidoom_chosen_win: float = 0.0
 
     @property
     def mean_rollout_reward(self) -> float:
@@ -1163,7 +1259,62 @@ class OrnithSelfImprover:
         assert lm_distill_out.loss is not None
         self_distill_loss = 0.5 * decision_distill_loss + 0.5 * lm_distill_out.loss
 
-        total_ornith_loss = op_out.total_loss + 0.5 * grpo_loss + 0.25 * self_distill_loss
+        # LiquidAI Antidoom FTPO: locate inner repetition trigger in model greedy predictions
+        # (or the first divergent repeat token) and prefer the gold + top-3 non-repeating ASCII tokens.
+        ftpo_pos_logits: list[Tensor] = []
+        ftpo_rej_ids: list[int] = []
+        ftpo_cho_ids: list[list[int]] = []
+        with torch.no_grad():
+            pred_ids = lm_distill_out.logits[:, :, :256].argmax(dim=-1)
+        for b_i in range(inp_tensor.size(0)):
+            valid_pos = (lbl_tensor[b_i] != -100).nonzero(as_tuple=False).squeeze(-1)
+            if valid_pos.numel() < 8:
+                continue
+            seq_preds = pred_ids[b_i, valid_pos].tolist()
+            loop_hit = detect_doom_loop(seq_preds, min_period=4, max_period=48, min_repeats=2, min_total_repeated=8)
+            if loop_hit is not None:
+                trig_local, rej_tok, _ = loop_hit
+                pos_idx = int(valid_pos[min(trig_local, valid_pos.numel() - 1)].item())
+            else:
+                pos_idx = int(valid_pos[valid_pos.numel() // 2].item())
+                rej_tok = int(pred_ids[b_i, pos_idx].item())
+            gold_tok = int(lbl_tensor[b_i, pos_idx].item())
+            if rej_tok == gold_tok and loop_hit is None:
+                # If greedy already matches gold with no loop, use the highest non-gold ASCII repeat candidate
+                row_l = lm_distill_out.logits[b_i, pos_idx, 32:127].detach()
+                top2 = row_l.topk(2).indices + 32
+                rej_tok = int(top2[1].item() if int(top2[0].item()) == gold_tok else top2[0].item())
+            row_ascii = lm_distill_out.logits[b_i, pos_idx, 32:127].detach().clone()
+            if 32 <= rej_tok < 127:
+                row_ascii[rej_tok - 32] = -torch.inf
+            top_alts = (row_ascii.topk(4).indices + 32).tolist()
+            chosen_row = [gold_tok] + [t_id for t_id in top_alts if t_id != gold_tok][:3]
+            while len(chosen_row) < 4:
+                chosen_row.append(gold_tok)
+            ftpo_pos_logits.append(lm_distill_out.logits[b_i, pos_idx])
+            ftpo_rej_ids.append(rej_tok)
+            ftpo_cho_ids.append(chosen_row[:4])
+
+        if ftpo_pos_logits:
+            ftpo_logits_t = torch.stack(ftpo_pos_logits, dim=0)
+            ftpo_rej_t = torch.tensor(ftpo_rej_ids, dtype=torch.long, device=self.device)
+            ftpo_cho_t = torch.tensor(ftpo_cho_ids, dtype=torch.long, device=self.device)
+            antidoom_loss_t, antidoom_win = compute_antidoom_ftpo_loss(
+                ftpo_logits_t,
+                ftpo_logits_t.detach(),
+                ftpo_rej_t,
+                ftpo_cho_t,
+            )
+        else:
+            antidoom_loss_t = torch.zeros((), device=self.device)
+            antidoom_win = 0.0
+
+        total_ornith_loss = (
+            op_out.total_loss
+            + 0.5 * grpo_loss
+            + 0.25 * self_distill_loss
+            + 0.15 * antidoom_loss_t
+        )
         mean_rollout_r = float((probs.detach() * h_scores).sum(dim=-1).mean().item())
         d_out = self._last_dream_out
 
@@ -1187,4 +1338,7 @@ class OrnithSelfImprover:
             dream_replays_dreamed=0 if d_out is None else int(d_out.total_replays_dreamed),
             dream_worlds_archived=0 if d_out is None else int(d_out.worlds_archived),
             dream_active_policy="" if d_out is None else str(d_out.active_policy_text),
+            antidoom_loss=round(float(antidoom_loss_t.detach().item()), 4),
+            antidoom_chosen_win=round(float(antidoom_win), 4),
         )
+

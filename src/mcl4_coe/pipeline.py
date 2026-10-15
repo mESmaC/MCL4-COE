@@ -483,25 +483,49 @@ def _split_thought_and_answer(raw_response: str, explicit_thought: str | None = 
     if len(lines) >= 2:
         return "\n".join(lines[:-1]), lines[-1]
 
-    # 5. Single-sentence fallback: split sentences or synthesize concise verification step
+    # 5. Single-sentence fallback: split sentences or clause boundaries without duplicating resp or injecting boilerplate
     sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", resp) if s.strip()]
     if len(sentences) >= 2:
         return " ".join(sentences[:-1]), sentences[-1]
-    return f"Evaluate step-by-step: {resp}", resp
+    for sep in ("; ", ": ", ", so ", ", therefore ", " because ", ", which ", ", "):
+        if sep in resp:
+            left, right = resp.rsplit(sep, 1)
+            if left.strip() and right.strip():
+                return left.strip(), right.strip()
+    words = resp.split()
+    if len(words) >= 6:
+        mid = len(words) // 2
+        return " ".join(words[:mid]), " ".join(words[mid:])
+    return resp, resp
+
+
+def _truncate_contiguous_sentences(text: str, max_chars: int) -> str:
+    """Keep contiguous complete sentences from the start of `text` up to `max_chars` (never splicing `\n...\n`)."""
+    stripped = text.strip()
+    if len(stripped) <= max_chars:
+        return stripped
+    window = stripped[:max_chars]
+    # Snap to the last sentence boundary (., !, ?, or newline) if past 55% of max_chars
+    best_end = -1
+    for m in re.finditer(r"[.!?](?:\s|$)|\n", window):
+        if m.end() >= int(max_chars * 0.55):
+            best_end = m.end()
+    if best_end > 0:
+        return window[:best_end].strip()
+    # Otherwise snap to the last word boundary
+    last_space = window.rfind(" ")
+    if last_space >= int(max_chars * 0.50):
+        return window[:last_space].strip()
+    return window.strip()
 
 
 def _truncate_utf8_bytes(text: str, max_bytes: int) -> str:
-    """Safely compact or truncate `text` so its UTF-8 byte length is `<= max_bytes`."""
+    """Safely truncate `text` on a contiguous sentence or word boundary so UTF-8 byte length is `<= max_bytes`."""
     encoded = text.encode("utf-8")
     if len(encoded) <= max_bytes:
         return text
-    if max_bytes > 240:
-        head_c = max(80, int(max_bytes * 0.58))
-        tail_c = max(60, int(max_bytes * 0.32))
-        window = build_head_tail_window(text, head_chars=head_c, tail_chars=tail_c)
-        if len(window.encode("utf-8")) <= max_bytes:
-            return window
-    return encoded[:max_bytes].decode("utf-8", errors="ignore").rstrip()
+    prefix = encoded[:max_bytes].decode("utf-8", errors="ignore").rstrip()
+    return _truncate_contiguous_sentences(prefix, len(prefix))
 
 
 def _compact_uta_triplet(
@@ -512,7 +536,7 @@ def _compact_uta_triplet(
     max_total_chars: int = 1900,
     max_total_bytes: int = 1960,
 ) -> tuple[str, str, str]:
-    """Sanitize and compact `#U$#`, `#T$#`, and `#A$#` so every episode fits inside `seq_len`."""
+    """Sanitize and compact `#U$#`, `#T$#`, and `#A$#` contiguously so every episode fits inside `seq_len`."""
     u_s = sanitize_trace_markers(u).strip()
     t_s = sanitize_trace_markers(t).strip()
     a_s = sanitize_trace_markers(a).strip()
@@ -521,18 +545,16 @@ def _compact_uta_triplet(
     a_cap = min(560, max(48, int(max_total_bytes * 0.28)))
     t_min = min(240, max(48, int(max_total_bytes * 0.20)))
 
-    # 1. Cap oversized prompt (#U$#) and post-</think> answer (#A$#) windows first
+    # 1. Cap oversized prompt (#U$#) and answer (#A$#) contiguously at sentence boundaries
     if len(u_s) > u_cap + 60:
-        u_s = build_head_tail_window(u_s, head_chars=int(u_cap * 0.65), tail_chars=int(u_cap * 0.30))
+        u_s = _truncate_contiguous_sentences(u_s, u_cap)
     if len(a_s) > a_cap + 60:
-        a_s = build_head_tail_window(a_s, head_chars=int(a_cap * 0.65), tail_chars=int(a_cap * 0.30))
+        a_s = _truncate_contiguous_sentences(a_s, a_cap)
 
-    # 2. Compact verbose <think> scratchpad (#T$#) to fit remaining character budget
+    # 2. Compact verbose scratchpad (#T$#) contiguously to fit remaining character budget
     if len(u_s) + len(t_s) + len(a_s) > max_total_chars and len(t_s) > t_min:
         budget = max(t_min, max_total_chars - len(u_s) - len(a_s))
-        head_c = max(32, int(budget * 0.60))
-        tail_c = max(24, int(budget * 0.34))
-        t_s = build_head_tail_window(t_s, head_chars=head_c, tail_chars=tail_c)
+        t_s = _truncate_contiguous_sentences(t_s, budget)
 
     # 3. Guarantee UTF-8 byte length <= max_total_bytes (accounting for multibyte math/Unicode)
     u_b = len(u_s.encode("utf-8"))

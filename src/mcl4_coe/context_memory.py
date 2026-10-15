@@ -951,9 +951,10 @@ class COEAddressRouter:
         dec_logits = dec_out.logits[0].float()
         if any(s > 0.0 for s in cand_sketch):
             sk_t = torch.tensor(cand_sketch, dtype=torch.float32, device=device)
-            sk_norm = (sk_t - sk_t.mean()) / sk_t.std(unbiased=False).clamp_min(1e-5)
-            dec_std = dec_logits.std(unbiased=False).clamp_min(0.5)
-            joint_logits = dec_logits + 0.60 * dec_std * sk_norm
+            sk_z = (sk_t - sk_t.mean()) / sk_t.std(unbiased=False).clamp_min(1e-5)
+            dec_z = (dec_logits - dec_logits.mean()) / dec_logits.std(unbiased=False).clamp_min(1e-5)
+            scale_eff = (coe._scale().detach().float() * 0.35).clamp(1.2, 4.5)
+            joint_logits = scale_eff * (0.45 * dec_z + 0.55 * sk_z)
             probs = joint_logits.softmax(dim=-1)
         else:
             probs = dec_out.probabilities[0]

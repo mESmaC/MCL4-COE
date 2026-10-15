@@ -1,0 +1,290 @@
+[
+  {
+    "title": "OOD 1 \u2014 Distributed Lock Ordering (Adjacent to Mutex Concurrency)",
+    "ood_prompt": "Why does acquiring multiple locks in a strict global lock ordering prevent circular wait deadlock in distributed transactions?",
+    "dream_matched": true,
+    "dream_top_similarity": 0.9499,
+    "dream_matched_domains": [
+      "concurrency_systems",
+      "thermodynamics_physics",
+      "graph_scheduling"
+    ],
+    "dream_recommended_scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+    "dream_rl_selected_round": 2,
+    "dream_rl_selected_strategy": "r2_rl_answer_refine",
+    "dream_rl_round1_best": 0.5761,
+    "dream_rl_round2_best": 0.5765,
+    "dream_rl_round1_advantages": [
+      -0.7003,
+      0.9228,
+      1.0362,
+      -1.2587
+    ],
+    "extra_tokens_stuffed": 30,
+    "extra_tokens_dream_rl": 0,
+    "joint_scores": {
+      "1_baseline_r1": {
+        "composite_score": 0.6206,
+        "decision_prob": 0.2933,
+        "decision_sim": 0.5101,
+        "evaluation_utility": 0.8804,
+        "deduction_entailed": 0.4486,
+        "deduction_contradicted": 0.0253,
+        "metacognition_correctness": 0.4343,
+        "structural_score": 0.95
+      },
+      "2_raw_prompt_stuffing": {
+        "composite_score": 0.4745,
+        "decision_prob": 0.1055,
+        "decision_sim": 0.2452,
+        "evaluation_utility": 0.6892,
+        "deduction_entailed": 0.3647,
+        "deduction_contradicted": 0.07,
+        "metacognition_correctness": 0.3292,
+        "structural_score": 0.95
+      },
+      "3_standard_coe": {
+        "composite_score": 0.6206,
+        "decision_prob": 0.2933,
+        "decision_sim": 0.5101,
+        "evaluation_utility": 0.8804,
+        "deduction_entailed": 0.4486,
+        "deduction_contradicted": 0.0253,
+        "metacognition_correctness": 0.4343,
+        "structural_score": 0.95
+      },
+      "4_dream_rsi_rl": {
+        "composite_score": 0.609,
+        "decision_prob": 0.3079,
+        "decision_sim": 0.5227,
+        "evaluation_utility": 0.9003,
+        "deduction_entailed": 0.4459,
+        "deduction_contradicted": 0.0208,
+        "metacognition_correctness": 0.4517,
+        "structural_score": 0.8
+      }
+    },
+    "outputs": {
+      "1_baseline_r1": "#U$# Why does acquiring multiple locks in a strict global lock ordering prevent circular wait deadlock in distributed transactions?\n#T$# At most mining biases are the most effective and mining biases (e.g., \"H\", \"H\"), \"O\", \"O\".\n#A$# What does acquiring multiple locks in a strict global lock ordering prevent circular wait deadlock in distributed transactions?",
+      "2_raw_prompt_stuffing": "#U$# Previous context: How do mutex locks and condition variables prevent race conditions between concurrent worker threads?\nCurrent question: Why does acquiring multiple locks in a strict global lock ordering prevent circular wait deadlock in distributed transactions?\n#T$# **Explanation:**  \nThe primary reason for the purpose of a single block of a block of a block of 1000,000 (or 100) is a valid solution to a block of a single block of 10 (or 200). Here's the breakdown:  \n\n1. **Possible locks**:  \n\n#A$# [2] It does not become a single block in a strict global lock ordering prevent circular wait deadlock in distributed transactions?",
+      "3_standard_coe": "#U$# Why does acquiring multiple locks in a strict global lock ordering prevent circular wait deadlock in distributed transactions?\n#T$# At most mining biases are the most effective and mining biases (e.g., \"H\", \"H\"), \"O\", \"O\".\n#A$# What does acquiring multiple locks in a strict global lock ordering prevent circular wait deadlock in distributed transactions?",
+      "4_dream_rsi_rl": "#U$# Why does acquiring multiple locks in a strict global lock ordering prevent circular wait deadlock in distributed transactions?\n#T$# Okay, let's see. The user is asking about how to protect the trailing of the trailing of the searching. Hmm, I need to figure out what I remember about the searching. Let me recall the definitions.\n\nFirst, I remember that the searching of a searching is a set of elements that can be replaced by a set of elements.\n#A$# The searching of a search is a set of numbers that can be replaced in a closed window. The searching of the searching is a set (0, 1). The searching is the set of elements that are not removed in the searching, and the searching is the set that is not removed in the tree.\n\nThe searching of the search is a set (1, 1). In this case, the searching of elements is (1, 2). The search is a subset of elements that can be replaced by a set of elements. The search is a set of elements in the searching set.\n\nThe searching is a set of numbers that can be replaced in a closed window. The searching is a set (0, 1). The searching is the set of elements that can't be replaced by a subset of elements. The set of elegances is the set of elegances that can be merged by a set of numbers."
+    }
+  },
+  {
+    "title": "OOD 2 \u2014 Two-Pointer Sorted Search in Python (Adjacent to Binary Search)",
+    "ood_prompt": "Write a Python function two_sum_sorted(arr, target) that finds two numbers in a sorted list that add up to target.",
+    "dream_matched": true,
+    "dream_top_similarity": 0.9883,
+    "dream_matched_domains": [
+      "algorithms_code",
+      "thermodynamics_physics",
+      "graph_scheduling"
+    ],
+    "dream_recommended_scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+    "dream_rl_selected_round": 1,
+    "dream_rl_selected_strategy": "r1_dream_steered",
+    "dream_rl_round1_best": 0.6294,
+    "dream_rl_round2_best": 0.0873,
+    "dream_rl_round1_advantages": [
+      -0.5934,
+      -0.795,
+      1.7071,
+      -0.3187
+    ],
+    "extra_tokens_stuffed": 40,
+    "extra_tokens_dream_rl": 0,
+    "joint_scores": {
+      "1_baseline_r1": {
+        "composite_score": 0.2766,
+        "decision_prob": 0.1414,
+        "decision_sim": 0.3479,
+        "evaluation_utility": 0.7216,
+        "deduction_entailed": 0.2546,
+        "deduction_contradicted": 0.6234,
+        "metacognition_correctness": 0.3344,
+        "structural_score": 0.1
+      },
+      "2_raw_prompt_stuffing": {
+        "composite_score": 0.5074,
+        "decision_prob": 0.3023,
+        "decision_sim": 0.5449,
+        "evaluation_utility": 0.8435,
+        "deduction_entailed": 0.4043,
+        "deduction_contradicted": 0.394,
+        "metacognition_correctness": 0.4187,
+        "structural_score": 0.5875
+      },
+      "3_standard_coe": {
+        "composite_score": 0.472,
+        "decision_prob": 0.1869,
+        "decision_sim": 0.4202,
+        "evaluation_utility": 0.8195,
+        "deduction_entailed": 0.4119,
+        "deduction_contradicted": 0.4385,
+        "metacognition_correctness": 0.4275,
+        "structural_score": 0.675
+      },
+      "4_dream_rsi_rl": {
+        "composite_score": 0.6259,
+        "decision_prob": 0.3694,
+        "decision_sim": 0.5968,
+        "evaluation_utility": 0.8711,
+        "deduction_entailed": 0.5233,
+        "deduction_contradicted": 0.2761,
+        "metacognition_correctness": 0.4878,
+        "structural_score": 0.85
+      }
+    },
+    "outputs": {
+      "1_baseline_r1": "#U$# Write a Python function two_sum_sorted(arr, target) that finds two numbers in a sorted list that add up to target.\n#T$# def find_sorted(arr, target):\nif len(arr) < 2:\nreturn []\nfor i in range(len(arr)):\nif len(arr[i]) < 2:\n#A$# return arr[i]",
+      "2_raw_prompt_stuffing": "#U$# Previous context: Write a Python function binary_search(arr, target) that finds the index of target in a sorted list in O(log n) time.\nCurrent question: Write a Python function two_sum_sorted(arr, target) that finds two numbers in a sorted list that add up to target.\n#T$# def binary_search(arr, target):\n  if target in arr:\n  return []\n  \n  \n  \n   print('neutral')\n  \n   print(f\"The index of target in arr: {\n  return [0, 1, 2, 3, 4, 5, 6, 7, 10, 10,\n\n#A$# print(f\"The index is: {\n  \"name\": {\"name\": \"John\", \"age\": {",
+      "3_standard_coe": "#U$# Write a Python function two_sum_sorted(arr, target) that finds two numbers in a sorted list that add up to target.\n#T$# def find_unique_sorted(arr):\nif len(arr) < 2:\nreturn []\nfor i in range(len(arr)):\nif arr[i] == target:\nreturn i\n#A$# return -1 if arr[i] == 0 else -1",
+      "4_dream_rsi_rl": "#U$# Write a Python function two_sum_sorted(arr, target) that finds two numbers in a sorted list that add up to target.\n#T$# ```python\ndef find_sorted_list(arr):\n\tsorted_list = sorted(arr, target)\n\treturn sorted_list\n#A$# # Testing the function\nsorted_dict = sorted([[1, 2, 3, 4, 5, 5, 6, 7, 10]])\nsorted_dict.sort(key=lambda x: x[1], x[2])\nsorted = sorted_dict(sorted_key, sorted_dict)\nprint(sorted_key)\n```"
+    }
+  },
+  {
+    "title": "OOD 3 \u2014 Evaporative Cooling & Entropy (Adjacent to Carnot Thermodynamics)",
+    "ood_prompt": "Why does evaporation cool a liquid surface even when no external refrigeration work is applied?",
+    "dream_matched": true,
+    "dream_top_similarity": 0.9513,
+    "dream_matched_domains": [
+      "thermodynamics_physics",
+      "graph_scheduling",
+      "algorithms_code"
+    ],
+    "dream_recommended_scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+    "dream_rl_selected_round": 2,
+    "dream_rl_selected_strategy": "r2_rl_steered",
+    "dream_rl_round1_best": 0.5898,
+    "dream_rl_round2_best": 0.6329,
+    "dream_rl_round1_advantages": [
+      -1.7223,
+      0.5313,
+      0.4502,
+      0.7408
+    ],
+    "extra_tokens_stuffed": 35,
+    "extra_tokens_dream_rl": 0,
+    "joint_scores": {
+      "1_baseline_r1": {
+        "composite_score": 0.5922,
+        "decision_prob": 0.1906,
+        "decision_sim": 0.3853,
+        "evaluation_utility": 0.8327,
+        "deduction_entailed": 0.5061,
+        "deduction_contradicted": 0.0204,
+        "metacognition_correctness": 0.5117,
+        "structural_score": 0.95
+      },
+      "2_raw_prompt_stuffing": {
+        "composite_score": 0.6392,
+        "decision_prob": 0.2819,
+        "decision_sim": 0.4869,
+        "evaluation_utility": 0.8979,
+        "deduction_entailed": 0.4982,
+        "deduction_contradicted": 0.0186,
+        "metacognition_correctness": 0.5223,
+        "structural_score": 0.95
+      },
+      "3_standard_coe": {
+        "composite_score": 0.5922,
+        "decision_prob": 0.1906,
+        "decision_sim": 0.3853,
+        "evaluation_utility": 0.8327,
+        "deduction_entailed": 0.5061,
+        "deduction_contradicted": 0.0204,
+        "metacognition_correctness": 0.5117,
+        "structural_score": 0.95
+      },
+      "4_dream_rsi_rl": {
+        "composite_score": 0.6621,
+        "decision_prob": 0.3369,
+        "decision_sim": 0.533,
+        "evaluation_utility": 0.9115,
+        "deduction_entailed": 0.4935,
+        "deduction_contradicted": 0.0164,
+        "metacognition_correctness": 0.5435,
+        "structural_score": 0.95
+      }
+    },
+    "outputs": {
+      "1_baseline_r1": "#U$# Why does evaporation cool a liquid surface even when no external refrigeration work is applied?\n#T$# The user asks about the \"What does the \"What does happen\" is about the \"How does the \"How does happen\" is about \"How happens\"? The user is asking about the 'How does happen\". The user is asking how reflects how reflects how reflections how reflections the 'How does the 'What happens?\n#A$# The 'How happens when no external refrigeration work is applied?",
+      "2_raw_prompt_stuffing": "#U$# Previous context: Explain how a Carnot heat engine converts thermal energy between a hot reservoir and a cold sink into mechanical work.\nCurrent question: Why does evaporation cool a liquid surface even when no external refrigeration work is applied?\n#T$# Okay, so I need to figure out how a Carnot heated the liquid surface even when no external refrigeration works. Let me start by recalling what a Carnot heated. The Carnotes are a liquid, a liquid, and a liquid, and a gas, and a liquid, is a liquid. The question is asking for the Carnotes that can lead to the liquid surface as the liquid.\n#A$# [2] What does evaporation cool a liquid surface even when no TV refrigeration works?",
+      "3_standard_coe": "#U$# Why does evaporation cool a liquid surface even when no external refrigeration work is applied?\n#T$# The user asks about the \"What does the \"What does happen\" is about the \"How does the \"How does happen\" is about \"How happens\"? The user is asking about the 'How does happen\". The user is asking how reflects how reflects how reflections how reflections the 'How does the 'What happens?\n#A$# The 'How happens when no external refrigeration work is applied?",
+      "4_dream_rsi_rl": "#U$# Why does evaporation cool a liquid surface even when no external refrigeration work is applied?\n#T$# Okay, so I need to figure out how to approach this problem. Let me start by recalling what external refrigeration works. The question is asking about how the external refrigeration works when no external refrigeration is applied. Hmm, let's break this down step by step.\n\nFirst, I remember that when a external refrigeration is applied, the external refrigeration's kinetic energy is the same as the external refrigerations.\n#A$# \n\n1. **Pure 1: The external refrigeration (the external refrigeration)**: The external refrigeration's kinetical energy is the same as its external refrigeration. This is the same for external refrigeration.\n\n2. **Pure 2: The external acceleration (the external acceleration)**: The critical acceleration (a significant acceleration) is the same for external acceleration, which is the same. The external acceleration \\( P \\) is the same. The central acceleration \\( \\rho \\) is the external acceleration, which increases the external acceleration."
+    }
+  },
+  {
+    "title": "OOD 4 \u2014 Non-Critical Task Delay & Float Slack (Adjacent to DAG Topological Sort)",
+    "ood_prompt": "If a non-critical task in a dependency DAG is delayed by less than its total float slack, how does that affect the final project completion date?",
+    "dream_matched": true,
+    "dream_top_similarity": 0.9722,
+    "dream_matched_domains": [
+      "concurrency_systems",
+      "algorithms_code",
+      "thermodynamics_physics"
+    ],
+    "dream_recommended_scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+    "dream_rl_selected_round": 1,
+    "dream_rl_selected_strategy": "r1_dream_steered",
+    "dream_rl_round1_best": 0.5606,
+    "dream_rl_round2_best": 0.558,
+    "dream_rl_round1_advantages": [
+      0.6149,
+      -1.7308,
+      0.5999,
+      0.516
+    ],
+    "extra_tokens_stuffed": 38,
+    "extra_tokens_dream_rl": 0,
+    "joint_scores": {
+      "1_baseline_r1": {
+        "composite_score": 0.5755,
+        "decision_prob": 0.195,
+        "decision_sim": 0.3663,
+        "evaluation_utility": 0.8145,
+        "deduction_entailed": 0.4682,
+        "deduction_contradicted": 0.0285,
+        "metacognition_correctness": 0.456,
+        "structural_score": 0.95
+      },
+      "2_raw_prompt_stuffing": {
+        "composite_score": 0.6585,
+        "decision_prob": 0.3565,
+        "decision_sim": 0.5227,
+        "evaluation_utility": 0.9179,
+        "deduction_entailed": 0.459,
+        "deduction_contradicted": 0.0194,
+        "metacognition_correctness": 0.4911,
+        "structural_score": 0.95
+      },
+      "3_standard_coe": {
+        "composite_score": 0.6204,
+        "decision_prob": 0.2785,
+        "decision_sim": 0.4587,
+        "evaluation_utility": 0.8891,
+        "deduction_entailed": 0.4671,
+        "deduction_contradicted": 0.0195,
+        "metacognition_correctness": 0.4904,
+        "structural_score": 0.9125
+      },
+      "4_dream_rsi_rl": {
+        "composite_score": 0.576,
+        "decision_prob": 0.17,
+        "decision_sim": 0.3309,
+        "evaluation_utility": 0.843,
+        "deduction_entailed": 0.4678,
+        "deduction_contradicted": 0.0222,
+        "metacognition_correctness": 0.484,
+        "structural_score": 0.95
+      }
+    },
+    "outputs": {
+      "1_baseline_r1": "#U$# If a non-critical task in a dependency DAG is delayed by less than its total float slack, how does that affect the final project completion date?\n#T$# Okay, let's see. The problem is about a non-critical task in a dependency DAG. The user is asking about the minimum project date date, which is the minimum project date date. Hmm, I remember that the standard deviation of a non-critical problem is to use the formula for the average of the two points. So, the formula for the average is (P_n)/P_n = (P_n / P_n) / P_n.\n#A$# \n\nGiven the problem, the minimum projecting project date date is \\( P_n = \\frac{P_n}{P_n} \\), where \\( P_{n} = \\frac{P_{n}}{P_n \\left(\\frac{P_n / P}{P}\\right) \\), where P_n is the average of the two points.",
+      "2_raw_prompt_stuffing": "#U$# Previous context: In a directed acyclic project dependency graph, how does topological sorting determine the earliest start time of each task?\nCurrent question: If a non-critical task in a dependency DAG is delayed by less than its total float slack, how does that affect the final project completion date?\n#T$# Okay, let's see. The user wants a **non-critical task in a dependency graph, how does VAX is the maximum-critical task in the given conditions. The user wants two scenarios: first, then the final project will be \"non-critical problem\". Hmm, okay.\n\nFirst, I need to recall what a non-critical problem is.\n#A$# In a directed acyclic project depends on the potential of the potential of the potential. The potential of a non-critical solution is given by:\n\n\\[\n\\frac{\\partial \\rho}{\\partial x} = \\frac{\\partial \\rho x}{\\partial x}\n\\]\n\nThe potential of a non-material is given by:\n\nCurrent question = \\frac{\\partial \\frac{\\partial}{\\partial y}}{\\partial y}\n\\]\n\nwhere:\n\n- **Initialization**: A non-critic project is a non-critical task in a dependency graph, where the potential of a system is a non-material.",
+      "3_standard_coe": "#U$# If a non-critical task in a dependency DAG is delayed by less than its total float slack, how does that affect the final project completion date?\n#T$# Okay, let's see. The problem is about a non-critical task in a dependency DAG. The user wants to know if a non-critical problem involves a non-material approach, but I need to figure out the correct answer. Hmm, let's break this down step by step.\n\nFirst, the problem is about a non-material approach.\n#A$# -- Coefficient of a non-economic problem involves a non-economic approach.  \n- Coefficient of an in-depth, which is a non-ological task.  \n- Coefficience of an in-depth is a non-ological problem involving a non-critical task.  \n**Explanation of a non-critical problem involving a single-level approach**, where a non-material approach is a nonlinear problem involving non-economics.  \nThe problem involves a non- efficacy problem involving non-critics, which is a nonlinear problem.  \nThe non-economic approach is a non-economic approach because it involves a non-economical problem involved.",
+      "4_dream_rsi_rl": "#U$# If a non-critical task in a dependency DAG is delayed by less than its total float slack, how does that affect the final project completion date?\n#T$# Okay, let's see. The problem is about a non-critical task in a dependency DAG. The user wants to know if a non-critical problem is delayed by less than its total float slack, and the problem is about a non-material task. Hmm, I need to figure out the correct formula for the final project date.\n\n\n#A$# Score Candidate (1)  \n\n**Problem (Python):**  \nThe user is asking for the final project date, which is the minimum, and the final projecting date.  \n\n**Problems:**  \n- **A**: \"The non-critical task in a dependency DAG is delayed by less than the total float slack.\"  \n- **B**: \"The non-material task in a dependencyDAG is delayed by more than its total float slack.\"**  \n- The user wants to know if a non-critical task is delayed, and the problem is about a non-critic task."
+    }
+  }
+]

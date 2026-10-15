@@ -215,11 +215,11 @@ class MultiPassController(nn.Module):
         self,
         user_prompt: str,
         *,
-        max_new_tokens: int = 64,
+        max_new_tokens: int = 320,
         temperature: float = 0.0,
         recurrence_steps: int | None = None,
     ) -> str:
-        """Synthesize a `#U$# -> #T$# -> #A$#` micro-trace, guaranteeing both `#T$#` and `#A$#` segments."""
+        """Synthesize a `#U$# -> #T$# -> #A$#` trace, guaranteeing complete `#T$#` and `#A$#` segments."""
         was_training = self.coe.training
         self.coe.eval()
         try:
@@ -231,15 +231,19 @@ class MultiPassController(nn.Module):
             max_seq = self.coe.backbone.config.max_seq_len
             a_tag_tokens = self.tokenizer.encode("\n#A$# ", add_bos=False, add_eos=False)
             has_emitted_a = False
-            thought_budget = max(12, (max_new_tokens * 3) // 5)
+            thought_budget = max(12, max_new_tokens // 2)
             use_amp = device.type == "cuda"
 
             step = 0
             while step < max_new_tokens and len(tokens) < max_seq:
                 if not has_emitted_a and step >= thought_budget:
-                    at_word_boundary = tokens[-1] in (32, 10, ord("."), ord(","), ord(";"), ord(":"))
-                    force_transition = step >= min(max(thought_budget, max_new_tokens - 12), thought_budget + 12)
-                    if at_word_boundary or force_transition:
+                    if max_new_tokens >= 128:
+                        at_boundary = tokens[-1] in (ord("."), ord("!"), ord("?"), 10)
+                        force_transition = step >= min(max(thought_budget, max_new_tokens - 64), thought_budget + 64)
+                    else:
+                        at_boundary = tokens[-1] in (32, 10, ord("."), ord(","), ord(";"), ord(":"))
+                        force_transition = step >= min(max(thought_budget, max_new_tokens - 12), thought_budget + 12)
+                    if at_boundary or force_transition:
                         if len(tokens) + len(a_tag_tokens) < max_seq:
                             tokens.extend(a_tag_tokens)
                             has_emitted_a = True

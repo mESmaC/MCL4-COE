@@ -1106,7 +1106,7 @@ class MCL4COETrainer:
                 if step % self.config.sample_every == 0 or step == 1 or step == self.config.total_steps:
                     sample_trace = self.controller.generate_uta(
                         self.config.sample_prompt,
-                        max_new_tokens=48,
+                        max_new_tokens=256,
                     )
                     sample_entry = {
                         "step": step,
@@ -1257,7 +1257,7 @@ def evaluate_checkpoint_prompt(
     meta_or_pt_path: str | Path,
     prompt: str,
     *,
-    max_new_tokens: int = 64,
+    max_new_tokens: int = 320,
 ) -> dict[str, Any]:
     """Load a saved checkpoint and generate a `#U$# -> #T$# -> #A$#` trace for interactive comparison."""
     p = Path(meta_or_pt_path).expanduser().resolve()

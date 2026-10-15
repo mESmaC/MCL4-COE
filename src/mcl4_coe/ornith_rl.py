@@ -661,6 +661,13 @@ _SAFE_AST_NODES = (
     ast.Assert,
     ast.Expr,
     ast.Assign,
+    ast.AugAssign,
+    ast.If,
+    ast.For,
+    ast.While,
+    ast.Pass,
+    ast.Break,
+    ast.Continue,
     ast.BinOp,
     ast.UnaryOp,
     ast.BoolOp,
@@ -670,13 +677,17 @@ _SAFE_AST_NODES = (
     ast.Name,
     ast.Constant,
     ast.Subscript,
+    ast.Slice,
     ast.Tuple,
     ast.List,
+    ast.Dict,
+    ast.Set,
     ast.Load,
     ast.Store,
     ast.Add,
     ast.Sub,
     ast.Mult,
+    ast.Div,
     ast.FloorDiv,
     ast.Mod,
     ast.Pow,
@@ -685,6 +696,7 @@ _SAFE_AST_NODES = (
     ast.BitOr,
     ast.USub,
     ast.UAdd,
+    ast.Not,
     ast.And,
     ast.Or,
     ast.Eq,
@@ -693,14 +705,19 @@ _SAFE_AST_NODES = (
     ast.LtE,
     ast.Gt,
     ast.GtE,
+    ast.In,
+    ast.NotIn,
 )
 _SAFE_BUILTINS: dict[str, Any] = {
     "abs": abs,
+    "bool": bool,
+    "float": float,
     "int": int,
     "len": len,
     "max": max,
     "min": min,
     "range": range,
+    "round": round,
     "sum": sum,
 }
 _HACK_STUB_MARKERS: tuple[str, ...] = (
@@ -726,8 +743,8 @@ def verify_python_rollout(
     Enforces:
     1. Mandatory non-empty `#T$#` scratchpad before `#A$#` (returns `0.0` if missing).
     2. Rejection of boundary/constant hack stubs (`0.0`).
-    3. AST-validated sandboxed execution of `def solve(...)` + `assert ...` or relational
-       invariant assertions (`expected == ...`, `delta == ...`, `dp[k] == ...`, etc.).
+    3. Multi-line AST-validated compiler, static linter (`FunctionDef` + `Return`), and sandboxed
+       execution of `def solve(...)` + `assert ...` or relational invariant assertions.
     """
     import re
 
@@ -745,11 +762,21 @@ def verify_python_rollout(
 
     harness_clean = harness_h.strip()
 
-    # Case 1: Executable Python function + `assert solve(...) == ...`
+    # Case 1: Executable single-line or multi-line indented Python function + `assert solve(...) == ...`
     if "def " in a_body and harness_clean.startswith("assert "):
-        code_line = a_body.split("#")[0].strip()
-        program_src = f"{code_line}\n{harness_clean}\n"
+        clean_lines = [
+            ln.split("#")[0].rstrip()
+            for ln in a_body.splitlines()
+            if ln.split("#")[0].strip() and not ln.strip().startswith("```")
+        ]
+        code_src = "\n".join(clean_lines)
+        program_src = f"{code_src}\n{harness_clean}\n"
         try:
+            code_tree = ast.parse(code_src, mode="exec")
+            has_func = any(isinstance(n, ast.FunctionDef) for n in ast.walk(code_tree))
+            has_return = any(isinstance(n, ast.Return) and n.value is not None for n in ast.walk(code_tree))
+            if not (has_func and has_return):
+                return 0.0
             tree = ast.parse(program_src, mode="exec")
             for node in ast.walk(tree):
                 if not isinstance(node, _SAFE_AST_NODES):
@@ -761,7 +788,8 @@ def verify_python_rollout(
             exec(compile(tree, "<ornith_verifier>", "exec"), env, env)
             return 1.0
         except AssertionError:
-            return 0.15 if any(op in t_body for op in ("*", "+", "-")) else 0.0
+            # Compiles and passes AST lint checks (`FunctionDef` + `Return`), but failed unit test assertion
+            return 0.25 if any(op in t_body for op in ("*", "+", "-", "if", "for", "return")) else 0.15
         except Exception:
             return 0.0
 
@@ -863,8 +891,8 @@ class OrnithSelfImprover:
         self._last_dream_out: Any | None = None
 
     def _generate_task(self, idx: int, *, compact: bool = False) -> OrnithTask:
-        """Synthesize a verifiable coding, symbolic math, or multi-hop deduction task (#Q$#)."""
-        kind = idx % 8
+        """Synthesize a verifiable coding, symbolic math, physics, or project-management task (#Q$#)."""
+        kind = idx % 12
         a = 3 + ((idx * 7 + self._rng_seed) % 19)
         b = 2 + ((idx * 11 + self._rng_seed) % 13)
         c = 1 + ((idx * 5) % 9)
@@ -915,14 +943,14 @@ class OrnithSelfImprover:
             )
             harness_h = f"assert solve({a}, {b}, {c}) == {ans_val}"
             gold_t = f"Multiply {a}*{b}={a*b}, then add {c} to get {ans_val}."
-            gold_a = f"def solve(x, y, z): return x * y + z  # {ans_val}"
+            gold_a = f"def solve(x, y, z):\n    res = x * y + z\n    return res"
             base_cands = (
                 f"#T$# {gold_t}\n#A$# {gold_a}",
-                f"#T$# Add {a}+{b*c}={a+b*c}.\n#A$# def solve(x, y, z): return x + y * z  # {a+b*c}",
-                f"#T$# Subtract {a*b}-{c}={a*b-c}.\n#A$# def solve(x, y, z): return x * y - z  # {a*b-c}",
-                f"#T$# Constant stub.\n#A$# def solve(x, y, z): return 0",
+                f"#T$# Add {a}+{b*c}={a+b*c}.\n#A$# def solve(x, y, z):\n    return x + y * z",
+                f"#T$# Subtract {a*b}-{c}={a*b-c}.\n#A$# def solve(x, y, z):\n    return x * y - z",
+                f"#T$# Constant stub.\n#A$# def solve(x, y, z):\n    return 0",
             )
-            base_scores = (1.0, 0.15, 0.10, 0.0)
+            base_scores = (1.0, 0.25, 0.20, 0.0)
             domain = "algorithmic_code"
         elif kind == 1:
             active_edges = a * c
@@ -1035,7 +1063,7 @@ class OrnithSelfImprover:
             )
             base_scores = (1.0, 0.10, 0.20, 0.0)
             domain = "relational_algebra"
-        else:
+        elif kind == 7:
             inversions = b * c
             task_id = f"dag_locks_{a}_{b}_{c}"
             prompt_q = (
@@ -1053,6 +1081,109 @@ class OrnithSelfImprover:
             )
             base_scores = (1.0, 0.10, 0.15, 0.0)
             domain = "concurrency_verification"
+        elif kind == 8:
+            # Multi-line indented Python loop & conditional verification (Coding Pillar)
+            n_lim = c + 3
+            expected_sum = sum(i * a for i in range(1, n_lim + 1) if i % 2 == 1)
+            task_id = f"code_odd_sum_{a}_{n_lim}"
+            prompt_q = (
+                f"#U$# Write a Python function `solve(n, scale)` that sums `i * scale` for all odd integers `1 <= i <= n`.\n"
+                f"#Q$# [code] Implement `solve({n_lim}, {a})` with 4-space indentation."
+            )
+            harness_h = f"assert solve({n_lim}, {a}) == {expected_sum}"
+            gold_t = (
+                f"Iterate i from 1 to {n_lim}; check `if i % 2 == 1:` and accumulate `total += i * scale` "
+                f"to obtain {expected_sum}."
+            )
+            gold_a = (
+                "def solve(n, scale):\n"
+                "    total = 0\n"
+                "    for i in range(1, n + 1):\n"
+                "        if i % 2 == 1:\n"
+                "            total += i * scale\n"
+                "    return total"
+            )
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                f"#T$# Sum all integers without odd filter.\n#A$# def solve(n, scale):\n    return sum(range(1, n + 1)) * scale",
+                f"#T$# Off-by-one range bound.\n#A$# def solve(n, scale):\n    return (n - 1) * scale",
+                f"#T$# Constant stub.\n#A$# def solve(n, scale):\n    return 0",
+            )
+            base_scores = (1.0, 0.25, 0.15, 0.0)
+            domain = "algorithmic_code"
+        elif kind == 9:
+            # Step-by-step Symbolic Algebra Solver (Math Pillar)
+            rhs = a * b + c
+            task_id = f"math_linear_eq_{a}_{b}_{c}"
+            prompt_q = (
+                f"#U$# Solve for `x` in the linear equation `{a}*x + {c} = {rhs}` and show each algebraic step.\n"
+                f"#Q$# [math] Derive the exact integer solution `x`."
+            )
+            harness_h = f"expected == {b}"
+            gold_t = (
+                f"Step 1: Subtract {c} from both sides to get {a}*x = {rhs} - {c} = {a*b}. "
+                f"Step 2: Divide both sides by {a} to isolate x = {a*b} // {a} = {b}."
+            )
+            gold_a = f"{b}"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                f"#T$# Add {c} instead of subtracting: ({rhs} + {c}) // {a}.\n#A$# {(rhs + c) // max(1, a)}",
+                f"#T$# Subtract {a} from {rhs}: {rhs - a}.\n#A$# {rhs - a}",
+                f"#T$# Default fallback.\n#A$# 0",
+            )
+            base_scores = (1.0, 0.15, 0.10, 0.0)
+            domain = "symbolic_math"
+        elif kind == 10:
+            # Kinematics & Mechanical Energy (Physics Pillar)
+            v0 = a
+            accel = 2 * b
+            t_sec = c
+            disp = v0 * t_sec + (accel * t_sec * t_sec) // 2
+            task_id = f"physics_kinematics_{v0}_{accel}_{t_sec}"
+            prompt_q = (
+                f"#U$# A particle starts with initial velocity `v0 = {v0} m/s` under constant acceleration "
+                f"`a = {accel} m/s^2` for `t = {t_sec} s`.\n"
+                f"#Q$# [physics] Compute total displacement `d = v0*t + 0.5*a*t^2`."
+            )
+            harness_h = f"expected == {disp}"
+            gold_t = (
+                f"Apply kinematic law d = v0*t + 0.5*a*t^2: drift term v0*t = {v0}*{t_sec} = {v0*t_sec} m; "
+                f"acceleration term 0.5*{accel}*{t_sec}^2 = {(accel*t_sec*t_sec)//2} m; total d = {disp} m."
+            )
+            gold_a = f"{disp}"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                f"#T$# Omit factor 0.5 on acceleration term: {v0*t_sec + accel*t_sec*t_sec}.\n#A$# {v0*t_sec + accel*t_sec*t_sec}",
+                f"#T$# Compute final velocity v = v0 + a*t = {v0 + accel*t_sec}.\n#A$# {v0 + accel*t_sec}",
+                f"#T$# Zero delta.\n#A$# 0",
+            )
+            base_scores = (1.0, 0.20, 0.15, 0.0)
+            domain = "physics_kinematics"
+        else:
+            # Critical Path Method (CPM) & Float Slack (Project Management Pillar)
+            path_alpha = a + b + c
+            path_beta = a + c
+            slack_beta = path_alpha - path_beta
+            task_id = f"pm_critical_path_{a}_{b}_{c}"
+            prompt_q = (
+                f"#U$# A software release DAG has Milestone M1 ({a} days) feeding two parallel tracks: "
+                f"Track Alpha ({b} days) and Track Beta (0 days) before final integration M2 ({c} days).\n"
+                f"#Q$# [project_management] Compute the Critical Path duration and Track Beta float slack."
+            )
+            harness_h = f"acquisitions == {path_alpha} and cycles == {slack_beta}"
+            gold_t = (
+                f"Critical Path is the longest chain M1 -> Alpha -> M2 = {a} + {b} + {c} = {path_alpha} days. "
+                f"Track Beta completes in {a} + {c} = {path_beta} days, leaving float slack = {slack_beta} days."
+            )
+            gold_a = f"{path_alpha} days critical path, {slack_beta} days slack"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                f"#T$# Sum all nodes serially: {a+b+c+b} days critical path, 0 days slack.\n#A$# {a+b+c+b} days critical path, 0 days slack",
+                f"#T$# Shortest path duration: {path_beta} days critical path, {b} days slack.\n#A$# {path_beta} days critical path, {b} days slack",
+                f"#T$# Deadlock immediately.\n#A$# 0 days critical path, 0 days slack",
+            )
+            base_scores = (1.0, 0.15, 0.10, 0.0)
+            domain = "project_management"
 
         p_cands, p_scores, g_idx = _permute(base_cands, base_scores)
         cached_s = self.scaffold_cache.get(task_id, default=_SCAFFOLD_CANDIDATES[idx % len(_SCAFFOLD_CANDIDATES)])

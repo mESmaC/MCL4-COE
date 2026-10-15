@@ -1918,7 +1918,7 @@ class CodebaseWarmupEngine:
                         ded_loss = F.cross_entropy(ded_logits, ded_targets)
 
                         eval_logits = (
-                            valid_scores.detach().float() * coe.assoc_alpha.float()
+                            valid_scores.float() * coe.assoc_alpha.float()
                             + coe.assoc_beta.float()
                         )
                         target_grid = F.one_hot(t_idx, num_classes=num_opts).float()

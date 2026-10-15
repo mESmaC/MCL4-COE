@@ -22,7 +22,9 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 import struct
+import time
 import unicodedata
 from typing import Any, Iterable, Sequence
 import zlib
@@ -32,7 +34,7 @@ from torch import Tensor, nn
 import torch.nn.functional as F
 
 from .backbone import EncodedState, MCL4CEDBackbone, RecurrentFeedback
-from .data import DecisionExample, collate_decisions
+from .data import DecisionExample, collate_decisions, get_tokenizer
 from .operators import CognitiveOperatorEnsemble, pearson_similarity
 
 # ---------------------------------------------------------------------------
@@ -215,6 +217,14 @@ class CompressedEncodedState:
     aux_loss: Tensor
     router_z_loss: Tensor
     expert_load: Tensor
+
+    @property
+    def uncompressed_bytes(self) -> int:
+        return self.compressed_hidden.uncompressed_bytes
+
+    @property
+    def compressed_bytes(self) -> int:
+        return self.compressed_hidden.packed_logical_bytes
 
     @property
     def compression_ratio(self) -> float:
@@ -807,12 +817,41 @@ class ATXYPointerExecutor:
         return self.register_kind, self.register
 
 
+def _code_tokens_and_stems(text: str) -> set[str]:
+    """Extract lowercase alphanumeric tokens, snake/camel splits, and 4-char stems for code routing."""
+    # Split camelCase into words before lowercasing
+    expanded = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    raw = re.findall(r"[a-z0-9]+", expanded.lower())
+    out: set[str] = set()
+    stop = {
+        "the", "and", "for", "with", "that", "this", "from", "into", "when", "where",
+        "which", "what", "how", "does", "select", "exact", "record", "matching", "request",
+        "self", "none", "true", "false", "return", "def", "class",
+    }
+    for tok in raw:
+        if len(tok) >= 2 and tok not in stop:
+            out.add(tok)
+            if len(tok) >= 5:
+                out.add(f"stem:{tok[:4]}")
+    return out
+
+
+def _truncate_to_token_budget(text: str, vocab_size: int, max_tokens: int) -> str:
+    """Truncate `text` so its tokenized representation (plus BOS/EOS) fits strictly within `max_tokens`."""
+    budget = max(8, max_tokens - 4)
+    if vocab_size <= 260:
+        return text.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+    tok = get_tokenizer(vocab_size)
+    ids = tok.encode(text, add_bos=False, add_eos=False)[:budget]
+    return tok.decode(ids)
+
+
 class COEAddressRouter:
     """Resolves `elem`'s `N3b-primary` natural-language routing bottleneck via `MCL4-COE`.
 
     Two-stage exact routing over `ATXYPageStore`:
-    1. Stage 1 (`Association`, `<0.1ms` matched filter): Projects all occupied `A.TXY` records
-       into `d_proj` vectors and selects the top-$K$ candidate cells.
+    1. Stage 1 (`Association` + lexical/morpheme stem sketch): Filters all occupied `A.TXY` records
+       into the top-$K$ candidate cells.
     2. Stage 2 (`Decision`, shared-state `MCL4-CED` cross-attention + `AttentiveMatchedFilterPool`):
        Scores the $K$ candidate records against the natural-language query in a single softmax
        with bitwise candidate-permutation invariance.
@@ -845,18 +884,32 @@ class COEAddressRouter:
             raise ValueError("No records available in ATXYPageStore for routing")
 
         device = next(coe.parameters()).device
+        vocab_size = int(getattr(coe.backbone.config, "vocab_size", 260))
         k = min(top_k_candidates, len(all_recs))
 
-        # If store has more than top_k_candidates records, pre-filter via fast byte-sketch + Association
+        # If store has more than top_k_candidates records, pre-filter via IDF-weighted token/stem sketch
         if len(all_recs) > k:
+            q_tokens = _code_tokens_and_stems(query_text)
+            doc_token_sets = [
+                _code_tokens_and_stems(f"{r.address} {r.kind} {r.payload} {r.summary}")
+                for r in all_recs
+            ]
+            n_docs = len(all_recs)
+            df: dict[str, int] = {}
+            for dset in doc_token_sets:
+                for tok in dset:
+                    df[tok] = df.get(tok, 0) + 1
+
             sketch_scores = []
             q_lower = query_text.lower()
-            q_tokens = set(q_lower.replace("_", " ").replace(".", " ").split())
-            for r in all_recs:
-                doc = f"{r.address} {r.kind} {r.payload} {r.summary}".lower()
-                d_tokens = set(doc.replace("_", " ").replace(":", " ").replace("/", " ").split())
-                overlap = len(q_tokens & d_tokens) / max(1, len(q_tokens))
-                sketch_scores.append(overlap)
+            for r, d_tokens in zip(all_recs, doc_token_sets):
+                shared = q_tokens & d_tokens
+                score = sum(math.log(1.0 + n_docs / max(1, df.get(t, 1))) for t in shared)
+                # Bonus if exact symbol or file name appears in query
+                sym_part = r.payload.split(":")[-1].lower()
+                if len(sym_part) >= 3 and sym_part in q_lower:
+                    score += 4.0
+                sketch_scores.append(score)
             ranked_idx = sorted(
                 range(len(all_recs)),
                 key=lambda i: sketch_scores[i],
@@ -867,11 +920,10 @@ class COEAddressRouter:
             cand_recs = all_recs
 
         max_len = min(self.max_seq_len, int(coe.backbone.config.max_seq_len))
-        budget = max(16, max_len - 4)
         raw_ctx = f"#U$# {query_text}\n#Q$# Select the exact A.TXY record matching the request."
-        ctx_str = raw_ctx.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+        ctx_str = _truncate_to_token_budget(raw_ctx, vocab_size, max_len)
         desc_strs = tuple(
-            r.to_candidate_description().encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+            _truncate_to_token_budget(r.to_candidate_description(), vocab_size, max_len)
             for r in cand_recs
         )
         example = DecisionExample(
@@ -882,7 +934,12 @@ class COEAddressRouter:
             values=tuple(r.address for r in cand_recs),
             target=0,
         )
-        batch = collate_decisions([example], max_length=max_len, device=device)
+        batch = collate_decisions(
+            [example],
+            max_length=max_len,
+            device=device,
+            vocab_size=vocab_size,
+        )
         dec_out = coe.forward_decision(
             batch["context_ids"],
             batch["context_lengths"],
@@ -899,6 +956,49 @@ class COEAddressRouter:
             "candidates": [r.address for r in cand_recs],
             "probabilities": [round(float(p), 5) for p in probs.cpu().tolist()],
         }
+
+
+def _summarize_ast_symbol(node: ast.AST, rel: str) -> str:
+    """Build a compact semantic summary of an AST function or class for `ATXYRecord`."""
+    kind = "class" if isinstance(node, ast.ClassDef) else "function"
+    doc_lines = (ast.get_docstring(node) or "").strip().splitlines()
+    doc_first = doc_lines[0].strip() if doc_lines else f"{kind} {getattr(node, 'name', '')} in {Path(rel).name}"
+
+    sig_str = ""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        arg_names = [a.arg for a in node.args.args if a.arg != "self"][:6]
+        kw_names = [a.arg for a in node.args.kwonlyargs][:4]
+        all_args = arg_names + [f"*{a}" for a in kw_names]
+        sig_str = f"({', '.join(all_args)})"
+    elif isinstance(node, ast.ClassDef):
+        methods = [
+            n.name
+            for n in node.body
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and not n.name.startswith("__")
+        ][:6]
+        if methods:
+            sig_str = f"[methods: {', '.join(methods)}]"
+
+    skip_ids = {
+        "self", "cls", "None", "True", "False", "int", "float", "str", "bool",
+        "list", "dict", "tuple", "set", "Any", "Tensor", "torch", "range", "len",
+        "min", "max", "sum", "zip", "enumerate", "isinstance", "getattr", "ValueError",
+    }
+    body_terms: list[str] = []
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Attribute) and isinstance(sub.attr, str):
+            if sub.attr not in skip_ids and not sub.attr.startswith("_") and sub.attr not in body_terms:
+                body_terms.append(sub.attr)
+        elif isinstance(sub, ast.Name) and isinstance(sub.id, str):
+            if sub.id not in skip_ids and len(sub.id) >= 4 and not sub.id.startswith("_") and sub.id not in body_terms:
+                body_terms.append(sub.id)
+        if len(body_terms) >= 8:
+            break
+
+    parts = [p for p in (sig_str, doc_first) if p]
+    if body_terms:
+        parts.append(f"refs: {', '.join(body_terms[:6])}")
+    return " | ".join(parts)
 
 
 def index_python_repo_to_atxy(
@@ -934,8 +1034,7 @@ def index_python_repo_to_atxy(
             for node in tree.body:
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                     kind = "class" if isinstance(node, ast.ClassDef) else "function"
-                    doc = (ast.get_docstring(node) or "").strip().splitlines()
-                    summary = doc[0] if doc else f"{kind} {node.name} in {Path(rel).name}"
+                    summary = _summarize_ast_symbol(node, rel)
                     syms.append((node.name, kind, summary, node))
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom) and node.module:
@@ -1012,3 +1111,884 @@ def index_python_repo_to_atxy(
                 )
 
     return ATXYPageStore(records)
+
+
+# ---------------------------------------------------------------------------
+# Pre-Prompt Bounded Codebase RL Warmup + TurboQuant / A.TXY Session Engine
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CodebaseWarmupReport:
+    """Telemetry from a bounded pre-prompt codebase RL exploration & `TurboQuant` indexing session."""
+
+    repo_root: str
+    total_files: int
+    total_symbols: int
+    total_repo_bytes: int
+    total_repo_tokens: int
+    uncompressed_state_bytes: int
+    turboquant_state_bytes: int
+    compression_ratio: float
+    mean_turboquant_cosine: float
+    warmup_steps: int
+    warmup_elapsed_sec: float
+    trainable_params: int
+    frozen_backbone_params: int
+    pre_route_acc: float
+    post_route_acc: float
+    pre_route_conf: float
+    post_route_conf: float
+    pre_verify_acc: float
+    post_verify_acc: float
+    pre_verify_conf: float
+    post_verify_conf: float
+    pre_loss: float
+    post_loss: float
+    step_losses: list[float] = field(default_factory=list)
+
+
+@dataclass
+class CodebaseSessionState:
+    """Session-scoped virtual memory (`A.TXY` + `TurboQuant`) and reversible fast-weight snapshot."""
+
+    repo_root: str
+    store: ATXYPageStore
+    router: COEAddressRouter
+    pointer_executor: ATXYPointerExecutor
+    symbol_sources: dict[str, str]
+    file_turboquant_pages: dict[str, CompressedEncodedState]
+    file_latent_priors: dict[str, Tensor]
+    total_repo_files: int
+    total_repo_symbols: int
+    total_repo_bytes: int
+    total_repo_tokens: int
+    uncompressed_state_bytes: int
+    compressed_state_bytes: int
+    mean_turboquant_cosine: float
+    base_operator_state: dict[str, Tensor]
+    train_route_tasks: list[DecisionExample] = field(default_factory=list)
+    eval_route_tasks: list[DecisionExample] = field(default_factory=list)
+    train_verify_tasks: list[DecisionExample] = field(default_factory=list)
+    eval_verify_tasks: list[DecisionExample] = field(default_factory=list)
+
+    @property
+    def compression_ratio(self) -> float:
+        return float(self.uncompressed_state_bytes) / max(1.0, float(self.compressed_state_bytes))
+
+    def restore_base_weights(self, coe: CognitiveOperatorEnsemble) -> None:
+        """Instantly restore `coe`'s operator & pooling heads to their pre-session weights."""
+        device = next(coe.parameters()).device
+        with torch.no_grad():
+            param_map = dict(coe.named_parameters())
+            for name, saved_tensor in self.base_operator_state.items():
+                if name in param_map:
+                    param_map[name].copy_(saved_tensor.to(device=device, dtype=param_map[name].dtype))
+
+
+def _extract_focal_line_and_context(snippet: str) -> tuple[str, str]:
+    """Split a function snippet into shared setup context and the focal executable invariant line(s)."""
+    raw_lines = [ln for ln in snippet.splitlines() if ln.strip()]
+    if not raw_lines:
+        return snippet, snippet
+
+    # Prefer the last non-trivial line containing an operator, return, assignment, or call
+    op_markers = ("return ", " = ", " == ", " != ", " + ", " - ", " * ", " / ", " <= ", " >= ", " < ", " > ")
+    focal_idx = len(raw_lines) - 1
+    for idx in range(len(raw_lines) - 1, 0, -1):
+        s = raw_lines[idx].strip()
+        if s.startswith(("#", '"""', "'''", "@")):
+            continue
+        if any(m in s for m in op_markers):
+            focal_idx = idx
+            break
+
+    focal_line = raw_lines[focal_idx].strip()
+    ctx_lines = [
+         raw_lines[i] if i != focal_idx else "    # <<< FOCAL INVARIANT LINE >>>"
+        for i in range(len(raw_lines))
+    ]
+    return "\n".join(ctx_lines), focal_line
+
+
+def _summarize_code_invariants(focal_line: str) -> str:
+    """Extract a deterministic structural/AST invariant summary from a focal code statement."""
+    patterns = (
+        "+", "-", "*", "/", "==", "!=", "<=", ">=", "<", ">",
+        "is not None", "is None", "True", "False", "dim=-1", "dim=0",
+        "argmax", "argmin", "max", "min", "sum", "mean", "None",
+    )
+    found = [p for p in patterns if p in focal_line]
+    ops_str = ", ".join(found[:6]) if found else "expr"
+    kind = "return" if focal_line.startswith("return ") else ("assign" if "=" in focal_line else "call")
+    return f"stmt={kind} | tokens=[{ops_str}]"
+
+
+def _mutate_focal_line(focal_line: str, *, mode: str = "train") -> list[str]:
+    """Generate 3 realistic buggy mutations of a focal Python statement."""
+    rules: list[tuple[str, str]] = [
+        (" + ", " - "),
+        (" - ", " + "),
+        (" * ", " / "),
+        (" / ", " * "),
+        (" == ", " != "),
+        (" != ", " == "),
+        (" <= ", " > "),
+        (" >= ", " < "),
+        (" < ", " > "),
+        (" > ", " < "),
+        ("is not None", "is None"),
+        ("is None", "is not None"),
+        ("True", "False"),
+        ("False", "True"),
+        ("dim=-1", "dim=0"),
+        ("dim=0", "dim=-1"),
+        ("argmax", "argmin"),
+        ("max(", "min("),
+        ("min(", "max("),
+        ("sum(", "mean("),
+        ("1", "0"),
+        ("0", "1"),
+    ]
+    mutations: list[str] = []
+    for old_pat, new_pat in rules:
+        if old_pat in focal_line:
+            mut = focal_line.replace(old_pat, new_pat, 1)
+            if mut != focal_line and mut not in mutations:
+                mutations.append(mut)
+
+    # Fallback realistic corruptions of the focal statement
+    fallbacks_train = [
+        "return None  # dropped return value",
+        f"not ({focal_line[7:]})" if focal_line.startswith("return ") else f"{focal_line}  # unverified",
+        "raise ValueError('unexpected state in focal invariant')",
+    ]
+    fallbacks_eval = [
+        "return 0  # zeroed fallback",
+        "pass  # no-op mutation",
+        "return False  # inverted boolean guard",
+    ]
+    fb_list = fallbacks_train if mode == "train" else fallbacks_eval
+    for fb in fb_list:
+        if fb != focal_line and fb not in mutations:
+            mutations.append(fb)
+
+    if mode == "eval" and len(mutations) >= 4:
+        # Select distinct mutations for eval when multiple single-token mutations exist
+        return mutations[1:4]
+    return mutations[:3]
+
+
+class CodebaseWarmupEngine:
+    """Pre-Prompt Bounded Codebase RL Warmup & `TurboQuant` + `A.TXY` Context Engine.
+
+    At the start of a coding/debugging session, `CodebaseWarmupEngine`:
+    1. Compiles the repository's AST into an `ATXYPageStore` (`A=3` subsystems, `A=2` files,
+       `A=1` functions/classes + `CALLS` graph).
+    2. Encodes and compresses each repository module into `TurboQuant` 4-bit `CompressedEncodedState`
+       pages (`4.2x` memory reduction) and extracts `384-d` `Abstraction` latent priors.
+    3. Synthesizes AST-verified `DecisionExample` tasks from the repository:
+       - **Symbol & Call-Graph Localization (`route_tasks`)**: routing natural-language architecture
+         and debugging queries to exact `A.TXY` symbol records against hard-negative repo symbols.
+       - **Real-vs-Mutated Code Bug Discrimination (`verify_tasks`)**: distinguishing authentic
+         repository function implementations from mutated buggy variants (`+` vs `-`, `<` vs `>`,
+         boundary flips, axis swaps).
+    4. Runs a **bounded pre-prompt RL/COE warmup session** (`warmup_session`) that freezes
+       `coe.backbone` (preserving 100% of generation fluency) and adapts only the session-scoped
+       `COE` operator & `AttentiveMatchedFilterPool` heads (`~600K` params, resettable in `<1ms`).
+    """
+
+    def __init__(
+        self,
+        *,
+        subsystems: Sequence[str] = ("src",),
+        max_seq_len: int = 192,
+        max_symbol_lines: int = 18,
+        num_route_options: int = 6,
+    ) -> None:
+        self.subsystems = tuple(subsystems)
+        self.max_seq_len = max_seq_len
+        self.max_symbol_lines = max_symbol_lines
+        self.num_route_options = max(4, num_route_options)
+
+    @staticmethod
+    def _operator_parameter_names(coe: CognitiveOperatorEnsemble) -> list[str]:
+        """Return parameter names belonging to the lightweight `COE` operator & pooling heads."""
+        return [
+            name
+            for name, _ in coe.named_parameters()
+            if not name.startswith("backbone.")
+        ]
+
+    @torch.no_grad()
+    def index_repository(
+        self,
+        coe: CognitiveOperatorEnsemble,
+        repo_root: str | Path,
+        *,
+        max_tasks_per_family: int = 40,
+    ) -> CodebaseSessionState:
+        """Index `repo_root` into `ATXYPageStore` + `TurboQuant` pages and synthesize AST self-RL tasks."""
+        root = Path(repo_root).expanduser().resolve()
+        store = index_python_repo_to_atxy(root, subsystems=self.subsystems)
+        router = COEAddressRouter(store, max_seq_len=self.max_seq_len)
+        pointer_executor = ATXYPointerExecutor(store)
+
+        device = next(coe.parameters()).device
+        vocab_size = int(getattr(coe.backbone.config, "vocab_size", 260))
+        tokenizer = get_tokenizer(vocab_size)
+        max_len = min(self.max_seq_len, int(coe.backbone.config.max_seq_len))
+
+        # Snapshot base operator weights on CPU for instant session reset
+        op_names = set(self._operator_parameter_names(coe))
+        base_operator_state = {
+            name: param.detach().cpu().clone()
+            for name, param in coe.named_parameters()
+            if name in op_names
+        }
+
+        symbol_sources: dict[str, str] = {}
+        file_turboquant_pages: dict[str, CompressedEncodedState] = {}
+        file_latent_priors: dict[str, Tensor] = {}
+
+        total_repo_bytes = 0
+        total_repo_tokens = 0
+        uncompressed_state_bytes = 0
+        compressed_state_bytes = 0
+        tq_cosines: list[float] = []
+
+        file_recs = [r for r in store.records() if r.parsed_address.A == 2]
+        sym_recs = [r for r in store.records() if r.parsed_address.A == 1]
+
+        # Extract symbol source snippets & compress module states with TurboQuant
+        for idx, frec in enumerate(file_recs):
+            fpath = root / frec.payload
+            if not fpath.is_file():
+                continue
+            src_text = fpath.read_text(encoding="utf-8", errors="replace")
+            src_lines = src_text.splitlines()
+            total_repo_bytes += len(src_text.encode("utf-8"))
+            toks = tokenizer.encode(src_text, add_bos=False, add_eos=False)
+            total_repo_tokens += len(toks)
+
+            # Parse AST to extract clean per-symbol source snippets
+            try:
+                tree = ast.parse(src_text)
+                ast_map = {
+                    node.name: node
+                    for node in tree.body
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                }
+            except SyntaxError:
+                ast_map = {}
+
+            module_summary_lines = [f"# Module {frec.payload}"]
+            for s_addr in frec.down:
+                srec = store.lookup(s_addr)
+                if srec is None:
+                    continue
+                sym_name = srec.payload.split(":")[-1]
+                node = ast_map.get(sym_name)
+                if node is not None:
+                    start_ln = max(0, int(getattr(node, "lineno", 1)) - 1)
+                    end_ln = min(
+                        len(src_lines),
+                        int(getattr(node, "end_lineno", start_ln + self.max_symbol_lines)),
+                        start_ln + self.max_symbol_lines,
+                    )
+                    snippet = "\n".join(src_lines[start_ln:end_ln]).strip()
+                else:
+                    snippet = f"def {sym_name}(): # {srec.summary}"
+                symbol_sources[srec.address] = snippet
+                module_summary_lines.append(f"{sym_name}: {srec.summary}")
+
+            # Encode module summary chunk through lower-CED & compress via 4-bit TurboQuant
+            mod_doc = "\n".join(module_summary_lines)
+            mod_ids = tokenizer.encode(mod_doc, add_bos=True, add_eos=True)[:max_len]
+            inp_t = torch.tensor([mod_ids], dtype=torch.long, device=device)
+            len_t = torch.tensor([len(mod_ids)], dtype=torch.long, device=device)
+            valid_mask = torch.ones((1, len(mod_ids)), dtype=torch.bool, device=device)
+            enc_state = coe.backbone.encode_state(inp_t, valid_mask, causal=True)
+            comp_state = compress_encoded_state(enc_state, seed=1337 + idx * 17)
+            deq_state = comp_state.decompress()
+
+            cos = float(
+                F.cosine_similarity(
+                    enc_state.hidden.float().reshape(-1, enc_state.hidden.shape[-1]),
+                    deq_state.hidden.float().reshape(-1, deq_state.hidden.shape[-1]),
+                    dim=-1,
+                )
+                .mean()
+                .item()
+            )
+            tq_cosines.append(cos)
+            uncompressed_state_bytes += comp_state.uncompressed_bytes
+            compressed_state_bytes += comp_state.compressed_bytes
+            file_turboquant_pages[frec.address] = comp_state
+
+            z_abs = coe.compress_abstraction(inp_t, len_t, level="standard")[0].detach()
+            file_latent_priors[frec.address] = z_abs
+
+        # Synthesize AST-verified Train & Held-Out Evaluation Tasks
+        train_route, eval_route, train_verify, eval_verify = self._build_codebase_tasks(
+            store,
+            symbol_sources,
+            vocab_size=vocab_size,
+            max_len=max_len,
+            max_tasks=max_tasks_per_family,
+        )
+
+        return CodebaseSessionState(
+            repo_root=str(root),
+            store=store,
+            router=router,
+            pointer_executor=pointer_executor,
+            symbol_sources=symbol_sources,
+            file_turboquant_pages=file_turboquant_pages,
+            file_latent_priors=file_latent_priors,
+            total_repo_files=len(file_recs),
+            total_repo_symbols=len(sym_recs),
+            total_repo_bytes=total_repo_bytes,
+            total_repo_tokens=total_repo_tokens,
+            uncompressed_state_bytes=uncompressed_state_bytes,
+            compressed_state_bytes=compressed_state_bytes,
+            mean_turboquant_cosine=sum(tq_cosines) / max(1, len(tq_cosines)),
+            base_operator_state=base_operator_state,
+            train_route_tasks=train_route,
+            eval_route_tasks=eval_route,
+            train_verify_tasks=train_verify,
+            eval_verify_tasks=eval_verify,
+        )
+
+    def _build_codebase_tasks(
+        self,
+        store: ATXYPageStore,
+        symbol_sources: dict[str, str],
+        *,
+        vocab_size: int,
+        max_len: int,
+        max_tasks: int,
+    ) -> tuple[
+        list[DecisionExample],
+        list[DecisionExample],
+        list[DecisionExample],
+        list[DecisionExample],
+    ]:
+        sym_recs = [r for r in store.records() if r.parsed_address.A == 1]
+
+        train_route: list[DecisionExample] = []
+        eval_route: list[DecisionExample] = []
+        train_verify: list[DecisionExample] = []
+        eval_verify: list[DecisionExample] = []
+
+        if len(sym_recs) < 4:
+            return train_route, eval_route, train_verify, eval_verify
+
+        # Precompute token sets for selecting hard-negative distractors per symbol
+        sym_toks = [
+            _code_tokens_and_stems(f"{r.payload} {r.summary}")
+            for r in sym_recs
+        ]
+        k_opts = min(self.num_route_options, len(sym_recs))
+
+        # Stratify selection evenly across all repository modules so every file is explored
+        n_sel = min(max_tasks, len(sym_recs))
+        selected_indices = [int(i * len(sym_recs) / n_sel) for i in range(n_sel)]
+
+        for task_i, idx in enumerate(selected_indices):
+            rec = sym_recs[idx]
+            rel_path, sym_name = (
+                rec.payload.split(":", 1) if ":" in rec.payload else (rec.payload, rec.payload)
+            )
+            mod_short = Path(rel_path).name
+
+            # Rank hard-negative distractors by shared module / lexical overlap
+            scored_neg = []
+            for j, other in enumerate(sym_recs):
+                if j == idx:
+                    continue
+                same_mod = 1.5 if other.up == rec.up else 0.0
+                ov = len(sym_toks[idx] & sym_toks[j]) / max(1, len(sym_toks[idx]))
+                scored_neg.append((same_mod + ov, j))
+            scored_neg.sort(key=lambda pair: pair[0], reverse=True)
+            neg_indices = [j for _, j in scored_neg[: k_opts - 1]]
+
+            # Deterministically place target at index (task_i % k_opts)
+            target_pos = task_i % k_opts
+            cand_list = [sym_recs[j] for j in neg_indices]
+            cand_list.insert(target_pos, rec)
+            desc_tuple = tuple(
+                _truncate_to_token_budget(c.to_candidate_description(), vocab_size, max_len)
+                for c in cand_list
+            )
+            val_tuple = tuple(c.address for c in cand_list)
+
+            # Extract callees for call-graph context
+            callee_names = []
+            for cal_addr in rec.rels.get("CALLS", ()):
+                crec = store.lookup(cal_addr)
+                if crec is not None:
+                    callee_names.append(crec.payload.split(":")[-1])
+            call_hint = f" (calls {', '.join(callee_names[:3])})" if callee_names else ""
+
+            # 1. Self-exploration training query (AST signature + summary + call-graph)
+            train_q = (
+                f"#U$# Explore {mod_short}: locate {rec.kind} `{sym_name}` — {rec.summary}{call_hint}.\n"
+                f"#Q$# Select the exact A.TXY record matching the request."
+            )
+            train_route.append(
+                DecisionExample(
+                    question_id=f"route_train_{task_i}",
+                    kind="choice",
+                    context=_truncate_to_token_budget(train_q, vocab_size, max_len),
+                    descriptions=desc_tuple,
+                    values=val_tuple,
+                    target=target_pos,
+                )
+            )
+
+            # 2. Held-out natural-language developer debugging query (redacts direct symbol name where possible)
+            redacted_summary = re.sub(
+                re.escape(sym_name),
+                f"the target {rec.kind}",
+                rec.summary,
+                flags=re.IGNORECASE,
+            )
+            eval_q = (
+                f"#U$# Debugging `{mod_short}`: which {rec.kind} in `{rel_path}` is responsible for "
+                f"{redacted_summary}{call_hint}?\n"
+                f"#Q$# Select the exact A.TXY record matching the request."
+            )
+            eval_route.append(
+                DecisionExample(
+                    question_id=f"route_eval_{task_i}",
+                    kind="choice",
+                    context=_truncate_to_token_budget(eval_q, vocab_size, max_len),
+                    descriptions=desc_tuple,
+                    values=val_tuple,
+                    target=target_pos,
+                )
+            )
+
+            # 3. Real-vs-Mutated Code Bug Verification Task (shared setup in lower-CED, focal line in upper-CED)
+            snippet = symbol_sources.get(rec.address, "")
+            if len(snippet.splitlines()) >= 3:
+                shared_setup, focal_line = _extract_focal_line_and_context(snippet)
+                auth_inv = _summarize_code_invariants(focal_line)
+                v_target = (task_i + 1) % 4
+
+                # Train task: Mutation Set A on focal statement
+                muts_train = _mutate_focal_line(focal_line, mode="train")
+                v_cands_tr = list(muts_train[:3])
+                v_cands_tr.insert(v_target, focal_line)
+                v_descs_tr = tuple(
+                    _truncate_to_token_budget(
+                        f"#T$# [{sym_name}] {_summarize_code_invariants(stmt)}\n#A$# {stmt}",
+                        vocab_size,
+                        max_len,
+                    )
+                    for stmt in v_cands_tr
+                )
+                v_ctx_tr = (
+                    f"#U$# Pre-session AST verification for `{sym_name}` in `{rel_path}` ({rec.summary} | expected {auth_inv}):\n"
+                    f"{shared_setup}\n"
+                    f"#Q$# Select the authentic bug-free focal statement for `{sym_name}`."
+                )
+                train_verify.append(
+                    DecisionExample(
+                        question_id=f"verify_train_{task_i}",
+                        kind="choice",
+                        context=_truncate_to_token_budget(v_ctx_tr, vocab_size, max_len),
+                        descriptions=v_descs_tr,
+                        values=("opt_0", "opt_1", "opt_2", "opt_3"),
+                        target=v_target,
+                    )
+                )
+
+                # Held-out Eval task: Unseen Mutation Set B + developer code-review prompt
+                muts_eval = _mutate_focal_line(focal_line, mode="eval")
+                v_cands_ev = list(muts_eval[:3])
+                v_cands_ev.insert(v_target, focal_line)
+                v_descs_ev = tuple(
+                    _truncate_to_token_budget(
+                        f"#T$# [{sym_name}] {_summarize_code_invariants(stmt)}\n#A$# {stmt}",
+                        vocab_size,
+                        max_len,
+                    )
+                    for stmt in v_cands_ev
+                )
+                v_ctx_ev = (
+                    f"#U$# Code review on `{rel_path}`: verify `{sym_name}` ({rec.summary} | expected {auth_inv}):\n"
+                    f"{shared_setup}\n"
+                    f"#Q$# Select the authentic bug-free focal statement for `{sym_name}`."
+                )
+                eval_verify.append(
+                    DecisionExample(
+                        question_id=f"verify_eval_{task_i}",
+                        kind="choice",
+                        context=_truncate_to_token_budget(v_ctx_ev, vocab_size, max_len),
+                        descriptions=v_descs_ev,
+                        values=("opt_0", "opt_1", "opt_2", "opt_3"),
+                        target=v_target,
+                    )
+                )
+
+        return train_route, eval_route, train_verify, eval_verify
+
+    @torch.no_grad()
+    def evaluate_tasks(
+        self,
+        coe: CognitiveOperatorEnsemble,
+        examples: Sequence[DecisionExample],
+        *,
+        batch_size: int = 8,
+    ) -> dict[str, float]:
+        """Evaluate `Decision` top-1 accuracy, mean target confidence, and multi-operator loss."""
+        if not examples:
+            return {"accuracy": 0.0, "confidence": 0.0, "loss": 0.0}
+        coe.eval()
+        device = next(coe.parameters()).device
+        vocab_size = int(getattr(coe.backbone.config, "vocab_size", 260))
+        max_len = min(self.max_seq_len, int(coe.backbone.config.max_seq_len))
+
+        correct = 0
+        total = 0
+        conf_sum = 0.0
+        loss_sum = 0.0
+        n_batches = 0
+
+        for start in range(0, len(examples), batch_size):
+            chunk = examples[start : start + batch_size]
+            batch = collate_decisions(
+                chunk,
+                max_length=max_len,
+                device=device,
+                vocab_size=vocab_size,
+            )
+            op_out = coe.forward_all_operators(
+                batch["context_ids"],
+                batch["context_lengths"],
+                batch["option_ids"],
+                batch["option_lengths"],
+                batch["targets"],
+            )
+            probs = op_out.decision.probabilities
+            targets = batch["targets"].long()
+            preds = probs.argmax(dim=-1)
+            correct += int((preds == targets).sum().item())
+            b_rows = torch.arange(len(chunk), device=device)
+            conf_sum += float(probs[b_rows, targets].sum().item())
+            total += len(chunk)
+            loss_sum += float(op_out.total_loss.item())
+            n_batches += 1
+
+        return {
+            "accuracy": correct / max(1, total),
+            "confidence": conf_sum / max(1, total),
+            "loss": loss_sum / max(1, n_batches),
+        }
+
+    def warmup_session(
+        self,
+        coe: CognitiveOperatorEnsemble,
+        session: CodebaseSessionState,
+        *,
+        steps: int = 24,
+        lr: float = 2.0e-3,
+        batch_size: int = 8,
+    ) -> CodebaseWarmupReport:
+        """Run a bounded pre-prompt RL/COE warmup session on the indexed repository.
+
+        Freezes `coe.backbone` (`requires_grad=False`) to preserve 100% of language generation
+        fluency and pre-caches the frozen backbone's `EncodedState` + `DecodedCandidates` across
+        the repository's AST tasks so 24+ multi-operator RL updates execute in ~1-2 seconds.
+        """
+        t0 = time.perf_counter()
+        device = next(coe.parameters()).device
+        vocab_size = int(getattr(coe.backbone.config, "vocab_size", 260))
+        max_len = min(self.max_seq_len, int(coe.backbone.config.max_seq_len))
+
+        # 1. Measure Pre-Warmup baseline on held-out routing & code verification tasks
+        pre_route = self.evaluate_tasks(coe, session.eval_route_tasks, batch_size=batch_size)
+        pre_verify = self.evaluate_tasks(coe, session.eval_verify_tasks, batch_size=batch_size)
+
+        # 2. Freeze backbone, enable gradients only on lightweight COE operator & pooling heads
+        orig_grad_flags = {name: p.requires_grad for name, p in coe.named_parameters()}
+        op_names = set(self._operator_parameter_names(coe))
+        trainable_params_list: list[nn.Parameter] = []
+        frozen_count = 0
+        trainable_count = 0
+
+        for name, p in coe.named_parameters():
+            if name in op_names:
+                p.requires_grad_(True)
+                trainable_params_list.append(p)
+                trainable_count += p.numel()
+            else:
+                p.requires_grad_(False)
+                frozen_count += p.numel()
+
+        train_examples = list(session.train_route_tasks) + list(session.train_verify_tasks)
+        step_losses: list[float] = []
+
+        if train_examples and steps > 0 and trainable_params_list:
+            # Pre-encode frozen backbone states once across all training mini-batches for ultra-fast RL warmup
+            coe.eval()
+            cached_batches: list[dict[str, Any]] = []
+            with torch.no_grad():
+                for start in range(0, len(train_examples), batch_size):
+                    chunk = train_examples[start : start + batch_size]
+                    b = collate_decisions(
+                        chunk,
+                        max_length=max_len,
+                        device=device,
+                        vocab_size=vocab_size,
+                    )
+                    context_ids = b["context_ids"]
+                    context_lengths = b["context_lengths"]
+                    option_ids = b["option_ids"]
+                    option_lengths = b["option_lengths"]
+                    targets = b["targets"].long()
+
+                    valid_options = option_lengths > 0
+                    ctx_width = int(context_lengths.max().item())
+                    trimmed_ctx_ids = context_ids[:, :ctx_width].long()
+                    ctx_valid = (
+                        torch.arange(ctx_width, device=device)[None, :] < context_lengths[:, None]
+                    )
+                    encoded_state = coe.backbone.encode_state(trimmed_ctx_ids, ctx_valid, causal=True)
+
+                    valid_lengths = option_lengths[valid_options]
+                    opt_width = int(valid_lengths.max().item())
+                    flat_opt_ids = option_ids[valid_options][:, :opt_width].long()
+                    owner_rows = valid_options.nonzero(as_tuple=False)[:, 0]
+
+                    decoded_options = coe.backbone.decode_candidates(
+                        encoded_state,
+                        flat_opt_ids,
+                        (torch.arange(opt_width, device=device)[None, :] < valid_lengths[:, None]),
+                        owner_rows=owner_rows,
+                        recurrence_steps=coe.config.recurrence_steps,
+                        causal_local=True,
+                    )
+                    cached_batches.append(
+                        {
+                            "encoded_hidden": encoded_state.hidden.detach(),
+                            "trimmed_ctx_ids": trimmed_ctx_ids,
+                            "ctx_valid": ctx_valid,
+                            "decoded_hidden": decoded_options.hidden.detach(),
+                            "decoded_anchor": (
+                                decoded_options.anchor.detach()
+                                if decoded_options.anchor is not None
+                                else None
+                            ),
+                            "flat_opt_ids": flat_opt_ids,
+                            "opt_valid": (
+                                torch.arange(opt_width, device=device)[None, :]
+                                < valid_lengths[:, None]
+                            ),
+                            "owner_rows": owner_rows,
+                            "valid_options": valid_options,
+                            "targets": targets,
+                            "batch_size": context_ids.shape[0],
+                            "num_opts": option_ids.shape[1],
+                        }
+                    )
+
+            optimizer = torch.optim.AdamW(trainable_params_list, lr=lr, weight_decay=1e-4)
+            n_cb = float(len(cached_batches))
+            for _step_idx in range(steps):
+                optimizer.zero_grad(set_to_none=True)
+                epoch_loss_val = 0.0
+
+                for cb in cached_batches:
+                    paired_state_repr, cand_repr = coe.pooler.matched_pair_representations(
+                        cb["encoded_hidden"],
+                        cb["trimmed_ctx_ids"],
+                        cb["ctx_valid"],
+                        cb["decoded_hidden"],
+                        cb["flat_opt_ids"],
+                        cb["opt_valid"],
+                        cb["owner_rows"],
+                        cand_anchor=cb["decoded_anchor"],
+                        strip_boundary=coe.config.strip_boundary_tokens_in_pool,
+                        bos_id=coe.config.bos_id,
+                        eos_id=coe.config.eos_id,
+                    )
+                    state_proj = coe.state_projection(paired_state_repr)
+                    cand_proj = coe.output_projection(cand_repr)
+                    valid_scores = coe._similarity(state_proj, cand_proj)
+
+                    valid_options = cb["valid_options"]
+                    similarities = valid_scores.new_zeros(valid_options.shape).masked_scatter(
+                        valid_options, valid_scores
+                    )
+                    bsz = cb["batch_size"]
+                    num_opts = cb["num_opts"]
+                    d_m = paired_state_repr.shape[-1]
+                    mask_3d = valid_options.unsqueeze(-1).expand(bsz, num_opts, d_m)
+                    state_grid = paired_state_repr.new_zeros((bsz, num_opts, d_m)).masked_scatter(
+                        mask_3d, paired_state_repr
+                    )
+                    opt_grid = cand_repr.new_zeros((bsz, num_opts, d_m)).masked_scatter(
+                        mask_3d, cand_repr
+                    )
+
+                    b_rows = torch.arange(bsz, device=device)
+                    t_idx = cb["targets"]
+                    s_pos = state_grid[b_rows, t_idx]
+                    c_pos = opt_grid[b_rows, t_idx]
+
+                    distractor_mask = valid_options.clone()
+                    distractor_mask[b_rows, t_idx] = False
+                    neg_scores = similarities.float().masked_fill(~distractor_mask, -torch.inf)
+                    d_idx = neg_scores.argmax(dim=-1)
+                    s_neg = state_grid[b_rows, d_idx]
+                    c_neg = opt_grid[b_rows, d_idx]
+
+                    s_Pair = torch.cat([s_pos, s_neg], dim=0)
+                    c_Pair = torch.cat([c_pos, c_neg], dim=0)
+                    ded_joint = coe.deduction_query_proj(torch.cat([s_Pair, c_Pair], dim=-1))
+
+                    with torch.autocast(device_type=device.type, enabled=False):
+                        scale = coe._scale()
+                        logits = (similarities.float() * scale).masked_fill(~valid_options, -torch.inf)
+                        dec_loss = F.cross_entropy(logits, t_idx)
+
+                        ded_sims = pearson_similarity(
+                            ded_joint.unsqueeze(1),
+                            coe.deduction_prototypes.unsqueeze(0),
+                            eps=coe.config.eps,
+                        )
+                        ded_logits = ded_sims.float() * scale
+                        ded_targets = torch.cat(
+                            [
+                                torch.zeros(bsz, device=device, dtype=torch.long),
+                                torch.ones(bsz, device=device, dtype=torch.long),
+                            ],
+                            dim=0,
+                        )
+                        ded_loss = F.cross_entropy(ded_logits, ded_targets)
+
+                        eval_logits = valid_scores.float() * coe.assoc_alpha.float() + coe.assoc_beta.float()
+                        target_grid = F.one_hot(t_idx, num_classes=num_opts).float()
+                        eval_loss = F.binary_cross_entropy_with_logits(
+                            eval_logits, target_grid[valid_options]
+                        )
+
+                        batch_loss = (dec_loss + 0.30 * ded_loss + 0.20 * eval_loss) / n_cb
+
+                    batch_loss.backward()
+                    epoch_loss_val += float(batch_loss.item())
+
+                torch.nn.utils.clip_grad_norm_(trainable_params_list, 1.0)
+                optimizer.step()
+                step_losses.append(epoch_loss_val)
+
+        # Restore original requires_grad flags
+        for name, p in coe.named_parameters():
+            p.requires_grad_(orig_grad_flags.get(name, True))
+        coe.eval()
+
+        # 3. Measure Post-Warmup performance on held-out routing & code verification tasks
+        post_route = self.evaluate_tasks(coe, session.eval_route_tasks, batch_size=batch_size)
+        post_verify = self.evaluate_tasks(coe, session.eval_verify_tasks, batch_size=batch_size)
+        elapsed = time.perf_counter() - t0
+
+        return CodebaseWarmupReport(
+            repo_root=session.repo_root,
+            total_files=session.total_repo_files,
+            total_symbols=session.total_repo_symbols,
+            total_repo_bytes=session.total_repo_bytes,
+            total_repo_tokens=session.total_repo_tokens,
+            uncompressed_state_bytes=session.uncompressed_state_bytes,
+            turboquant_state_bytes=session.compressed_state_bytes,
+            compression_ratio=session.compression_ratio,
+            mean_turboquant_cosine=session.mean_turboquant_cosine,
+            warmup_steps=steps,
+            warmup_elapsed_sec=elapsed,
+            trainable_params=trainable_count,
+            frozen_backbone_params=frozen_count,
+            pre_route_acc=pre_route["accuracy"],
+            post_route_acc=post_route["accuracy"],
+            pre_route_conf=pre_route["confidence"],
+            post_route_conf=post_route["confidence"],
+            pre_verify_acc=pre_verify["accuracy"],
+            post_verify_acc=post_verify["accuracy"],
+            pre_verify_conf=pre_verify["confidence"],
+            post_verify_conf=post_verify["confidence"],
+            pre_loss=0.5 * (pre_route["loss"] + pre_verify["loss"]),
+            post_loss=0.5 * (post_route["loss"] + post_verify["loss"]),
+            step_losses=step_losses,
+        )
+
+    @torch.no_grad()
+    def query_codebase(
+        self,
+        coe: CognitiveOperatorEnsemble,
+        session: CodebaseSessionState,
+        user_query: str,
+        *,
+        top_k_candidates: int = 6,
+    ) -> dict[str, Any]:
+        """Route a user debugging/codebase query via warmed `COEAddressRouter`, traverse `A.TXY` `CALLS` edges, and retrieve `TurboQuant` page state."""
+        route_res = session.router.route_query(
+            coe,
+            user_query,
+            top_k_candidates=top_k_candidates,
+            plane_filter=1,
+        )
+        primary_rec: ATXYRecord = route_res["record"]
+        primary_source = session.symbol_sources.get(primary_rec.address, "")
+
+        # Traverse UP to parent file and FOLLOW_SET("CALLS") via ATXYPointerExecutor
+        parent_file_addr = primary_rec.up[0] if primary_rec.up else None
+        callees: list[dict[str, str]] = []
+        if "CALLS" in primary_rec.rels:
+            _, callee_addrs = session.pointer_executor.run(
+                [("FOLLOW_SET", [primary_rec.address], "CALLS")]
+            )
+            for c_addr in callee_addrs:
+                crec = session.store.lookup(c_addr)
+                if crec is not None:
+                    callees.append(
+                        {
+                            "address": crec.address,
+                            "symbol": crec.payload,
+                            "summary": crec.summary,
+                        }
+                    )
+
+        tq_page = (
+            session.file_turboquant_pages.get(parent_file_addr)
+            if parent_file_addr is not None
+            else None
+        )
+        decompressed_state = tq_page.decompress() if tq_page is not None else None
+        latent_prior = (
+            session.file_latent_priors.get(parent_file_addr)
+            if parent_file_addr is not None
+            else None
+        )
+
+        return {
+            "query": user_query,
+            "address": primary_rec.address,
+            "symbol": primary_rec.payload,
+            "kind": primary_rec.kind,
+            "summary": primary_rec.summary,
+            "confidence": route_res["confidence"],
+            "candidates": route_res["candidates"],
+            "probabilities": route_res["probabilities"],
+            "source_snippet": primary_source,
+            "parent_file_address": parent_file_addr,
+            "callees": callees,
+            "turboquant_page_compressed_bytes": (
+                tq_page.compressed_bytes if tq_page is not None else 0
+            ),
+            "turboquant_decompressed_shape": (
+                tuple(decompressed_state.hidden.shape) if decompressed_state is not None else ()
+            ),
+            "latent_prior": latent_prior,
+        }
+

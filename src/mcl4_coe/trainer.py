@@ -1295,6 +1295,10 @@ class MCL4COETrainer:
                     max(1, int((mb["labels"] != -100).sum().item())) for mb in micro_batches
                 ]
                 total_mb_tokens = max(1, sum(mb_token_counts))
+                total_mb_bytes = max(
+                    total_mb_tokens,
+                    sum(self.tokenizer.count_utf8_bytes(mb["labels"]) for mb in micro_batches),
+                )
 
                 for mb, mb_toks in zip(micro_batches, mb_token_counts):
                     inp = mb["input_ids"].to(self.device, non_blocking=True)
@@ -1471,7 +1475,12 @@ class MCL4COETrainer:
                     "lr": round(lr, 6),
                     "total_loss": round(step_total_loss, 5),
                     "lm_loss": round(step_lm_loss, 5),
-                    "train_bpb": round(step_lm_loss / math.log(2.0), 5),
+                    "train_bpt": round(step_lm_loss / math.log(2.0), 5),
+                    "train_bpb": round(
+                        (step_lm_loss * step_unmasked_tokens / math.log(2.0))
+                        / max(1, total_mb_bytes),
+                        5,
+                    ),
                     "decision_loss": round(step_dec_loss, 5),
                     "deduction_loss": round(step_ded_loss, 5),
                     "evaluation_loss": round(step_eval_loss, 5),

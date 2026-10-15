@@ -1559,9 +1559,9 @@ class CodebaseWarmupEngine:
                 flags=re.IGNORECASE,
             )
 
-            # 1. Self-exploration training query (natural developer question + AST summary)
+            # 1. Self-exploration training query (AST signature + summary + call-graph)
             train_q = (
-                f"#U$# Where do we implement `{sym_name}` in `{mod_short}` — {redacted_summary}{call_hint}?\n"
+                f"#U$# Explore {mod_short}: locate {rec.kind} `{sym_name}` — {rec.summary}{call_hint}.\n"
                 f"#Q$# Select the exact A.TXY record matching the request."
             )
             train_route.append(

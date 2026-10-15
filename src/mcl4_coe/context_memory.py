@@ -952,7 +952,8 @@ class COEAddressRouter:
         if any(s > 0.0 for s in cand_sketch):
             sk_t = torch.tensor(cand_sketch, dtype=torch.float32, device=device)
             sk_norm = (sk_t - sk_t.mean()) / sk_t.std(unbiased=False).clamp_min(1e-5)
-            joint_logits = dec_logits + 0.35 * sk_norm
+            dec_std = dec_logits.std(unbiased=False).clamp_min(0.5)
+            joint_logits = dec_logits + 0.60 * dec_std * sk_norm
             probs = joint_logits.softmax(dim=-1)
         else:
             probs = dec_out.probabilities[0]
@@ -970,8 +971,12 @@ class COEAddressRouter:
 def _summarize_ast_symbol(node: ast.AST, rel: str) -> str:
     """Build a compact semantic summary of an AST function or class for `ATXYRecord`."""
     kind = "class" if isinstance(node, ast.ClassDef) else "function"
-    doc_lines = (ast.get_docstring(node) or "").strip().splitlines()
-    doc_first = doc_lines[0].strip() if doc_lines else f"{kind} {getattr(node, 'name', '')} in {Path(rel).name}"
+    doc_lines = [ln.strip() for ln in (ast.get_docstring(node) or "").strip().splitlines() if ln.strip()]
+    doc_joined = (
+        " ".join(doc_lines[:3])[:220]
+        if doc_lines
+        else f"{kind} {getattr(node, 'name', '')} in {Path(rel).name}"
+    )
 
     sig_str = ""
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -1001,10 +1006,10 @@ def _summarize_ast_symbol(node: ast.AST, rel: str) -> str:
         elif isinstance(sub, ast.Name) and isinstance(sub.id, str):
             if sub.id not in skip_ids and len(sub.id) >= 4 and not sub.id.startswith("_") and sub.id not in body_terms:
                 body_terms.append(sub.id)
-        if len(body_terms) >= 8:
+        if len(body_terms) >= 10:
             break
 
-    parts = [p for p in (sig_str, doc_first) if p]
+    parts = [p for p in (sig_str, doc_joined) if p]
     if body_terms:
         parts.append(f"refs: {', '.join(body_terms[:6])}")
     return " | ".join(parts)

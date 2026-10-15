@@ -278,6 +278,9 @@ class MCL4COETrainer:
         self._build_model_and_optimizer()
 
         self.current_step = 0
+        self.initial_step = 0
+        self._optimizer_restored = False
+        self._parent_total_steps = 0
         self.start_time = time.time()
         self.cumulative_wall_s = 0.0
         self.cumulative_tokens = 0
@@ -287,7 +290,7 @@ class MCL4COETrainer:
             self.load_checkpoint(config.resume_checkpoint)
 
     def _prepare_resume_geometry(self, checkpoint_path: str | Path) -> None:
-        """Align backbone dimensions with the checkpoint while allowing `num_experts` upcycling."""
+        """Align backbone and COE dimensions with the checkpoint while allowing `num_experts` upcycling."""
         p = Path(checkpoint_path).expanduser().resolve()
         if p.name.endswith(".meta.json"):
             meta = json.loads(p.read_text(encoding="utf-8"))
@@ -306,6 +309,10 @@ class MCL4COETrainer:
         ):
             if key in b_cfg:
                 setattr(self.config, key, int(b_cfg[key]))
+        c_cfg = payload.get("coe_config", {})
+        for key in ("projection_dim", "recurrence_steps"):
+            if key in c_cfg:
+                setattr(self.config, key, int(c_cfg[key]))
         ckpt_experts = int(b_cfg.get("num_experts", self.config.num_experts))
         if self.config.num_experts < ckpt_experts:
             self.config.num_experts = ckpt_experts
@@ -755,12 +762,14 @@ class MCL4COETrainer:
             ):
                 try:
                     self.optimizer.load_state_dict(payload["optimizer_state"])
+                    self._optimizer_restored = True
                 except Exception:
-                    pass
+                    self._optimizer_restored = False
         if "sampler_state" in payload:
             self.sampler.load_state_dict(payload["sampler_state"])
         self.current_step = int(payload.get("step", 0))
         self.initial_step = self.current_step
+        self._parent_total_steps = int(payload.get("config", {}).get("total_steps", self.current_step))
         self.cumulative_wall_s = float(payload.get("cumulative_wall_s", 0.0))
         self.cumulative_tokens = int(payload.get("cumulative_tokens", 0))
         self.latest_metrics = dict(payload.get("latest_metrics", {}))
@@ -809,7 +818,27 @@ class MCL4COETrainer:
         base_step = getattr(self, "initial_step", 0)
         stage_steps = max(1, self.config.total_steps - base_step)
         local_step = max(1, step - base_step)
-        # Ensure resumed stages without optimizer moments warm up smoothly over >= 12% of stage steps
+        # When continuing from a converged checkpoint with warm AdamW moments restored,
+        # avoid an 8x spike back to cold-init peak LR; instead ramp gently from min_lr to
+        # at most 1.75x min_lr and cosine-decay down to 0.65x min_lr.
+        if getattr(self, "_optimizer_restored", False) and base_step > 0:
+            start_lr = float(
+                self.latest_metrics.get("lr", self.config.lr * self.config.min_lr_ratio)
+            )
+            min_lr = self.config.lr * self.config.min_lr_ratio
+            start_lr = max(min_lr * 0.5, min(self.config.lr, start_lr))
+            peak_lr = min(self.config.lr, max(start_lr, min_lr * 1.75))
+            end_lr = min_lr * 0.65
+            warmup_steps = max(1, int(round(stage_steps * 0.05)))
+            if local_step <= warmup_steps:
+                alpha = local_step / warmup_steps
+                return start_lr + (peak_lr - start_lr) * alpha
+            decay_span = max(1, stage_steps - warmup_steps)
+            decay_progress = min(1.0, max(0.0, (local_step - warmup_steps) / decay_span))
+            cosine = 0.5 * (1.0 + math.cos(math.pi * decay_progress))
+            return end_lr + (peak_lr - end_lr) * cosine
+
+        # Cold start or expert-upcycled stage without optimizer moments: warm up over >= 12% of stage steps
         eff_warmup = max(self.config.warmup_ratio, 0.12 if base_step > 0 else 0.0)
         warmup_steps = max(1, int(round(stage_steps * eff_warmup)))
         if local_step <= warmup_steps:
@@ -836,7 +865,11 @@ class MCL4COETrainer:
 
             base_step = getattr(self, "initial_step", 0)
             stage_steps = max(1, self.config.total_steps - base_step)
-            progress0 = max(0.0, (start_step - 1 - base_step) / stage_steps)
+            warm_continuation = bool(getattr(self, "_optimizer_restored", False) and base_step > 0)
+            if warm_continuation:
+                progress0 = min(1.0, max(0.0, (start_step - 1) / max(1, self.config.total_steps)))
+            else:
+                progress0 = max(0.0, (start_step - 1 - base_step) / stage_steps)
             next_indices = self.sampler.take(self.config.batch_size, progress=progress0)
             self.prefetcher.schedule(next_indices)
 
@@ -847,7 +880,10 @@ class MCL4COETrainer:
 
                 t_step0 = time.perf_counter()
                 self.current_step = step
-                progress = min(1.0, max(0.0, (step - base_step) / stage_steps))
+                if warm_continuation:
+                    progress = min(1.0, max(0.0, step / max(1, self.config.total_steps)))
+                else:
+                    progress = min(1.0, max(0.0, (step - base_step) / stage_steps))
                 cur_weights = self.schedule.weights_at(progress)
                 w_dec = float(cur_weights.get("typed_decision", 0.15))
 
@@ -892,7 +928,11 @@ class MCL4COETrainer:
                 }
 
                 ornith_telemetry: dict[str, Any] = {}
-                ornith_active = progress >= float(self.config.ornith_warmup_ratio)
+                parent_reached_ornith = bool(
+                    warm_continuation
+                    and base_step >= int(max(1, self._parent_total_steps) * float(self.config.ornith_warmup_ratio))
+                )
+                ornith_active = (progress >= float(self.config.ornith_warmup_ratio)) or parent_reached_ornith
                 run_ornith = bool(
                     self.config.enable_ornith_rl
                     and ornith_active

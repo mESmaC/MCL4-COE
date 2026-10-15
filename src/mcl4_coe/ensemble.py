@@ -238,8 +238,22 @@ class MultiPassController(nn.Module):
             while step < max_new_tokens and len(tokens) < max_seq:
                 if not has_emitted_a and step >= thought_budget:
                     if max_new_tokens >= 128:
-                        at_boundary = tokens[-1] in (ord("."), ord("!"), ord("?"), 10)
-                        force_transition = step >= min(max(thought_budget, max_new_tokens - 64), thought_budget + 64)
+                        at_sentence = tokens[-1] in (ord("."), ord("!"), ord("?"), 10)
+                        at_word = step >= thought_budget + 40 and tokens[-1] in (
+                            32,
+                            10,
+                            ord("."),
+                            ord(","),
+                            ord(";"),
+                            ord(":"),
+                            ord("!"),
+                            ord("?"),
+                        )
+                        at_boundary = at_sentence or at_word
+                        force_transition = step >= min(
+                            max(thought_budget, max_new_tokens - 48),
+                            thought_budget + 72,
+                        )
                     else:
                         at_boundary = tokens[-1] in (32, 10, ord("."), ord(","), ord(";"), ord(":"))
                         force_transition = step >= min(max(thought_budget, max_new_tokens - 12), thought_budget + 12)
@@ -264,6 +278,10 @@ class MultiPassController(nn.Module):
                 if not has_emitted_a or step < thought_budget + 4:
                     # Do not terminate with <eos> before emitting a non-empty #A$# answer
                     next_logits[self.tokenizer.eos_id] = -torch.inf
+
+                # Prevent premature tag transition before minimum thought budget or duplicate #T$#/#U$# inside #A$#
+                if tokens[-1] == 10 and (has_emitted_a or step < min(48, thought_budget)):
+                    next_logits[ord("#")] = -torch.inf
 
                 # Prevent consecutive spaces or single-letter space alternation ("t a e o")
                 if tokens[-1] in (32, 10):
@@ -299,8 +317,8 @@ class MultiPassController(nn.Module):
                         if cnt >= 2 and 32 <= trig_b < 127:
                             next_logits[trig_b] -= 3.5 * cnt
 
-                # Prevent 3x identical character repeats ("sss") or 2x identical punctuation
-                if step == 0:
+                # Prevent XML/HTML tag openers ('<') at start of #T$# or #A$#, 3x identical character repeats, or 2x punctuation
+                if step == 0 or (len(tokens) >= len(a_tag_tokens) and tokens[-len(a_tag_tokens) :] == a_tag_tokens):
                     next_logits[ord("<")] = -torch.inf
                 if len(tokens) >= 3 and tokens[-1] == tokens[-2] == tokens[-3]:
                     next_logits[tokens[-1]] = -torch.inf

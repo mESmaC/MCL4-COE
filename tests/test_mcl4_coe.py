@@ -1277,3 +1277,48 @@ def test_antidoom_ftpo_and_housekeeping_fixes() -> None:
     assert float(logits.grad[0, rejected_tok].item()) > 0.0  # gradient pushes rejected token logit down
     assert 0.0 <= chosen_win <= 1.0
 
+    # 4. Verify Exact-Ratio Twin-Gated Mitosis preserves forward CE loss & serializes mitotic_pairs
+    from mcl4_coe.trainer import compute_mitotic_schedule, upcycle_state_dict_experts
+
+    torch.manual_seed(7)
+    cfg4 = MCL4CEDConfig(
+        d_model=64,
+        n_heads=4,
+        n_encoder_layers=1,
+        n_decoder_layers=1,
+        ple_dim=16,
+        expert_hidden_dim=128,
+        num_experts=4,
+        top_k=2,
+        max_seq_len=64,
+    )
+    m4 = CognitiveOperatorEnsemble(MCL4CEDBackbone(cfg4), COEConfig(projection_dim=16))
+    m4.eval()
+    inp = torch.randint(4, 120, (2, 32))
+    lbl = torch.randint(4, 120, (2, 32))
+    with torch.no_grad():
+        ce4 = float(m4.forward_inference(inp, targets=lbl).ce_loss.item())
+
+    loads4 = [0.10, 0.45, 0.35, 0.10]
+    pairs_4to6 = compute_mitotic_schedule(4, 6, expert_loads=loads4)
+    assert pairs_4to6 == [(1, 4), (2, 5)]
+    sd6 = upcycle_state_dict_experts(m4.state_dict(), 4, 6, expert_loads=loads4, seed=42)
+    cfg6 = MCL4CEDConfig(
+        d_model=64,
+        n_heads=4,
+        n_encoder_layers=1,
+        n_decoder_layers=1,
+        ple_dim=16,
+        expert_hidden_dim=128,
+        num_experts=6,
+        top_k=2,
+        max_seq_len=64,
+    )
+    m6 = CognitiveOperatorEnsemble(MCL4CEDBackbone(cfg6), COEConfig(projection_dim=16))
+    m6.load_state_dict(sd6, strict=True)
+    assert m6.backbone.encoder_layers[0].moe.mitotic_pairs == [(1, 4), (2, 5)]
+    m6.eval()
+    with torch.no_grad():
+        ce6 = float(m6.forward_inference(inp, targets=lbl).ce_loss.item())
+    assert abs(ce6 - ce4) < 2e-3
+

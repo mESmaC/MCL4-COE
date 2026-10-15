@@ -619,7 +619,14 @@ def run_cloud_training(
         loss = float(metrics.get("total_loss", 0.0))
         lm = float(metrics.get("lm_loss", 0.0))
         tps = float(metrics.get("tok_per_s", metrics.get("tokens_per_sec", 0.0)))
-        if step == 1 or step % 10 == 0 or step == config.total_steps:
+        if "mitosis_event" in metrics:
+            me = metrics["mitosis_event"]
+            print(
+                f"  [mitosis @ step {step}] action={me.get('action')} | "
+                f"experts={me.get('old_experts', me.get('num_experts'))}->{me.get('new_experts', me.get('num_experts'))} | "
+                f"pairs={me.get('mitotic_pairs')} | params={me.get('parameter_count', 0):,}"
+            )
+        if step == 1 or step % 10 == 0 or step == config.total_steps or "mitosis_event" in metrics:
             val_str = ""
             if "val_bpb" in metrics:
                 val_str += f" | val_bpb={float(metrics['val_bpb']):.4f}"
@@ -628,9 +635,10 @@ def run_cloud_training(
                     f" | val_mcqa={float(metrics['val_mcqa_acc']) * 100.0:.1f}%"
                     f" (n={metrics.get('val_mcqa_n', 0)})"
                 )
+            n_exp = int(metrics.get("num_experts", config.num_experts))
             print(
                 f"  [step {step:>4}/{config.total_steps}] "
-                f"total_loss={loss:.4f} | lm_loss={lm:.4f}{val_str} | tok/s={tps:,.0f}"
+                f"E={n_exp} | total_loss={loss:.4f} | lm_loss={lm:.4f}{val_str} | tok/s={tps:,.0f}"
             )
         cur_ckpts = len(list_checkpoints(run_dir))
         if cur_ckpts > last_synced_ckpt_count:
@@ -1098,6 +1106,7 @@ def main() -> None:
     p_train.add_argument("--run-id", default="colab_mcl4_coe_v1")
     p_train.add_argument("--shards-root", default="/content/data_shards")
     p_train.add_argument("--runs-root", default="/content/runs")
+    p_train.add_argument("--resume-checkpoint", default=None)
     p_train.add_argument("--total-steps", type=int, default=200)
     p_train.add_argument("--checkpoint-every", type=int, default=50)
     p_train.add_argument("--eval-every", type=int, default=100)
@@ -1108,6 +1117,10 @@ def main() -> None:
     p_train.add_argument("--n-encoder-layers", type=int, default=4)
     p_train.add_argument("--n-decoder-layers", type=int, default=4)
     p_train.add_argument("--num-experts", type=int, default=8)
+    p_train.add_argument("--enable-mitosis", action="store_true")
+    p_train.add_argument("--max-experts", type=int, default=12)
+    p_train.add_argument("--mitosis-every", type=int, default=300)
+    p_train.add_argument("--mitosis-step-size", type=int, default=2)
     p_train.add_argument("--recurrence-steps", type=int, default=1)
     p_train.add_argument("--batch-size", type=int, default=8)
     p_train.add_argument("--micro-batch-size", type=int, default=4)
@@ -1164,6 +1177,7 @@ def main() -> None:
             run_id=args.run_id,
             shards_root=args.shards_root,
             runs_root=args.runs_root,
+            resume_checkpoint=args.resume_checkpoint,
             total_steps=args.total_steps,
             checkpoint_every=args.checkpoint_every,
             eval_every=args.eval_every,
@@ -1178,6 +1192,10 @@ def main() -> None:
             expert_hidden_dim=args.d_model * 2,
             num_experts=args.num_experts,
             top_k=min(2, args.num_experts),
+            enable_mitosis=bool(args.enable_mitosis),
+            max_experts=args.max_experts,
+            mitosis_every=args.mitosis_every,
+            mitosis_step_size=args.mitosis_step_size,
             recurrence_steps=args.recurrence_steps,
             use_nvfp4=bool(args.use_nvfp4),
             batch_size=args.batch_size,

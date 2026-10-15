@@ -160,6 +160,43 @@ class SparseMoE(nn.Module):
             SwiGLUExpert(config.d_model, config.expert_hidden_dim)
             for _ in range(config.num_experts)
         )
+        self.mitotic_pairs: list[tuple[int, int]] = []
+
+    def _save_to_state_dict(self, destination: dict, prefix: str, keep_vars: bool) -> None:
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+        if self.mitotic_pairs:
+            destination[prefix + "mitotic_pairs_tensor"] = torch.tensor(
+                self.mitotic_pairs, dtype=torch.long
+            )
+
+    def _load_from_state_dict(
+        self,
+        state_dict: dict,
+        prefix: str,
+        local_metadata: dict,
+        strict: bool,
+        missing_keys: list[str],
+        unexpected_keys: list[str],
+        error_msgs: list[str],
+    ) -> None:
+        mp_key = prefix + "mitotic_pairs_tensor"
+        if mp_key in state_dict:
+            mp_val = state_dict.pop(mp_key)
+            if isinstance(mp_val, torch.Tensor) and mp_val.ndim == 2 and mp_val.shape[1] == 2:
+                self.mitotic_pairs = [
+                    (int(r[0]), int(r[1])) for r in mp_val.detach().cpu().tolist()
+                ]
+            else:
+                self.mitotic_pairs = []
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
     def forward(
         self, x: Tensor, valid: Tensor | None = None
@@ -180,7 +217,19 @@ class SparseMoE(nn.Module):
         with torch.autocast(device_type=x.device.type, enabled=False):
             router_logits = F.linear(active_x.float(), self.router.weight.float())
             probabilities = F.softmax(router_logits, dim=-1)
-            weights, selected = probabilities.topk(self.top_k, dim=-1)
+            routed_probs = probabilities
+            if self.mitotic_pairs:
+                routed_probs = probabilities.clone()
+                for p_idx, c_idx in self.mitotic_pairs:
+                    if 0 <= p_idx < self.num_experts and 0 <= c_idx < self.num_experts and p_idx != c_idx:
+                        p_wins = router_logits[:, p_idx] >= router_logits[:, c_idx]
+                        routed_probs[:, c_idx] = torch.where(
+                            p_wins, torch.zeros_like(routed_probs[:, c_idx]), probabilities[:, c_idx]
+                        )
+                        routed_probs[:, p_idx] = torch.where(
+                            p_wins, probabilities[:, p_idx], torch.zeros_like(routed_probs[:, p_idx])
+                        )
+            weights, selected = routed_probs.topk(self.top_k, dim=-1)
             weights = weights / weights.sum(dim=-1, keepdim=True)
             one_hot_sel = F.one_hot(selected, num_classes=self.num_experts)
             counts_int = one_hot_sel.sum(dim=(0, 1))

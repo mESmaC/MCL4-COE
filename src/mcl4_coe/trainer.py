@@ -122,6 +122,10 @@ class TrainingRunConfig:
     expert_hidden_dim: int = 256
     num_experts: int = 4
     top_k: int = 2
+    enable_mitosis: bool = False
+    max_experts: int = 12
+    mitosis_every: int = 300
+    mitosis_step_size: int = 2
     max_seq_len: int = 2048
     projection_dim: int = 32
     recurrence_steps: int = 1
@@ -188,47 +192,101 @@ class TrainingRunConfig:
         return cls(**filtered)
 
 
+def compute_mitotic_schedule(
+    old_num_experts: int,
+    new_num_experts: int,
+    *,
+    expert_loads: list[float] | None = None,
+    existing_pairs: list[tuple[int, int]] | None = None,
+) -> list[tuple[int, int]]:
+    """Return `(parent_idx, child_idx)` pairs for `child_idx` in `[old_num_experts .. new_num_experts-1]`.
+
+    Prioritizes highest-utilization experts that are not already part of a mitotic twin pair
+    so that twin-gated pairs remain disjoint across multi-stage bounded mitosis (`8 -> 10 -> 12`).
+    """
+    if new_num_experts <= old_num_experts:
+        return []
+    paired = {int(idx) for pair in (existing_pairs or []) for idx in pair}
+    if expert_loads and len(expert_loads) == old_num_experts:
+        unpaired_order = sorted(
+            [i for i in range(old_num_experts) if i not in paired],
+            key=lambda i: float(expert_loads[i]),
+            reverse=True,
+        )
+        paired_order = sorted(
+            [i for i in range(old_num_experts) if i in paired],
+            key=lambda i: float(expert_loads[i]),
+            reverse=True,
+        )
+        parent_order = unpaired_order + paired_order
+    else:
+        unpaired_order = [i for i in range(old_num_experts) if i not in paired]
+        paired_order = [i for i in range(old_num_experts) if i in paired]
+        parent_order = unpaired_order + paired_order
+    if not parent_order:
+        parent_order = list(range(old_num_experts))
+
+    pairs: list[tuple[int, int]] = []
+    for k, new_e in enumerate(range(old_num_experts, new_num_experts)):
+        parent_e = parent_order[k % len(parent_order)]
+        pairs.append((int(parent_e), int(new_e)))
+    return pairs
+
+
 def upcycle_state_dict_experts(
     state_dict: dict[str, torch.Tensor],
     old_num_experts: int,
     new_num_experts: int,
     *,
     expert_loads: list[float] | None = None,
+    existing_pairs: list[tuple[int, int]] | None = None,
     seed: int = 42,
 ) -> dict[str, torch.Tensor]:
-    """Upcycle a `SparseMoE` checkpoint from `old_num_experts` to `new_num_experts` via mitosis.
+    """Upcycle a `SparseMoE` checkpoint from `old_num_experts` to `new_num_experts` via Exact-Ratio Twin-Gated Mitosis.
 
     Clones the highest-utilization parent experts into the new slots `[old_num_experts .. new_num_experts-1]`
-    with symmetric $\\pm \\delta$ orthogonal/Gaussian perturbations ($\\|\\delta\\| = 10^{-3} \\sigma_W$) so the
-    ensemble mean $\\frac{1}{2}(f(x; W_p - \\delta) + f(x; W_p + \\delta))$ is preserved to second order
-    at the split step while breaking gradient symmetry immediately on the next step.
+    with symmetric $\\pm \\delta$ antithetic perturbations ($\\|\\delta\\| = 10^{-3} \\sigma_W$) on both the
+    router rows and SwiGLU FFN projections, while recording `mitotic_pairs_tensor` so `SparseMoE`
+    routes only the winning twin of each mitotic pair into `topk(2)`.
     """
     if new_num_experts <= old_num_experts:
         return state_dict
 
     out = {k: v.clone() for k, v in state_dict.items()}
-    if expert_loads and len(expert_loads) == old_num_experts:
-        parent_order = sorted(
-            range(old_num_experts),
-            key=lambda i: float(expert_loads[i]),
-            reverse=True,
-        )
-    else:
-        parent_order = list(range(old_num_experts))
+    router_suffix = ".moe.router.weight"
+    moe_prefixes = [k[: -len(".router.weight")] for k in out if k.endswith(router_suffix)]
+
+    if existing_pairs is None and moe_prefixes:
+        mp_key0 = f"{sorted(moe_prefixes)[0]}.mitotic_pairs_tensor"
+        if mp_key0 in out and isinstance(out[mp_key0], torch.Tensor) and out[mp_key0].ndim == 2:
+            existing_pairs = [
+                (int(r[0]), int(r[1])) for r in out[mp_key0].detach().cpu().tolist()
+            ]
+
+    added_pairs = compute_mitotic_schedule(
+        old_num_experts,
+        new_num_experts,
+        expert_loads=expert_loads,
+        existing_pairs=existing_pairs,
+    )
+    all_pairs = list(existing_pairs or []) + added_pairs
 
     gen = torch.Generator(device="cpu")
     gen.manual_seed(seed)
 
-    router_suffix = ".moe.router.weight"
-    moe_prefixes = [k[: -len(".router.weight")] for k in out if k.endswith(router_suffix)]
-
     for prefix in sorted(moe_prefixes):
         r_key = f"{prefix}.router.weight"
-        r_weight = out[r_key]
+        r_weight = out[r_key].clone()
         extra_rows = []
-        for new_e in range(old_num_experts, new_num_experts):
-            parent_e = parent_order[(new_e - old_num_experts) % old_num_experts]
-            extra_rows.append(r_weight[parent_e : parent_e + 1].clone())
+        for parent_e, new_e in added_pairs:
+            r_p = r_weight[parent_e : parent_e + 1].clone()
+            r_std = float(r_p.float().std().item())
+            r_delta = (
+                torch.randn(r_p.shape, generator=gen, dtype=torch.float32)
+                * (1e-3 * max(r_std, 1e-5))
+            ).to(r_p.dtype)
+            r_weight[parent_e : parent_e + 1] = r_p - r_delta
+            extra_rows.append(r_p + r_delta)
             for proj in ("up_proj.weight", "down_proj.weight"):
                 p_key = f"{prefix}.experts.{parent_e}.{proj}"
                 c_key = f"{prefix}.experts.{new_e}.{proj}"
@@ -240,6 +298,8 @@ def upcycle_state_dict_experts(
                 out[p_key] = w_p - delta
                 out[c_key] = w_p + delta
         out[r_key] = torch.cat([r_weight, *extra_rows], dim=0)
+        if all_pairs:
+            out[f"{prefix}.mitotic_pairs_tensor"] = torch.tensor(all_pairs, dtype=torch.long)
 
     return out
 
@@ -698,6 +758,7 @@ class MCL4COETrainer:
             "config": self.config.to_dict(),
             "backbone_config": asdict(self.backbone_cfg),
             "coe_config": asdict(self.coe_cfg),
+            "mitotic_pairs": [list(p) for p in self._get_model_mitotic_pairs()],
             "model_state": model_state_cpu(self.model),
             "optimizer_state": opt_state_cpu,
             "sampler_state": self.sampler.state_dict(),
@@ -710,6 +771,217 @@ class MCL4COETrainer:
         _safe_replace(tmp_pt, pt_path)
         _atomic_json(meta_path, meta)
         return meta_path
+
+    def _get_model_mitotic_pairs(self) -> list[tuple[int, int]]:
+        if self.model.backbone.encoder_layers:
+            return list(self.model.backbone.encoder_layers[0].moe.mitotic_pairs)
+        return []
+
+    def _set_model_mitotic_pairs(self, pairs: list[tuple[int, int]]) -> None:
+        clean = [(int(p), int(c)) for p, c in pairs]
+        for layer in list(self.model.backbone.encoder_layers) + list(
+            self.model.backbone.decoder_layers
+        ):
+            layer.moe.mitotic_pairs = list(clean)
+
+    def _upcycle_optimizer_state_dict(
+        self,
+        raw_opt_state: dict[str, Any],
+        old_num_experts: int,
+        new_num_experts: int,
+        added_pairs: list[tuple[int, int]],
+    ) -> bool:
+        """Map and expand AdamW moments (`step`, `exp_avg`, `exp_avg_sq`) across an expert mitosis split."""
+        if not raw_opt_state or not raw_opt_state.get("state"):
+            return False
+        try:
+            new_decay_names = [
+                name for name, p in self.model.named_parameters() if p.requires_grad and p.ndim >= 2
+            ]
+            new_nodecay_names = [
+                name for name, p in self.model.named_parameters() if p.requires_grad and p.ndim < 2
+            ]
+            new_ordered_names = new_decay_names + new_nodecay_names
+            new_expert_tokens = tuple(
+                f".moe.experts.{e}." for e in range(old_num_experts, new_num_experts)
+            )
+            old_ordered_names = [
+                name
+                for name in new_ordered_names
+                if not any(tok in name for tok in new_expert_tokens)
+            ]
+            old_param_ids = [
+                pid
+                for g in raw_opt_state.get("param_groups", [])
+                for pid in g.get("params", [])
+            ]
+            if len(old_param_ids) != len(old_ordered_names):
+                return False
+
+            raw_state = raw_opt_state["state"]
+            old_state_by_name = {
+                name: raw_state[pid]
+                for name, pid in zip(old_ordered_names, old_param_ids)
+                if pid in raw_state
+            }
+            if not old_state_by_name:
+                return False
+
+            child_to_parent = {int(c): int(p) for p, c in added_pairs}
+            new_state: dict[int, dict[str, Any]] = {}
+            for new_idx, name in enumerate(new_ordered_names):
+                if name.endswith(".moe.router.weight") and name in old_state_by_name:
+                    st = old_state_by_name[name]
+                    old_avg = st["exp_avg"].detach().cpu().clone()
+                    old_sq = st["exp_avg_sq"].detach().cpu().clone()
+                    extra_avg = [torch.zeros_like(old_avg[p_e : p_e + 1]) for p_e, _ in added_pairs]
+                    extra_sq = [old_sq[p_e : p_e + 1].clone() for p_e, _ in added_pairs]
+                    step_v = (
+                        st["step"].detach().cpu().clone()
+                        if isinstance(st["step"], torch.Tensor)
+                        else st["step"]
+                    )
+                    new_state[new_idx] = {
+                        "step": step_v,
+                        "exp_avg": torch.cat([old_avg, *extra_avg], dim=0),
+                        "exp_avg_sq": torch.cat([old_sq, *extra_sq], dim=0),
+                    }
+                    continue
+
+                matched_child: int | None = None
+                for c_e in child_to_parent:
+                    if f".moe.experts.{c_e}." in name:
+                        matched_child = c_e
+                        break
+                if matched_child is not None:
+                    p_e = child_to_parent[matched_child]
+                    parent_name = name.replace(
+                        f".moe.experts.{matched_child}.", f".moe.experts.{p_e}."
+                    )
+                    if parent_name in old_state_by_name:
+                        st = old_state_by_name[parent_name]
+                        p_avg = st["exp_avg"].detach().cpu()
+                        p_sq = st["exp_avg_sq"].detach().cpu().clone()
+                        step_v = (
+                            st["step"].detach().cpu().clone()
+                            if isinstance(st["step"], torch.Tensor)
+                            else st["step"]
+                        )
+                        new_state[new_idx] = {
+                            "step": step_v,
+                            "exp_avg": torch.zeros_like(p_avg),
+                            "exp_avg_sq": p_sq,
+                        }
+                    continue
+
+                if name in old_state_by_name:
+                    st = old_state_by_name[name]
+                    step_v = (
+                        st["step"].detach().cpu().clone()
+                        if isinstance(st["step"], torch.Tensor)
+                        else st["step"]
+                    )
+                    new_state[new_idx] = {
+                        "step": step_v,
+                        "exp_avg": st["exp_avg"].detach().cpu().clone(),
+                        "exp_avg_sq": st["exp_avg_sq"].detach().cpu().clone(),
+                    }
+
+            target_opt_dict = self.optimizer.state_dict()
+            target_opt_dict["state"] = new_state
+            self.optimizer.load_state_dict(target_opt_dict)
+            return True
+        except Exception:
+            return False
+
+    def perform_bounded_mitosis(self, step: int) -> dict[str, Any] | None:
+        """Perform bounded in-flight expert mitosis (`old_e -> new_e <= max_experts`) or steady-state check."""
+        if not self.config.enable_mitosis or self.config.mitosis_every <= 0:
+            return None
+        base_step = getattr(self, "initial_step", 0)
+        local_step = step - base_step
+        if local_step <= 1 or (local_step % self.config.mitosis_every != 0):
+            return None
+
+        old_e = int(self.model.backbone.config.num_experts)
+        max_e = max(old_e, int(self.config.max_experts))
+        existing_pairs = self._get_model_mitotic_pairs()
+        loads_for_split = list(
+            getattr(self, "_ema_expert_loads", None)
+            or self.latest_metrics.get("expert_load")
+            or [1.0 / max(1, old_e)] * old_e
+        )
+
+        if old_e < max_e:
+            new_e = min(max_e, old_e + max(1, int(self.config.mitosis_step_size)))
+            added_pairs = compute_mitotic_schedule(
+                old_e,
+                new_e,
+                expert_loads=loads_for_split,
+                existing_pairs=existing_pairs,
+            )
+            cur_model_state = model_state_cpu(self.model)
+            raw_opt = self.optimizer.state_dict()
+            cur_opt_state = {
+                "param_groups": raw_opt.get("param_groups", []),
+                "state": {
+                    k: {
+                        sk: (sv.detach().cpu().clone() if isinstance(sv, torch.Tensor) else sv)
+                        for sk, sv in v.items()
+                    }
+                    for k, v in raw_opt.get("state", {}).items()
+                },
+            }
+            upcycled_state = upcycle_state_dict_experts(
+                cur_model_state,
+                old_e,
+                new_e,
+                expert_loads=loads_for_split,
+                existing_pairs=existing_pairs,
+                seed=self.config.seed + step,
+            )
+            saved_ornith = self.ornith_improver
+            self.config.num_experts = new_e
+            self._build_model_and_optimizer()
+            self.ornith_improver = saved_ornith
+            self.model.load_state_dict(upcycled_state, strict=False)
+            if self.config.cpu_offload_optimizer:
+                prepare_model(
+                    self.model,
+                    device=self.device,
+                    bf16_working_weights=(self.device.type == "cuda" and not self.config.use_nvfp4),
+                    preserve_master_weights=False,
+                )
+            else:
+                self.model.to(self.device)
+                self._upcycle_optimizer_state_dict(cur_opt_state, old_e, new_e, added_pairs)
+
+            new_ema = list(loads_for_split) + [0.0] * (new_e - old_e)
+            for p_e, c_e in added_pairs:
+                half = 0.5 * float(new_ema[p_e])
+                new_ema[p_e] = half
+                new_ema[c_e] = half
+            self._ema_expert_loads = new_ema
+            all_pairs = self._get_model_mitotic_pairs()
+            return {
+                "step": step,
+                "action": "expand",
+                "old_experts": old_e,
+                "new_experts": new_e,
+                "added_pairs": [list(p) for p in added_pairs],
+                "mitotic_pairs": [list(p) for p in all_pairs],
+                "parameter_count": parameter_count(self.model),
+            }
+
+        min_load = float(min(loads_for_split)) if loads_for_split else 0.0
+        return {
+            "step": step,
+            "action": "bounded_steady_state",
+            "num_experts": old_e,
+            "min_expert_load": round(min_load, 4),
+            "mitotic_pairs": [list(p) for p in existing_pairs],
+            "parameter_count": parameter_count(self.model),
+        }
 
     def load_checkpoint(self, checkpoint_path: str | Path) -> None:
         """Restore model weights (upcycling experts if `num_experts` increased), optimizer state, and sampler state."""
@@ -730,17 +1002,28 @@ class MCL4COETrainer:
         b_cfg = payload.get("backbone_config", {})
         ckpt_experts = int(b_cfg.get("num_experts", self.config.num_experts))
         model_state = payload["model_state"]
+        existing_pairs = [tuple(p) for p in payload.get("mitotic_pairs", [])]
+        added_pairs: list[tuple[int, int]] = []
         if self.config.num_experts > ckpt_experts:
             prev_loads = payload.get("latest_metrics", {}).get("expert_load")
+            added_pairs = compute_mitotic_schedule(
+                ckpt_experts,
+                self.config.num_experts,
+                expert_loads=prev_loads,
+                existing_pairs=existing_pairs,
+            )
             model_state = upcycle_state_dict_experts(
                 model_state,
                 ckpt_experts,
                 self.config.num_experts,
                 expert_loads=prev_loads,
+                existing_pairs=existing_pairs,
                 seed=self.config.seed,
             )
 
         self.model.load_state_dict(model_state, strict=False)
+        if existing_pairs and not self._get_model_mitotic_pairs():
+            self._set_model_mitotic_pairs(existing_pairs + added_pairs)
         if self.config.cpu_offload_optimizer:
             prepare_model(
                 self.model,
@@ -756,15 +1039,20 @@ class MCL4COETrainer:
                         )
         else:
             self.model.to(self.device)
-            if (
-                self.config.num_experts == ckpt_experts
-                and payload.get("optimizer_state")
-            ):
-                try:
-                    self.optimizer.load_state_dict(payload["optimizer_state"])
-                    self._optimizer_restored = True
-                except Exception:
-                    self._optimizer_restored = False
+            if payload.get("optimizer_state"):
+                if self.config.num_experts == ckpt_experts:
+                    try:
+                        self.optimizer.load_state_dict(payload["optimizer_state"])
+                        self._optimizer_restored = True
+                    except Exception:
+                        self._optimizer_restored = False
+                elif self.config.num_experts > ckpt_experts:
+                    self._optimizer_restored = self._upcycle_optimizer_state_dict(
+                        payload["optimizer_state"],
+                        ckpt_experts,
+                        self.config.num_experts,
+                        added_pairs,
+                    )
         if "sampler_state" in payload:
             self.sampler.load_state_dict(payload["sampler_state"])
         self.current_step = int(payload.get("step", 0))
@@ -773,6 +1061,15 @@ class MCL4COETrainer:
         self.cumulative_wall_s = float(payload.get("cumulative_wall_s", 0.0))
         self.cumulative_tokens = int(payload.get("cumulative_tokens", 0))
         self.latest_metrics = dict(payload.get("latest_metrics", {}))
+        init_loads = list(self.latest_metrics.get("expert_load", []))
+        if init_loads and len(init_loads) == ckpt_experts and self.config.num_experts > ckpt_experts:
+            init_loads = init_loads + [0.0] * (self.config.num_experts - ckpt_experts)
+            for p_e, c_e in added_pairs:
+                half = 0.5 * float(init_loads[p_e])
+                init_loads[p_e] = half
+                init_loads[c_e] = half
+        if init_loads and len(init_loads) == self.config.num_experts:
+            self._ema_expert_loads = [float(x) for x in init_loads]
 
         # Carry forward parent run's Dream-RSI world archive (`dream_state.json`) if present
         if (
@@ -880,6 +1177,7 @@ class MCL4COETrainer:
 
                 t_step0 = time.perf_counter()
                 self.current_step = step
+                mitosis_event = self.perform_bounded_mitosis(step)
                 if warm_continuation:
                     progress = min(1.0, max(0.0, step / max(1, self.config.total_steps)))
                 else:
@@ -1047,6 +1345,13 @@ class MCL4COETrainer:
                 step_abs_loss = float(step_abs_gpu.item())
                 step_total_loss = float(step_total_gpu.item())
                 expert_loads = [round(float(x), 4) for x in step_expert_load_gpu.cpu().tolist()]
+                prev_ema = getattr(self, "_ema_expert_loads", None)
+                if prev_ema is not None and len(prev_ema) == len(expert_loads):
+                    self._ema_expert_loads = [
+                        0.9 * float(p) + 0.1 * float(c) for p, c in zip(prev_ema, expert_loads)
+                    ]
+                else:
+                    self._ema_expert_loads = [float(c) for c in expert_loads]
                 step_elapsed = time.perf_counter() - t_step0
                 self.cumulative_wall_s += step_elapsed
                 self.cumulative_tokens += step_unmasked_tokens
@@ -1084,9 +1389,11 @@ class MCL4COETrainer:
 
                 run_val = (
                     step == 1
+                    or (self.config.eval_every > 0 and step == start_step)
                     or (self.config.eval_every > 0 and step % self.config.eval_every == 0)
                     or step % self.config.checkpoint_every == 0
                     or step == self.config.total_steps
+                    or (mitosis_event is not None and mitosis_event.get("action") == "expand")
                 )
                 val_telemetry: dict[str, Any] = {}
                 if run_val:
@@ -1108,6 +1415,7 @@ class MCL4COETrainer:
                     else {"forward": 0, "dgrad": 0, "wgrad": 0, "sparse_2to4": 0}
                 )
 
+                active_pairs = self._get_model_mitotic_pairs()
                 record: dict[str, Any] = {
                     "step": step,
                     "total_steps": self.config.total_steps,
@@ -1134,6 +1442,8 @@ class MCL4COETrainer:
                     "weights": {k: round(v, 4) for k, v in cur_weights.items()},
                     "nvfp4_gemms": gemm_counts["forward"] + gemm_counts["dgrad"] + gemm_counts["wgrad"],
                     "nvfp4_sparse_2to4_gemms": gemm_counts.get("sparse_2to4", 0),
+                    **({"mitotic_pairs": [list(p) for p in active_pairs]} if active_pairs else {}),
+                    **({"mitosis_event": mitosis_event} if mitosis_event is not None else {}),
                     **ornith_telemetry,
                     **val_telemetry,
                     **{k: round(v, 5) for k, v in avg_track_losses.items()},
@@ -1143,7 +1453,12 @@ class MCL4COETrainer:
                     fh.write(json.dumps(record, sort_keys=True) + "\n")
 
                 sample_trace: str | None = None
-                if step % self.config.sample_every == 0 or step == 1 or step == self.config.total_steps:
+                if (
+                    step % self.config.sample_every == 0
+                    or step == 1
+                    or step == start_step
+                    or step == self.config.total_steps
+                ):
                     sample_trace = self.controller.generate_uta(
                         self.config.sample_prompt,
                         max_new_tokens=256,

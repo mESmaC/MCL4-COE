@@ -1,0 +1,4904 @@
+{
+  "accepted_revisions": 2,
+  "cycle": 66,
+  "discarded_worlds": 18,
+  "initial_program": {
+    "patience": 0,
+    "rank": [
+      "SHALLOW",
+      "SCORE"
+    ],
+    "root_every": 1,
+    "rounds": 3,
+    "stop": null,
+    "width": 1
+  },
+  "initial_score": 0.615037,
+  "latest_score": 0.703206,
+  "program": {
+    "patience": 2,
+    "rank": [
+      "UTILITY",
+      "SCORE",
+      "GAIN",
+      "CONFIDENCE"
+    ],
+    "root_every": 1,
+    "rounds": 3,
+    "stop": null,
+    "width": 2
+  },
+  "program_text": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+  "recent_receipts": [
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 35,
+      "final_replay_score": 0.70023,
+      "initial_replay_score": 0.70023,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0035_code_odd_sum_19_5"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 36,
+      "final_replay_score": 0.700312,
+      "initial_replay_score": 0.700312,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0036_bitmask_xor_18_12_6"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 37,
+      "final_replay_score": 0.70039,
+      "initial_replay_score": 0.70039,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0037_code_linear_17_9_1"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 38,
+      "final_replay_score": 0.700464,
+      "initial_replay_score": 0.700464,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0038_code_odd_sum_16_8"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 39,
+      "final_replay_score": 0.700534,
+      "initial_replay_score": 0.700534,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0039_bitmask_xor_15_3_9"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 40,
+      "final_replay_score": 0.700601,
+      "initial_replay_score": 0.700601,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0040_code_linear_14_13_4"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 41,
+      "final_replay_score": 0.700665,
+      "initial_replay_score": 0.700665,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0041_code_odd_sum_13_11"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 42,
+      "final_replay_score": 0.700725,
+      "initial_replay_score": 0.700725,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0042_bitmask_xor_12_7_3"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 43,
+      "final_replay_score": 0.700783,
+      "initial_replay_score": 0.700783,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0043_code_linear_11_4_7"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 44,
+      "final_replay_score": 0.700838,
+      "initial_replay_score": 0.700838,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0044_code_odd_sum_10_5"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 45,
+      "final_replay_score": 0.700891,
+      "initial_replay_score": 0.700891,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0045_bitmask_xor_9_11_6"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 46,
+      "final_replay_score": 0.700941,
+      "initial_replay_score": 0.700941,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0046_code_linear_8_8_1"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 47,
+      "final_replay_score": 0.700989,
+      "initial_replay_score": 0.700989,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0047_code_odd_sum_7_8"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 48,
+      "final_replay_score": 0.701035,
+      "initial_replay_score": 0.701035,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0048_bitmask_xor_6_2_9"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 49,
+      "final_replay_score": 0.702504,
+      "initial_replay_score": 0.702504,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0049_code_linear_5_12_4"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 50,
+      "final_replay_score": 0.703172,
+      "initial_replay_score": 0.703172,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0050_code_odd_sum_4_11"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 51,
+      "final_replay_score": 0.703174,
+      "initial_replay_score": 0.703174,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0051_bitmask_xor_3_6_3"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 52,
+      "final_replay_score": 0.703196,
+      "initial_replay_score": 0.703196,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0052_code_linear_21_3_7"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 53,
+      "final_replay_score": 0.703198,
+      "initial_replay_score": 0.703198,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0053_code_odd_sum_20_5"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 54,
+      "final_replay_score": 0.703199,
+      "initial_replay_score": 0.703199,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0054_bitmask_xor_19_10_6"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 55,
+      "final_replay_score": 0.703204,
+      "initial_replay_score": 0.703204,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0055_code_linear_18_7_1"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 56,
+      "final_replay_score": 0.703204,
+      "initial_replay_score": 0.703204,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0056_code_odd_sum_17_8"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 57,
+      "final_replay_score": 0.703204,
+      "initial_replay_score": 0.703204,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0057_bitmask_xor_16_14_9"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 58,
+      "final_replay_score": 0.703204,
+      "initial_replay_score": 0.703204,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0058_code_linear_15_11_4"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 59,
+      "final_replay_score": 0.703204,
+      "initial_replay_score": 0.703204,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0059_code_odd_sum_14_11"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 60,
+      "final_replay_score": 0.703204,
+      "initial_replay_score": 0.703204,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0060_bitmask_xor_13_5_3"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 61,
+      "final_replay_score": 0.703205,
+      "initial_replay_score": 0.703205,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0061_code_linear_12_2_7"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 62,
+      "final_replay_score": 0.703205,
+      "initial_replay_score": 0.703205,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0062_code_odd_sum_11_5"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 63,
+      "final_replay_score": 0.703205,
+      "initial_replay_score": 0.703205,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0063_bitmask_xor_10_9_6"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 64,
+      "final_replay_score": 0.703205,
+      "initial_replay_score": 0.703205,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0064_code_linear_9_6_1"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 65,
+      "final_replay_score": 0.703206,
+      "initial_replay_score": 0.703206,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0065_code_odd_sum_8_8"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 66,
+      "final_replay_score": 0.703206,
+      "initial_replay_score": 0.703206,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0066_bitmask_xor_7_13_9"
+    }
+  ],
+  "total_calls": 264,
+  "total_replays_dreamed": 40800,
+  "total_revisions": 198,
+  "version": 1,
+  "worlds": [
+    {
+      "metadata": {
+        "cycle": 19,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_linear_16_11_1"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53434,
+            "deduction_entailed": 0.52074,
+            "depth": 1,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.9899,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.54695,
+            "deduction_entailed": 0.50202,
+            "depth": 2,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99961,
+            "node_id": 2,
+            "novelty": 0.00052,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98965,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.5422,
+            "deduction_entailed": 0.50657,
+            "depth": 1,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00035,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98987,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.54511,
+            "deduction_entailed": 0.49528,
+            "depth": 3,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99961,
+            "node_id": 4,
+            "novelty": 0.00034,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98973,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0019_code_linear_16_11_1"
+    },
+    {
+      "metadata": {
+        "cycle": 20,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_15_8"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53124,
+            "deduction_entailed": 0.49201,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99961,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98968,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53429,
+            "deduction_entailed": 0.50713,
+            "depth": 2,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00042,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98974,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53596,
+            "deduction_entailed": 0.49724,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99961,
+            "node_id": 3,
+            "novelty": 0.00036,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98962,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.54571,
+            "deduction_entailed": 0.48189,
+            "depth": 3,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00031,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98988,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0020_code_odd_sum_15_8"
+    },
+    {
+      "metadata": {
+        "cycle": 21,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_14_5_9"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.54155,
+            "deduction_entailed": 0.48745,
+            "depth": 1,
+            "expected_verdict": 0.99964,
+            "gold_prob": 0.99961,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98986,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99973
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.55626,
+            "deduction_entailed": 0.50395,
+            "depth": 2,
+            "expected_verdict": 0.99962,
+            "gold_prob": 0.99959,
+            "node_id": 2,
+            "novelty": 0.00098,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98987,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52779,
+            "deduction_entailed": 0.45144,
+            "depth": 1,
+            "expected_verdict": 0.99963,
+            "gold_prob": 0.9996,
+            "node_id": 3,
+            "novelty": 0.00021,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98985,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99972
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.54551,
+            "deduction_entailed": 0.48827,
+            "depth": 3,
+            "expected_verdict": 0.9996,
+            "gold_prob": 0.99956,
+            "node_id": 4,
+            "novelty": 0.0003,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98984,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0021_bitmask_xor_14_5_9"
+    },
+    {
+      "metadata": {
+        "cycle": 22,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_linear_13_2_4"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53238,
+            "deduction_entailed": 0.477,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99961,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98969,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.56157,
+            "deduction_entailed": 0.50624,
+            "depth": 2,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99961,
+            "node_id": 2,
+            "novelty": 0.00117,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98952,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.54131,
+            "deduction_entailed": 0.48806,
+            "depth": 1,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00074,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98983,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.5444,
+            "deduction_entailed": 0.50208,
+            "depth": 3,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00037,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98974,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0022_code_linear_13_2_4"
+    },
+    {
+      "metadata": {
+        "cycle": 23,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_12_11"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52261,
+            "deduction_entailed": 0.4944,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98983,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.50898,
+            "deduction_entailed": 0.49676,
+            "depth": 2,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99961,
+            "node_id": 2,
+            "novelty": 0.00073,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98965,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52253,
+            "deduction_entailed": 0.48438,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00046,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98975,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52415,
+            "deduction_entailed": 0.48609,
+            "depth": 3,
+            "expected_verdict": 0.99966,
+            "gold_prob": 0.99961,
+            "node_id": 4,
+            "novelty": 0.00039,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98977,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0023_code_odd_sum_12_11"
+    },
+    {
+      "metadata": {
+        "cycle": 24,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_11_9_3"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51586,
+            "deduction_entailed": 0.49512,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98969,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52941,
+            "deduction_entailed": 0.4817,
+            "depth": 2,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00054,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.9897,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.5229,
+            "deduction_entailed": 0.47027,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00087,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98974,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.5283,
+            "deduction_entailed": 0.47712,
+            "depth": 3,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00061,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98975,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0024_bitmask_xor_11_9_3"
+    },
+    {
+      "metadata": {
+        "cycle": 25,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_linear_10_6_7"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53247,
+            "deduction_entailed": 0.50499,
+            "depth": 1,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98977,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52555,
+            "deduction_entailed": 0.47881,
+            "depth": 2,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99961,
+            "node_id": 2,
+            "novelty": 0.00053,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98969,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52847,
+            "deduction_entailed": 0.49363,
+            "depth": 1,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00036,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98976,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.54831,
+            "deduction_entailed": 0.52806,
+            "depth": 3,
+            "expected_verdict": 0.99966,
+            "gold_prob": 0.9996,
+            "node_id": 4,
+            "novelty": 0.00021,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98951,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0025_code_linear_10_6_7"
+    },
+    {
+      "metadata": {
+        "cycle": 26,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_9_5"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52417,
+            "deduction_entailed": 0.51874,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98968,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.49816,
+            "deduction_entailed": 0.48496,
+            "depth": 2,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00061,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98952,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51398,
+            "deduction_entailed": 0.49839,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00036,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98965,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51226,
+            "deduction_entailed": 0.50723,
+            "depth": 3,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00019,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98957,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0026_code_odd_sum_9_5"
+    },
+    {
+      "metadata": {
+        "cycle": 27,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_8_13_6"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.55161,
+            "deduction_entailed": 0.51766,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98963,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53084,
+            "deduction_entailed": 0.50013,
+            "depth": 2,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00033,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98967,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53769,
+            "deduction_entailed": 0.49091,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00031,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98966,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.54082,
+            "deduction_entailed": 0.507,
+            "depth": 3,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00025,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98956,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0027_bitmask_xor_8_13_6"
+    },
+    {
+      "metadata": {
+        "cycle": 28,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_linear_7_10_1"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.5253,
+            "deduction_entailed": 0.44973,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99961,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98948,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.54418,
+            "deduction_entailed": 0.48202,
+            "depth": 2,
+            "expected_verdict": 0.99966,
+            "gold_prob": 0.9996,
+            "node_id": 2,
+            "novelty": 0.00052,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98914,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.55894,
+            "deduction_entailed": 0.52659,
+            "depth": 1,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00044,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98961,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53392,
+            "deduction_entailed": 0.4667,
+            "depth": 3,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99961,
+            "node_id": 4,
+            "novelty": 0.00032,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98935,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0028_code_linear_7_10_1"
+    },
+    {
+      "metadata": {
+        "cycle": 29,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_6_8"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53172,
+            "deduction_entailed": 0.51573,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98955,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52859,
+            "deduction_entailed": 0.49929,
+            "depth": 2,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00065,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.9895,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52949,
+            "deduction_entailed": 0.4955,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00035,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98957,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52054,
+            "deduction_entailed": 0.50192,
+            "depth": 3,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00025,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98957,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0029_code_odd_sum_6_8"
+    },
+    {
+      "metadata": {
+        "cycle": 30,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_5_4_9"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53044,
+            "deduction_entailed": 0.49712,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98957,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53464,
+            "deduction_entailed": 0.47333,
+            "depth": 2,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00062,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98953,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.54259,
+            "deduction_entailed": 0.48955,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00036,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98954,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53536,
+            "deduction_entailed": 0.5078,
+            "depth": 3,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00037,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98946,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0030_bitmask_xor_5_4_9"
+    },
+    {
+      "metadata": {
+        "cycle": 31,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_linear_4_14_4"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.548,
+            "deduction_entailed": 0.50514,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98942,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.55036,
+            "deduction_entailed": 0.50102,
+            "depth": 2,
+            "expected_verdict": 0.99966,
+            "gold_prob": 0.9996,
+            "node_id": 2,
+            "novelty": 0.00037,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98923,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.54751,
+            "deduction_entailed": 0.47997,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00042,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98945,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.55931,
+            "deduction_entailed": 0.47535,
+            "depth": 3,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99961,
+            "node_id": 4,
+            "novelty": 0.00032,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98949,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0031_code_linear_4_14_4"
+    },
+    {
+      "metadata": {
+        "cycle": 32,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_3_11"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.55288,
+            "deduction_entailed": 0.48388,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.9895,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.5609,
+            "deduction_entailed": 0.50416,
+            "depth": 2,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00036,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.9895,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.56654,
+            "deduction_entailed": 0.52167,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00059,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98936,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.54282,
+            "deduction_entailed": 0.49864,
+            "depth": 3,
+            "expected_verdict": 0.99966,
+            "gold_prob": 0.99961,
+            "node_id": 4,
+            "novelty": 0.00039,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98938,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0032_code_odd_sum_3_11"
+    },
+    {
+      "metadata": {
+        "cycle": 33,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_21_8_3"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.55341,
+            "deduction_entailed": 0.49624,
+            "depth": 1,
+            "expected_verdict": 0.99964,
+            "gold_prob": 0.99961,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98935,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99973
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.54925,
+            "deduction_entailed": 0.50193,
+            "depth": 2,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00026,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98947,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.55752,
+            "deduction_entailed": 0.50187,
+            "depth": 1,
+            "expected_verdict": 0.99964,
+            "gold_prob": 0.99961,
+            "node_id": 3,
+            "novelty": 0.0003,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98927,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99973
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.55172,
+            "deduction_entailed": 0.48574,
+            "depth": 3,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00038,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98948,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0033_bitmask_xor_21_8_3"
+    },
+    {
+      "metadata": {
+        "cycle": 34,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_linear_20_5_7"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53721,
+            "deduction_entailed": 0.50988,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98948,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52912,
+            "deduction_entailed": 0.49607,
+            "depth": 2,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99961,
+            "node_id": 2,
+            "novelty": 0.00052,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.9894,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.54681,
+            "deduction_entailed": 0.53385,
+            "depth": 1,
+            "expected_verdict": 0.99966,
+            "gold_prob": 0.9996,
+            "node_id": 3,
+            "novelty": 0.00036,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98941,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53258,
+            "deduction_entailed": 0.48894,
+            "depth": 3,
+            "expected_verdict": 0.99966,
+            "gold_prob": 0.9996,
+            "node_id": 4,
+            "novelty": 0.00087,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98937,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0034_code_linear_20_5_7"
+    },
+    {
+      "metadata": {
+        "cycle": 35,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_19_5"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52741,
+            "deduction_entailed": 0.49876,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.9996,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98901,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99973
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51163,
+            "deduction_entailed": 0.47558,
+            "depth": 2,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.9996,
+            "node_id": 2,
+            "novelty": 0.00074,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98911,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52103,
+            "deduction_entailed": 0.49398,
+            "depth": 1,
+            "expected_verdict": 0.99966,
+            "gold_prob": 0.9996,
+            "node_id": 3,
+            "novelty": 0.0004,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98898,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52584,
+            "deduction_entailed": 0.49861,
+            "depth": 3,
+            "expected_verdict": 0.99964,
+            "gold_prob": 0.99959,
+            "node_id": 4,
+            "novelty": 0.00041,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.9889,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0035_code_odd_sum_19_5"
+    },
+    {
+      "metadata": {
+        "cycle": 36,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_18_12_6"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53083,
+            "deduction_entailed": 0.49768,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98935,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99973
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51946,
+            "deduction_entailed": 0.48111,
+            "depth": 2,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00053,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98928,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.5359,
+            "deduction_entailed": 0.48998,
+            "depth": 1,
+            "expected_verdict": 0.99964,
+            "gold_prob": 0.99961,
+            "node_id": 3,
+            "novelty": 0.00029,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98924,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99973
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52365,
+            "deduction_entailed": 0.49023,
+            "depth": 3,
+            "expected_verdict": 0.99963,
+            "gold_prob": 0.9996,
+            "node_id": 4,
+            "novelty": 0.00025,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98914,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0036_bitmask_xor_18_12_6"
+    },
+    {
+      "metadata": {
+        "cycle": 37,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_linear_17_9_1"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52232,
+            "deduction_entailed": 0.47338,
+            "depth": 1,
+            "expected_verdict": 0.99966,
+            "gold_prob": 0.9996,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.9891,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51456,
+            "deduction_entailed": 0.47103,
+            "depth": 2,
+            "expected_verdict": 0.99964,
+            "gold_prob": 0.99958,
+            "node_id": 2,
+            "novelty": 0.00027,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98888,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.55032,
+            "deduction_entailed": 0.50181,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99959,
+            "node_id": 3,
+            "novelty": 0.00046,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98889,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99973
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.5379,
+            "deduction_entailed": 0.48264,
+            "depth": 3,
+            "expected_verdict": 0.99966,
+            "gold_prob": 0.9996,
+            "node_id": 4,
+            "novelty": 0.00029,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98923,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0037_code_linear_17_9_1"
+    },
+    {
+      "metadata": {
+        "cycle": 38,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_16_8"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52717,
+            "deduction_entailed": 0.48794,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99961,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98921,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53347,
+            "deduction_entailed": 0.46796,
+            "depth": 2,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00059,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98928,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.54225,
+            "deduction_entailed": 0.48876,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00055,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98932,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53425,
+            "deduction_entailed": 0.48237,
+            "depth": 3,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00035,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98937,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0038_code_odd_sum_16_8"
+    },
+    {
+      "metadata": {
+        "cycle": 39,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_15_3_9"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52496,
+            "deduction_entailed": 0.48053,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98913,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99973
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52144,
+            "deduction_entailed": 0.48118,
+            "depth": 2,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00075,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.9893,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53657,
+            "deduction_entailed": 0.51255,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00052,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98933,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53913,
+            "deduction_entailed": 0.50336,
+            "depth": 3,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00065,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98937,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0039_bitmask_xor_15_3_9"
+    },
+    {
+      "metadata": {
+        "cycle": 40,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_linear_14_13_4"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52812,
+            "deduction_entailed": 0.51695,
+            "depth": 1,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98924,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52765,
+            "deduction_entailed": 0.49241,
+            "depth": 2,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00065,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98916,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52757,
+            "deduction_entailed": 0.47829,
+            "depth": 1,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00057,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.9893,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52452,
+            "deduction_entailed": 0.49188,
+            "depth": 3,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.0004,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98929,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0040_code_linear_14_13_4"
+    },
+    {
+      "metadata": {
+        "cycle": 41,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_13_11"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53969,
+            "deduction_entailed": 0.52264,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.9893,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51467,
+            "deduction_entailed": 0.48576,
+            "depth": 2,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00056,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98922,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51954,
+            "deduction_entailed": 0.49084,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00045,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98923,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52778,
+            "deduction_entailed": 0.50728,
+            "depth": 3,
+            "expected_verdict": 0.99966,
+            "gold_prob": 0.99961,
+            "node_id": 4,
+            "novelty": 0.00037,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98925,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0041_code_odd_sum_13_11"
+    },
+    {
+      "metadata": {
+        "cycle": 42,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_12_7_3"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51073,
+            "deduction_entailed": 0.46228,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99961,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98912,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99973
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52319,
+            "deduction_entailed": 0.49304,
+            "depth": 2,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00053,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98915,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53577,
+            "deduction_entailed": 0.48729,
+            "depth": 1,
+            "expected_verdict": 0.99964,
+            "gold_prob": 0.99961,
+            "node_id": 3,
+            "novelty": 0.00073,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98916,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99973
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.5228,
+            "deduction_entailed": 0.49069,
+            "depth": 3,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99961,
+            "node_id": 4,
+            "novelty": 0.00037,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98903,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0042_bitmask_xor_12_7_3"
+    },
+    {
+      "metadata": {
+        "cycle": 43,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_linear_11_4_7"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.54759,
+            "deduction_entailed": 0.49921,
+            "depth": 1,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98929,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.5359,
+            "deduction_entailed": 0.51407,
+            "depth": 2,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00038,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98932,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53331,
+            "deduction_entailed": 0.49616,
+            "depth": 1,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00025,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98928,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52054,
+            "deduction_entailed": 0.48814,
+            "depth": 3,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00077,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98925,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0043_code_linear_11_4_7"
+    },
+    {
+      "metadata": {
+        "cycle": 44,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_10_5"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.5393,
+            "deduction_entailed": 0.48448,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98921,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52653,
+            "deduction_entailed": 0.4977,
+            "depth": 2,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00062,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98922,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53171,
+            "deduction_entailed": 0.47709,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00026,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98925,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52674,
+            "deduction_entailed": 0.49079,
+            "depth": 3,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.0004,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98919,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0044_code_odd_sum_10_5"
+    },
+    {
+      "metadata": {
+        "cycle": 45,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_9_11_6"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53671,
+            "deduction_entailed": 0.51184,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99961,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98916,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99973
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53598,
+            "deduction_entailed": 0.50625,
+            "depth": 2,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00048,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.9892,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.5315,
+            "deduction_entailed": 0.47898,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00024,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98922,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.54064,
+            "deduction_entailed": 0.51391,
+            "depth": 3,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00043,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98925,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0045_bitmask_xor_9_11_6"
+    },
+    {
+      "metadata": {
+        "cycle": 46,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_linear_8_8_1"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53489,
+            "deduction_entailed": 0.51283,
+            "depth": 1,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98913,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53806,
+            "deduction_entailed": 0.48802,
+            "depth": 2,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.0006,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98913,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52634,
+            "deduction_entailed": 0.50344,
+            "depth": 1,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99963,
+            "node_id": 3,
+            "novelty": 0.00027,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98925,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99976
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52416,
+            "deduction_entailed": 0.49526,
+            "depth": 3,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00021,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98923,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0046_code_linear_8_8_1"
+    },
+    {
+      "metadata": {
+        "cycle": 47,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_7_8"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52157,
+            "deduction_entailed": 0.4939,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98909,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51956,
+            "deduction_entailed": 0.45301,
+            "depth": 2,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00043,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98919,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52965,
+            "deduction_entailed": 0.49585,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00049,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98915,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53348,
+            "deduction_entailed": 0.49499,
+            "depth": 3,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00033,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98918,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0047_code_odd_sum_7_8"
+    },
+    {
+      "metadata": {
+        "cycle": 48,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_6_2_9"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53623,
+            "deduction_entailed": 0.49205,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98919,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52645,
+            "deduction_entailed": 0.48267,
+            "depth": 2,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00053,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98921,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.54203,
+            "deduction_entailed": 0.50302,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00021,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98919,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.55136,
+            "deduction_entailed": 0.50989,
+            "depth": 3,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99961,
+            "node_id": 4,
+            "novelty": 0.00025,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98913,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0048_bitmask_xor_6_2_9"
+    },
+    {
+      "metadata": {
+        "cycle": 49,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_linear_5_12_4"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52384,
+            "deduction_entailed": 0.47463,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99961,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98902,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52566,
+            "deduction_entailed": 0.47622,
+            "depth": 2,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00054,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98909,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51029,
+            "deduction_entailed": 0.46623,
+            "depth": 1,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00038,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98914,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52985,
+            "deduction_entailed": 0.47961,
+            "depth": 3,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00055,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98905,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0049_code_linear_5_12_4"
+    },
+    {
+      "metadata": {
+        "cycle": 50,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_4_11"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51132,
+            "deduction_entailed": 0.47743,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.9891,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51768,
+            "deduction_entailed": 0.49803,
+            "depth": 2,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00046,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98905,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52312,
+            "deduction_entailed": 0.49311,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00061,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98914,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.50355,
+            "deduction_entailed": 0.47564,
+            "depth": 3,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00041,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98914,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0050_code_odd_sum_4_11"
+    },
+    {
+      "metadata": {
+        "cycle": 51,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_3_6_3"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.54102,
+            "deduction_entailed": 0.50628,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98916,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51935,
+            "deduction_entailed": 0.49519,
+            "depth": 2,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00055,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98914,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52761,
+            "deduction_entailed": 0.48432,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00032,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98912,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.54071,
+            "deduction_entailed": 0.49418,
+            "depth": 3,
+            "expected_verdict": 0.99966,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.0004,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98917,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0051_bitmask_xor_3_6_3"
+    },
+    {
+      "metadata": {
+        "cycle": 52,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_linear_21_3_7"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52872,
+            "deduction_entailed": 0.48041,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99961,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.9889,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52928,
+            "deduction_entailed": 0.51243,
+            "depth": 2,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00053,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98902,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.5301,
+            "deduction_entailed": 0.48531,
+            "depth": 1,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00046,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98904,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.50992,
+            "deduction_entailed": 0.48799,
+            "depth": 3,
+            "expected_verdict": 0.99966,
+            "gold_prob": 0.9996,
+            "node_id": 4,
+            "novelty": 0.00043,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98867,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0052_code_linear_21_3_7"
+    },
+    {
+      "metadata": {
+        "cycle": 53,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_20_5"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.522,
+            "deduction_entailed": 0.51185,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98908,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.5243,
+            "deduction_entailed": 0.48074,
+            "depth": 2,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00029,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98913,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53058,
+            "deduction_entailed": 0.51517,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00026,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98902,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.50954,
+            "deduction_entailed": 0.47273,
+            "depth": 3,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.0002,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98903,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0053_code_odd_sum_20_5"
+    },
+    {
+      "metadata": {
+        "cycle": 54,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_19_10_6"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.5485,
+            "deduction_entailed": 0.52456,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98915,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53987,
+            "deduction_entailed": 0.51482,
+            "depth": 2,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00023,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98914,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51271,
+            "deduction_entailed": 0.47581,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00032,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98914,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51668,
+            "deduction_entailed": 0.47591,
+            "depth": 3,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99961,
+            "node_id": 4,
+            "novelty": 0.00037,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98906,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0054_bitmask_xor_19_10_6"
+    },
+    {
+      "metadata": {
+        "cycle": 55,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_linear_18_7_1"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52561,
+            "deduction_entailed": 0.48238,
+            "depth": 1,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98899,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.54037,
+            "deduction_entailed": 0.48391,
+            "depth": 2,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00083,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98903,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53007,
+            "deduction_entailed": 0.47595,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00067,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98899,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52321,
+            "deduction_entailed": 0.47459,
+            "depth": 3,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00047,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98907,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0055_code_linear_18_7_1"
+    },
+    {
+      "metadata": {
+        "cycle": 56,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_17_8"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52074,
+            "deduction_entailed": 0.50333,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98907,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51332,
+            "deduction_entailed": 0.48687,
+            "depth": 2,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00058,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98913,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51984,
+            "deduction_entailed": 0.47706,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00047,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.9891,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52646,
+            "deduction_entailed": 0.49911,
+            "depth": 3,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00053,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98905,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0056_code_odd_sum_17_8"
+    },
+    {
+      "metadata": {
+        "cycle": 57,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_16_14_9"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52379,
+            "deduction_entailed": 0.51512,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98898,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99973
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51969,
+            "deduction_entailed": 0.48682,
+            "depth": 2,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00046,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98907,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53896,
+            "deduction_entailed": 0.47289,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00044,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98907,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53257,
+            "deduction_entailed": 0.51008,
+            "depth": 3,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99961,
+            "node_id": 4,
+            "novelty": 0.00033,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98911,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0057_bitmask_xor_16_14_9"
+    },
+    {
+      "metadata": {
+        "cycle": 58,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_linear_15_11_4"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51585,
+            "deduction_entailed": 0.47084,
+            "depth": 1,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.9891,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.5382,
+            "deduction_entailed": 0.49482,
+            "depth": 2,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00048,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98902,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52415,
+            "deduction_entailed": 0.4739,
+            "depth": 1,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00038,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98906,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52318,
+            "deduction_entailed": 0.49295,
+            "depth": 3,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00026,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98901,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0058_code_linear_15_11_4"
+    },
+    {
+      "metadata": {
+        "cycle": 59,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_14_11"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.54169,
+            "deduction_entailed": 0.53059,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98909,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52663,
+            "deduction_entailed": 0.49129,
+            "depth": 2,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00039,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98902,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51872,
+            "deduction_entailed": 0.49517,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00039,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98907,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52811,
+            "deduction_entailed": 0.51555,
+            "depth": 3,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00024,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98904,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0059_code_odd_sum_14_11"
+    },
+    {
+      "metadata": {
+        "cycle": 60,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_13_5_3"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.5334,
+            "deduction_entailed": 0.50168,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98908,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53893,
+            "deduction_entailed": 0.49068,
+            "depth": 2,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00086,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98908,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53085,
+            "deduction_entailed": 0.50359,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00063,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98908,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53184,
+            "deduction_entailed": 0.48723,
+            "depth": 3,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00047,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98905,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0060_bitmask_xor_13_5_3"
+    },
+    {
+      "metadata": {
+        "cycle": 61,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_linear_12_2_7"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.55599,
+            "deduction_entailed": 0.49089,
+            "depth": 1,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98906,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51607,
+            "deduction_entailed": 0.47021,
+            "depth": 2,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.0005,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98907,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53754,
+            "deduction_entailed": 0.49859,
+            "depth": 1,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00032,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.9891,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52172,
+            "deduction_entailed": 0.47609,
+            "depth": 3,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99961,
+            "node_id": 4,
+            "novelty": 0.00024,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98904,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0061_code_linear_12_2_7"
+    },
+    {
+      "metadata": {
+        "cycle": 62,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_11_5"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52656,
+            "deduction_entailed": 0.50071,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98903,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51552,
+            "deduction_entailed": 0.50745,
+            "depth": 2,
+            "expected_verdict": 0.99966,
+            "gold_prob": 0.99961,
+            "node_id": 2,
+            "novelty": 0.00028,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98899,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51446,
+            "deduction_entailed": 0.4775,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00044,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98895,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51441,
+            "deduction_entailed": 0.47805,
+            "depth": 3,
+            "expected_verdict": 0.99966,
+            "gold_prob": 0.99961,
+            "node_id": 4,
+            "novelty": 0.0003,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98904,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0062_code_odd_sum_11_5"
+    },
+    {
+      "metadata": {
+        "cycle": 63,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_10_9_6"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52719,
+            "deduction_entailed": 0.48729,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99961,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98893,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99973
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53307,
+            "deduction_entailed": 0.5034,
+            "depth": 2,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00067,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98908,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52795,
+            "deduction_entailed": 0.50008,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00036,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98903,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52211,
+            "deduction_entailed": 0.49089,
+            "depth": 3,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00031,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98906,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0063_bitmask_xor_10_9_6"
+    },
+    {
+      "metadata": {
+        "cycle": 64,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_linear_9_6_1"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.5125,
+            "deduction_entailed": 0.48341,
+            "depth": 1,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98906,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52938,
+            "deduction_entailed": 0.49606,
+            "depth": 2,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 2,
+            "novelty": 0.00099,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98889,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51503,
+            "deduction_entailed": 0.47243,
+            "depth": 1,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.00038,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98902,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52811,
+            "deduction_entailed": 0.51708,
+            "depth": 3,
+            "expected_verdict": 0.99968,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00046,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98899,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0064_code_linear_9_6_1"
+    },
+    {
+      "metadata": {
+        "cycle": 65,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_8_8"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52569,
+            "deduction_entailed": 0.52445,
+            "depth": 1,
+            "expected_verdict": 0.99967,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98901,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99975
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52647,
+            "deduction_entailed": 0.48824,
+            "depth": 2,
+            "expected_verdict": 0.99966,
+            "gold_prob": 0.99961,
+            "node_id": 2,
+            "novelty": 0.00042,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98896,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.53268,
+            "deduction_entailed": 0.51227,
+            "depth": 1,
+            "expected_verdict": 0.99966,
+            "gold_prob": 0.99961,
+            "node_id": 3,
+            "novelty": 0.00055,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98891,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52325,
+            "deduction_entailed": 0.50733,
+            "depth": 3,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.9996,
+            "node_id": 4,
+            "novelty": 0.00036,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.98859,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0065_code_odd_sum_8_8"
+    },
+    {
+      "metadata": {
+        "cycle": 66,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_7_13_9"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51083,
+            "deduction_entailed": 0.4939,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.98901,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51669,
+            "deduction_entailed": 0.47262,
+            "depth": 2,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99961,
+            "node_id": 2,
+            "novelty": 0.00032,
+            "parent_id": 1,
+            "scaffold": "abduction -> deduction -> decision -> metacognition",
+            "utility": 0.98903,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.52624,
+            "deduction_entailed": 0.50507,
+            "depth": 1,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 3,
+            "novelty": 0.0006,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.98902,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99974
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.51407,
+            "deduction_entailed": 0.50469,
+            "depth": 3,
+            "expected_verdict": 0.99965,
+            "gold_prob": 0.99962,
+            "node_id": 4,
+            "novelty": 0.00036,
+            "parent_id": 2,
+            "scaffold": "association -> synthesis -> deduction -> decision -> metacognition",
+            "utility": 0.989,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0066_bitmask_xor_7_13_9"
+    }
+  ]
+}

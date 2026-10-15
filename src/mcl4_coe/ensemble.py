@@ -466,7 +466,7 @@ class MultiPassController(nn.Module):
                     has_emitted_a = True
                     a_start_token_idx = len(tokens)
                 else:
-                    thought_budget = max(16, thought_budget - len(tp_toks))
+                    thought_budget = max(6 if bool(ap_toks) else 16, thought_budget - len(tp_toks))
 
             clause_end_ids = getattr(
                 self.tokenizer,
@@ -665,13 +665,19 @@ class MultiPassController(nn.Module):
                 ):
                     break
 
-                # Also stop cleanly near the end of max_new_tokens if #A$# just completed a sentence before a newline
+                # Also stop cleanly once #A$# has completed its sentence(s)
                 if (
                     has_emitted_a
                     and a_start_token_idx > 0
-                    and step >= int(max_new_tokens * 0.82)
-                    and tokens[-1] in sent_end_ids
-                    and next_id in newline_ids
+                    and tokens[-1] in (sent_end_ids - newline_ids)
+                    and (
+                        (
+                            bool(ap_toks)
+                            and len(tokens) - a_start_token_idx >= (6 if is_morph else 18)
+                            and (next_id in newline_ids or len(tokens) - a_start_token_idx >= (12 if is_morph else 36))
+                        )
+                        or (step >= int(max_new_tokens * 0.82) and next_id in newline_ids)
+                    )
                 ):
                     break
 
@@ -1306,6 +1312,7 @@ class MultiPassController(nn.Module):
                 else (mfile.primary_symbol, mfile.primary_symbol)
             )
             mod_short = Path(rel_path).name
+            mod_stem = Path(rel_path).stem
             callee_names = [c["symbol"].split(":")[-1] for c in mfile.callees[:3]]
             callee_clause = f" and calls {', '.join(callee_names)}" if callee_names else ""
 
@@ -1327,15 +1334,15 @@ class MultiPassController(nn.Module):
                 .strip()
                 .rstrip(".")
             )
-            files_short = ", ".join(Path(p).name for p in mfile.participating_files)
+            files_stem = ", ".join(Path(p).stem for p in mfile.participating_files)
 
             ast_premise = (
-                f"Routing to {mfile.primary_symbol} ({mfile.primary_address}) across {files_short}: {clean_doc}{callee_clause}."
+                f"In the {mod_stem} module ({files_stem}), {sym_short} ({clean_doc}) is defined{callee_clause}, which allows"
             )
             ast_answer_prefix = (
-                f"In {mod_short}, {sym_short} ({clean_doc}){callee_clause}."
+                f"In {mod_stem}, {sym_short} ({clean_doc}) is defined in {mod_stem}{callee_clause} to"
             )
-            short_answer_prefix = f"In {mod_short}, {sym_short}"
+            short_answer_prefix = f"In {mod_stem}, {sym_short} is defined to"
 
             # Build reference token set for AST & call-graph grounding verification
             ref_code_tokens = _code_tokens_and_stems(

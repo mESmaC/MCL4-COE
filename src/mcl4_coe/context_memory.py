@@ -948,13 +948,12 @@ class COEAddressRouter:
             batch["option_ids"],
             batch["option_lengths"],
         )
-        dec_logits = dec_out.logits[0].float()
+        dec_sim = dec_out.similarities[0].float()
         if any(s > 0.0 for s in cand_sketch):
             sk_t = torch.tensor(cand_sketch, dtype=torch.float32, device=device)
             sk_z = (sk_t - sk_t.mean()) / sk_t.std(unbiased=False).clamp_min(1e-5)
-            dec_z = (dec_logits - dec_logits.mean()) / dec_logits.std(unbiased=False).clamp_min(1e-5)
-            scale_eff = (coe._scale().detach().float() * 0.35).clamp(1.2, 4.5)
-            joint_logits = scale_eff * (0.45 * dec_z + 0.55 * sk_z)
+            scale_eff = (coe._scale().detach().float() * 0.40).clamp(1.2, 4.0)
+            joint_logits = scale_eff * (0.65 * dec_sim + 0.45 * sk_z)
             probs = joint_logits.softmax(dim=-1)
         else:
             probs = dec_out.probabilities[0]
@@ -1511,6 +1510,7 @@ class CodebaseWarmupEngine:
         # Stratify selection evenly across all repository modules so every file is explored
         n_sel = min(max_tasks, len(sym_recs))
         selected_indices = [int(i * len(sym_recs) / n_sel) for i in range(n_sel)]
+        neg_counts: dict[int, int] = {j: 0 for j in selected_indices}
 
         for task_i, idx in enumerate(selected_indices):
             rec = sym_recs[idx]
@@ -1519,8 +1519,8 @@ class CodebaseWarmupEngine:
             )
             mod_short = Path(rel_path).name
 
-            # Rank hard-negative distractors within selected_indices so every explored symbol
-            # appears both as a positive target and as a negative distractor (zero prior bias)
+            # Rank hard-negative distractors within selected_indices with degree-balancing penalty
+            # so every explored symbol appears equally often as positive and negative (zero prior bias)
             scored_neg = []
             for j in selected_indices:
                 if j == idx:
@@ -1528,9 +1528,11 @@ class CodebaseWarmupEngine:
                 other = sym_recs[j]
                 same_mod = 1.5 if other.up == rec.up else 0.0
                 ov = len(sym_toks[idx] & sym_toks[j]) / max(1, len(sym_toks[idx]))
-                scored_neg.append((same_mod + ov, j))
+                scored_neg.append((same_mod + ov - 0.65 * neg_counts[j], j))
             scored_neg.sort(key=lambda pair: pair[0], reverse=True)
             neg_indices = [j for _, j in scored_neg[: k_opts - 1]]
+            for j in neg_indices:
+                neg_counts[j] += 1
 
             # Deterministically place target at index (task_i % k_opts)
             target_pos = task_i % k_opts
@@ -1550,9 +1552,16 @@ class CodebaseWarmupEngine:
                     callee_names.append(crec.payload.split(":")[-1])
             call_hint = f" (calls {', '.join(callee_names[:3])})" if callee_names else ""
 
-            # 1. Self-exploration training query (AST signature + summary + call-graph)
+            redacted_summary = re.sub(
+                re.escape(sym_name),
+                f"the target {rec.kind}",
+                rec.summary,
+                flags=re.IGNORECASE,
+            )
+
+            # 1. Self-exploration training query (natural developer question + AST summary)
             train_q = (
-                f"#U$# Explore {mod_short}: locate {rec.kind} `{sym_name}` — {rec.summary}{call_hint}.\n"
+                f"#U$# Where do we implement `{sym_name}` in `{mod_short}` — {redacted_summary}{call_hint}?\n"
                 f"#Q$# Select the exact A.TXY record matching the request."
             )
             train_route.append(
@@ -1567,12 +1576,6 @@ class CodebaseWarmupEngine:
             )
 
             # 2. Held-out natural-language developer debugging query (redacts direct symbol name where possible)
-            redacted_summary = re.sub(
-                re.escape(sym_name),
-                f"the target {rec.kind}",
-                rec.summary,
-                flags=re.IGNORECASE,
-            )
             eval_q = (
                 f"#U$# Debugging `{mod_short}`: which {rec.kind} in `{rel_path}` is responsible for "
                 f"{redacted_summary}{call_hint}?\n"
@@ -1914,7 +1917,10 @@ class CodebaseWarmupEngine:
                         )
                         ded_loss = F.cross_entropy(ded_logits, ded_targets)
 
-                        eval_logits = valid_scores.float() * coe.assoc_alpha.float() + coe.assoc_beta.float()
+                        eval_logits = (
+                            valid_scores.detach().float() * coe.assoc_alpha.float()
+                            + coe.assoc_beta.float()
+                        )
                         target_grid = F.one_hot(t_idx, num_classes=num_opts).float()
                         eval_loss = F.binary_cross_entropy_with_logits(
                             eval_logits, target_grid[valid_options]

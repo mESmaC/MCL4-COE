@@ -771,8 +771,14 @@ class CognitiveOperatorEnsemble(nn.Module):
             router_z_loss = 0.5 * (
                 encoded_state.router_z_loss.float() + decoded_options.router_z_loss.float()
             )
-            smooth_dec = 0.05 if self.training else 0.0
-            ce_loss = F.cross_entropy(logits, t_idx, label_smoothing=smooth_dec)
+            log_probs = logits.log_softmax(dim=-1)
+            nll = -log_probs.gather(-1, t_idx.unsqueeze(-1)).squeeze(-1)
+            if self.training:
+                safe_lp = log_probs.masked_fill(~valid_options, 0.0)
+                smooth_nll = -safe_lp.sum(dim=-1) / valid_options.float().sum(dim=-1).clamp_min(1.0)
+                ce_loss = ((1.0 - 0.05) * nll + 0.05 * smooth_nll).mean()
+            else:
+                ce_loss = nll.mean()
             dec_loss = (
                 ce_loss
                 + self.backbone.config.aux_loss_coef * aux_loss

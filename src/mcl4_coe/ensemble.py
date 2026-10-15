@@ -56,8 +56,8 @@ class CognitiveSchedule:
 
     operators: tuple[str, ...] = DEFAULT_SCHEDULE
     recurrence_steps: int = 2
-    min_correctness_confidence: float = 0.5
-    max_contradiction_prob: float = 0.5
+    min_correctness_confidence: float = 0.40
+    max_contradiction_prob: float = 0.35
 
     def __post_init__(self) -> None:
         if not self.operators:
@@ -634,12 +634,12 @@ class MultiPassController(nn.Module):
                     or s_int < 0.35
                 )
                 neural_score = (
-                    0.30 * d_prob
-                    + 0.20 * u_eval
+                    0.35 * d_prob
+                    + 0.25 * u_eval
                     + 0.20 * (p_ent - 0.75 * p_con)
                     + 0.15 * (0.7 * m_cor + 0.3 * m_suf)
                 )
-                comp_score = neural_score + 0.35 * s_int - (0.30 if is_vetoed else 0.0)
+                comp_score = neural_score + 0.15 * s_int - (0.30 if is_vetoed else 0.0)
                 scored_candidates.append(
                     CandidateTraceScore(
                         index=i,

@@ -320,7 +320,8 @@ class ContextLMCompressor(nn.Module):
             )
             scores = scores.masked_fill(~c_val_safe.unsqueeze(1), -1e9)
             attn = F.softmax(scores, dim=-1).to(enc.hidden.dtype)
-            chunk_gist = self.gist_norm(torch.matmul(attn, enc.hidden).float()).to(enc.hidden.dtype)
+            pooled = torch.matmul(attn, enc.hidden).float()
+            chunk_gist = (0.85 * pooled + 0.15 * self.gist_norm(pooled)).to(enc.hidden.dtype)
 
             chunk_has_valid = row_has_valid.unsqueeze(-1).expand(
                 batch_size, self.gist_tokens_per_chunk
@@ -331,7 +332,9 @@ class ContextLMCompressor(nn.Module):
                 safe_valid[~row_has_valid, 0] = True
                 updated_gist = backbone.feedback(chunk_gist, running_gist, valid=safe_valid)
                 chunk_gist = torch.where(
-                    chunk_has_valid.unsqueeze(-1), updated_gist, running_gist
+                    chunk_has_valid.unsqueeze(-1),
+                    0.75 * chunk_gist + 0.25 * updated_gist,
+                    running_gist,
                 )
             running_gist = chunk_gist
 
@@ -351,6 +354,81 @@ class ContextLMCompressor(nn.Module):
             router_z_loss=total_z / max(1, len(loads)),
             expert_load=avg_load,
         )
+
+    def compress_encoded_states(
+        self,
+        backbone: MCL4CEDBackbone,
+        states: Sequence[EncodedState],
+    ) -> EncodedState:
+        """Fold a sequence of pre-encoded or decompressed `EncodedState` file pages into recurrent soft gist tokens."""
+        if not states:
+            raise ValueError("states must be non-empty in compress_encoded_states")
+        device = states[0].hidden.device
+        dtype = states[0].hidden.dtype
+        batch_size = states[0].hidden.shape[0]
+
+        gist_chunks: list[Tensor] = []
+        gist_valids: list[Tensor] = []
+        running_gist: Tensor | None = None
+        total_aux = torch.zeros((), dtype=torch.float32, device=device)
+        total_z = torch.zeros((), dtype=torch.float32, device=device)
+        loads: list[Tensor] = []
+
+        for enc in states:
+            h = enc.hidden.to(device=device, dtype=dtype)
+            c_val = enc.valid.to(device=device, dtype=torch.bool)
+            row_has_valid = c_val.any(dim=-1)
+            c_val_safe = c_val.clone()
+            c_val_safe[~row_has_valid, 0] = True
+
+            total_aux = total_aux + enc.aux_loss.to(device=device).float()
+            total_z = total_z + enc.router_z_loss.to(device=device).float()
+            loads.append(enc.expert_load.to(device=device).float())
+
+            q = self.gist_queries.unsqueeze(0).expand(batch_size, -1, -1).to(device=device, dtype=dtype)
+            scores = torch.matmul(q.float(), h.float().transpose(-1, -2)) / math.sqrt(self.d_model)
+            scores = scores.masked_fill(~c_val_safe.unsqueeze(1), -1e9)
+            attn = F.softmax(scores, dim=-1).to(dtype)
+            pooled = torch.matmul(attn, h).float()
+            chunk_gist = (0.85 * pooled + 0.15 * self.gist_norm(pooled)).to(dtype)
+
+            chunk_has_valid = row_has_valid.unsqueeze(-1).expand(
+                batch_size, self.gist_tokens_per_chunk
+            )
+            chunk_gist = chunk_gist.masked_fill(~chunk_has_valid.unsqueeze(-1), 0)
+            if running_gist is not None:
+                safe_valid = chunk_has_valid.clone()
+                safe_valid[~row_has_valid, 0] = True
+                updated_gist = backbone.feedback(chunk_gist, running_gist, valid=safe_valid)
+                chunk_gist = torch.where(
+                    chunk_has_valid.unsqueeze(-1),
+                    (0.75 * chunk_gist + 0.25 * updated_gist).to(dtype),
+                    running_gist,
+                )
+            running_gist = chunk_gist
+
+            gist_chunks.append(chunk_gist)
+            gist_valids.append(chunk_has_valid)
+
+        compressed_hidden = torch.cat(gist_chunks, dim=1)
+        compressed_valid = torch.cat(gist_valids, dim=1)
+        avg_load = torch.stack(loads, dim=0).mean(dim=0)
+        return EncodedState(
+            hidden=compressed_hidden,
+            valid=compressed_valid,
+            aux_loss=total_aux / max(1, len(loads)),
+            router_z_loss=total_z / max(1, len(loads)),
+            expert_load=avg_load,
+        )
+
+    def compress_turboquant_pages(
+        self,
+        backbone: MCL4CEDBackbone,
+        pages: Sequence[CompressedEncodedState],
+    ) -> EncodedState:
+        """Decompress multiple 4-bit `TurboQuant` file pages and fold them into recurrent soft gist tokens."""
+        decompressed = [p.decompress() for p in pages]
+        return self.compress_encoded_states(backbone, decompressed)
 
 
 # ---------------------------------------------------------------------------
@@ -1165,6 +1243,34 @@ class CodebaseWarmupReport:
 
 
 @dataclass
+class MultiFileSynthesisResult:
+    """Result of Tier-4 (`A.TXY` + `CALLS`) + Tier-2 (`TurboQuant`) + Tier-3 (`ContextLMCompressor`) multi-file synthesis."""
+
+    query: str
+    primary_address: str
+    primary_symbol: str
+    primary_kind: str
+    primary_summary: str
+    primary_confidence: float
+    primary_source: str
+    focal_statement: str
+    focal_invariant: str
+    callees: tuple[dict[str, str], ...]
+    participating_files: tuple[str, ...]
+    participating_file_addresses: tuple[str, ...]
+    num_files_folded: int
+    raw_source_tokens: int
+    encoded_page_tokens: int
+    compressed_gist_tokens: int
+    uncompressed_page_bytes: int
+    turboquant_page_bytes: int
+    token_folding_ratio: float
+    byte_compression_ratio: float
+    compressed_state: EncodedState
+    multifile_latent_prior: Tensor
+
+
+@dataclass
 class CodebaseSessionState:
     """Session-scoped virtual memory (`A.TXY` + `TurboQuant`) and reversible fast-weight snapshot."""
 
@@ -1187,19 +1293,29 @@ class CodebaseSessionState:
     eval_route_tasks: list[DecisionExample] = field(default_factory=list)
     train_verify_tasks: list[DecisionExample] = field(default_factory=list)
     eval_verify_tasks: list[DecisionExample] = field(default_factory=list)
+    context_compressor: ContextLMCompressor | None = None
+    base_compressor_state: dict[str, Tensor] = field(default_factory=dict)
+    file_token_counts: dict[str, int] = field(default_factory=dict)
 
     @property
     def compression_ratio(self) -> float:
         return float(self.uncompressed_state_bytes) / max(1.0, float(self.compressed_state_bytes))
 
     def restore_base_weights(self, coe: CognitiveOperatorEnsemble) -> None:
-        """Instantly restore `coe`'s operator & pooling heads to their pre-session weights."""
+        """Instantly restore `coe`'s operator & pooling heads (and `context_compressor`) to their pre-session weights."""
         device = next(coe.parameters()).device
         with torch.no_grad():
             param_map = dict(coe.named_parameters())
             for name, saved_tensor in self.base_operator_state.items():
                 if name in param_map:
                     param_map[name].copy_(saved_tensor.to(device=device, dtype=param_map[name].dtype))
+            if self.context_compressor is not None and self.base_compressor_state:
+                comp_map = dict(self.context_compressor.named_parameters())
+                for name, saved_tensor in self.base_compressor_state.items():
+                    if name in comp_map:
+                        comp_map[name].copy_(
+                            saved_tensor.to(device=comp_map[name].device, dtype=comp_map[name].dtype)
+                        )
 
 
 def _extract_focal_line_and_context(snippet: str) -> tuple[str, str]:
@@ -1366,6 +1482,18 @@ class CodebaseWarmupEngine:
         symbol_sources: dict[str, str] = {}
         file_turboquant_pages: dict[str, CompressedEncodedState] = {}
         file_latent_priors: dict[str, Tensor] = {}
+        file_token_counts: dict[str, int] = {}
+
+        d_model = int(coe.backbone.config.d_model)
+        context_compressor = ContextLMCompressor(
+            d_model=d_model,
+            chunk_size=max_len,
+            gist_tokens_per_chunk=6,
+        ).to(device=device)
+        base_compressor_state = {
+            name: param.detach().cpu().clone()
+            for name, param in context_compressor.named_parameters()
+        }
 
         total_repo_bytes = 0
         total_repo_tokens = 0
@@ -1386,6 +1514,7 @@ class CodebaseWarmupEngine:
             total_repo_bytes += len(src_text.encode("utf-8"))
             toks = tokenizer.encode(src_text, add_bos=False, add_eos=False)
             total_repo_tokens += len(toks)
+            file_token_counts[frec.address] = len(toks)
 
             # Parse AST to extract clean per-symbol source snippets
             try:
@@ -1474,6 +1603,9 @@ class CodebaseWarmupEngine:
             eval_route_tasks=eval_route,
             train_verify_tasks=train_verify,
             eval_verify_tasks=eval_verify,
+            context_compressor=context_compressor,
+            base_compressor_state=base_compressor_state,
+            file_token_counts=file_token_counts,
         )
 
     def _build_codebase_tasks(
@@ -1937,6 +2069,42 @@ class CodebaseWarmupEngine:
                 optimizer.step()
                 step_losses.append(epoch_loss_val)
 
+            # Also warm up the Tier-3 ContextLMCompressor gist queries on decompressed TurboQuant file pages
+            if session.context_compressor is not None and session.file_turboquant_pages:
+                comp_mod = session.context_compressor.to(device=device)
+                comp_mod.train()
+                for p in comp_mod.parameters():
+                    p.requires_grad_(True)
+                comp_opt = torch.optim.AdamW(comp_mod.parameters(), lr=lr * 1.5, weight_decay=1e-4)
+                file_addrs = list(session.file_turboquant_pages.keys())
+                deq_pages = [session.file_turboquant_pages[fa].decompress() for fa in file_addrs]
+                prior_targets = torch.stack(
+                    [session.file_latent_priors[fa].to(device=device).float() for fa in file_addrs],
+                    dim=0,
+                )
+                for _c_step in range(min(12, max(4, steps // 2))):
+                    comp_opt.zero_grad(set_to_none=True)
+                    folded_means = []
+                    for enc_p in deq_pages:
+                        h = enc_p.hidden.to(device=device)
+                        c_val = enc_p.valid.to(device=device, dtype=torch.bool)
+                        q = comp_mod.gist_queries.unsqueeze(0).to(device=device, dtype=h.dtype)
+                        scores = torch.matmul(q.float(), h.float().transpose(-1, -2)) / math.sqrt(
+                            comp_mod.d_model
+                        )
+                        scores = scores.masked_fill(~c_val.unsqueeze(1), -1e9)
+                        attn = F.softmax(scores, dim=-1)
+                        pooled = torch.matmul(attn, h.float())
+                        chunk_gist = 0.85 * pooled + 0.15 * comp_mod.gist_norm(pooled)
+                        folded_means.append(chunk_gist.mean(dim=1).squeeze(0))
+                    folded_stack = torch.stack(folded_means, dim=0)
+                    comp_loss = (
+                        1.0 - F.cosine_similarity(folded_stack, prior_targets, dim=-1).mean()
+                    )
+                    comp_loss.backward()
+                    comp_opt.step()
+                comp_mod.eval()
+
         # Restore original requires_grad flags
         for name, p in coe.named_parameters():
             p.requires_grad_(orig_grad_flags.get(name, True))
@@ -2043,4 +2211,147 @@ class CodebaseWarmupEngine:
             ),
             "latent_prior": latent_prior,
         }
+
+    @torch.no_grad()
+    def synthesize_multifile_context(
+        self,
+        coe: CognitiveOperatorEnsemble,
+        session: CodebaseSessionState,
+        user_query: str,
+        *,
+        max_files: int = 3,
+        top_k_candidates: int = 6,
+    ) -> MultiFileSynthesisResult:
+        """Synthesize multi-file context via `A.TXY` routing, `CALLS` traversal, `TurboQuant` page decompression, and `ContextLMCompressor` folding."""
+        device = next(coe.parameters()).device
+        route_res = session.router.route_query(
+            coe,
+            user_query,
+            top_k_candidates=top_k_candidates,
+            plane_filter=1,
+        )
+        primary_rec: ATXYRecord = route_res["record"]
+        primary_source = session.symbol_sources.get(primary_rec.address, "")
+        _, focal_stmt = _extract_focal_line_and_context(primary_source)
+        focal_inv = _summarize_code_invariants(focal_stmt)
+
+        participating_file_addrs: list[str] = []
+        if primary_rec.up and primary_rec.up[0] in session.file_turboquant_pages:
+            participating_file_addrs.append(primary_rec.up[0])
+
+        callees: list[dict[str, str]] = []
+        if "CALLS" in primary_rec.rels:
+            _, callee_addrs = session.pointer_executor.run(
+                [("FOLLOW_SET", [primary_rec.address], "CALLS")]
+            )
+            for c_addr in callee_addrs:
+                crec = session.store.lookup(c_addr)
+                if crec is not None:
+                    callees.append(
+                        {
+                            "address": crec.address,
+                            "symbol": crec.payload,
+                            "summary": crec.summary,
+                        }
+                    )
+                    if (
+                        crec.up
+                        and crec.up[0] in session.file_turboquant_pages
+                        and crec.up[0] not in participating_file_addrs
+                        and len(participating_file_addrs) < max_files
+                    ):
+                        participating_file_addrs.append(crec.up[0])
+
+        # Fill remaining multi-file slots from secondary routed candidates across distinct modules
+        for cand_addr in route_res["candidates"]:
+            if len(participating_file_addrs) >= max_files:
+                break
+            cand_rec = session.store.lookup(cand_addr)
+            if cand_rec is not None and cand_rec.up:
+                f_addr = cand_rec.up[0]
+                if (
+                    f_addr in session.file_turboquant_pages
+                    and f_addr not in participating_file_addrs
+                ):
+                    participating_file_addrs.append(f_addr)
+
+        if not participating_file_addrs and session.file_turboquant_pages:
+            participating_file_addrs.append(next(iter(session.file_turboquant_pages.keys())))
+
+        participating_files: list[str] = []
+        tq_pages: list[CompressedEncodedState] = []
+        raw_source_tokens = 0
+        encoded_page_tokens = 0
+        uncompressed_bytes = 0
+        turboquant_bytes = 0
+
+        for f_addr in participating_file_addrs:
+            frec = session.store.lookup(f_addr)
+            if frec is not None:
+                participating_files.append(frec.payload)
+            page = session.file_turboquant_pages[f_addr]
+            tq_pages.append(page)
+            raw_source_tokens += int(session.file_token_counts.get(f_addr, 0))
+            encoded_page_tokens += int(page.valid.sum().item())
+            uncompressed_bytes += int(page.uncompressed_bytes)
+            turboquant_bytes += int(page.compressed_bytes)
+
+        compressor = session.context_compressor
+        if compressor is None:
+            compressor = ContextLMCompressor(
+                d_model=int(coe.backbone.config.d_model),
+                chunk_size=self.max_seq_len,
+                gist_tokens_per_chunk=6,
+            ).to(device=device)
+            session.context_compressor = compressor
+        else:
+            compressor = compressor.to(device=device)
+
+        compressed_state = compressor.compress_turboquant_pages(coe.backbone, tq_pages)
+        compressed_gist_tokens = int(compressed_state.hidden.shape[1])
+
+        # Fuse multi-file latent priors with ContextLMCompressor gist representation
+        prior_list = [
+            session.file_latent_priors[f_addr].to(device=device).float()
+            for f_addr in participating_file_addrs
+            if f_addr in session.file_latent_priors
+        ]
+        gist_mean = compressed_state.hidden.float().mean(dim=1)  # [1, d_model]
+        if prior_list:
+            if len(prior_list) == 1:
+                file_prior = prior_list[0].unsqueeze(0)
+            else:
+                sec_mean = torch.stack(prior_list[1:], dim=0).mean(dim=0)
+                file_prior = (0.60 * prior_list[0] + 0.40 * sec_mean).unsqueeze(0)
+            raw_prior = 0.70 * file_prior + 0.30 * gist_mean
+        else:
+            raw_prior = gist_mean
+
+        norm_dtype = next(coe.abstraction_norm.parameters()).dtype
+        multifile_latent_prior = coe.abstraction_norm(raw_prior.to(dtype=norm_dtype)).float()
+
+        return MultiFileSynthesisResult(
+            query=user_query,
+            primary_address=primary_rec.address,
+            primary_symbol=primary_rec.payload,
+            primary_kind=primary_rec.kind,
+            primary_summary=primary_rec.summary,
+            primary_confidence=float(route_res["confidence"]),
+            primary_source=primary_source,
+            focal_statement=focal_stmt,
+            focal_invariant=focal_inv,
+            callees=tuple(callees),
+            participating_files=tuple(participating_files),
+            participating_file_addresses=tuple(participating_file_addrs),
+            num_files_folded=len(participating_file_addrs),
+            raw_source_tokens=raw_source_tokens,
+            encoded_page_tokens=encoded_page_tokens,
+            compressed_gist_tokens=compressed_gist_tokens,
+            uncompressed_page_bytes=uncompressed_bytes,
+            turboquant_page_bytes=turboquant_bytes,
+            token_folding_ratio=float(raw_source_tokens) / max(1.0, float(compressed_gist_tokens)),
+            byte_compression_ratio=float(uncompressed_bytes) / max(1.0, float(turboquant_bytes)),
+            compressed_state=compressed_state,
+            multifile_latent_prior=multifile_latent_prior,
+        )
 

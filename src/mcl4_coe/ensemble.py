@@ -169,6 +169,39 @@ class DreamRLGenerationOutput:
     abstraction_norm: float
 
 
+@dataclass
+class CodebaseRAGGenerationOutput:
+    """Output of `MultiPassController.generate_uta_with_codebase_session` (`A.TXY` + `TurboQuant` + `ContextLMCompressor` + 2-Round RL)."""
+
+    text: str
+    baseline_text: str
+    selected_index: int
+    selected_round: int
+    selected_strategy: str
+    improved_over_baseline: bool
+    improved_in_round2: bool
+    round1_best_score: float
+    round2_best_score: float
+    final_best_score: float
+    routed_address: str
+    routed_symbol: str
+    routed_summary: str
+    routed_confidence: float
+    focal_statement: str
+    focal_invariant: str
+    callees: tuple[str, ...]
+    participating_files: tuple[str, ...]
+    num_files_folded: int
+    raw_source_tokens: int
+    compressed_gist_tokens: int
+    token_folding_ratio: float
+    byte_compression_ratio: float
+    extra_prompt_tokens: int
+    round1_advantages: tuple[float, ...]
+    candidates: tuple[CandidateTraceScore, ...]
+    abstraction_norm: float
+
+
 def _score_trace_integrity(user_prompt: str, trace_text: str) -> float:
     """Evaluate structural completeness, AST validity (if code), and topical alignment of a `#U$# -> #T$# -> #A$#` trace."""
     import ast
@@ -1168,6 +1201,427 @@ class MultiPassController(nn.Module):
                 dream_top_similarity=round(dream_top_sim, 4),
                 dream_matched_domains=dream_domains,
                 dream_recommended_scaffold=dream_scaffold,
+                extra_prompt_tokens=0,
+                round1_advantages=r1_adv_tuple,
+                candidates=tuple(all_scored),
+                abstraction_norm=round(abs_norm, 4),
+            )
+        finally:
+            self.coe.train(was_training)
+
+    @torch.no_grad()
+    def generate_uta_with_codebase_session(
+        self,
+        user_prompt: str,
+        warmup_engine: object,
+        session: object,
+        *,
+        max_files: int = 3,
+        top_k_candidates: int = 6,
+        max_new_tokens: int = 384,
+        prior_scale: float = 0.08,
+        rl_step_size: float = 0.35,
+        seed: int = 42,
+    ) -> CodebaseRAGGenerationOutput:
+        """Synthesize `#U$# -> #T$# -> #A$#` grounded in a warmed `CodebaseSessionState` (`A.TXY` + `TurboQuant` + `ContextLMCompressor` + 2-Round RL).
+
+        1. **Multi-File Virtual Memory Retrieval (`0` prompt tokens):** Routes `user_prompt` via
+           `warmup_engine.synthesize_multifile_context` to locate the exact `A=1` symbol in `ATXYPageStore`,
+           traverses `CALLS` edges across modules, decompresses the participating 4-bit `TurboQuant`
+           file pages, and folds them through `ContextLMCompressor` into soft gist tokens (`compressed_state`)
+           and a unified multi-file `Abstraction` latent prior $\\mathbf{z}_{\\text{code}}^{(0)}$.
+        2. **Round 1 Rollouts (Unsteered + Multi-File Latent Prior + AST-Premise Anchored):**
+           Generates Round 1 `#T$# -> #A$#` trajectories across unsteered baseline, multi-file
+           latent-steered, and AST-premise-anchored strategies while keeping `#U$#` 100% clean (`0` extra prompt tokens).
+        3. **Warmed `COE` + Multi-File `ContextLMCompressor` Cross-Attention Verification:**
+           Scores all candidates via the session-warmed `COE` operators (`Decision`, `Deduction`,
+           `Evaluation`, `Metacognition`), upper-CED cross-attention directly over the `ContextLMCompressor`
+           multi-file gist tokens, and AST/call-graph grounding, then updates $\\mathbf{z}_{\\text{code}}^{(0)} \\to \\mathbf{z}_{\\text{code}}^{(1)}$
+           using Ornith-1.5 group-normalized advantages $A_i$.
+        4. **Round 2 Tree-Guided Rollouts:** Launches Round 2 rollouts conditioned on $\\mathbf{z}_{\\text{code}}^{(1)}$
+           and the winning Round 1 `#T$#` scratchpad, then verifies the combined pool.
+        """
+        from pathlib import Path
+        from .context_memory import (
+            CodebaseSessionState,
+            CodebaseWarmupEngine,
+            _code_tokens_and_stems,
+            _truncate_to_token_budget,
+        )
+        from .data import DecisionExample, collate_decisions
+        from .operators import pearson_similarity
+        from .ornith_rl import detect_doom_loop, group_normalized_advantages
+
+        assert isinstance(warmup_engine, CodebaseWarmupEngine)
+        assert isinstance(session, CodebaseSessionState)
+
+        was_training = self.coe.training
+        self.coe.eval()
+        try:
+            device = next(self.coe.parameters()).device
+            vocab_size = int(getattr(self.coe.backbone.config, "vocab_size", 260))
+            max_seq = int(self.coe.backbone.config.max_seq_len)
+            use_amp = device.type == "cuda"
+
+            # 1. Multi-File A.TXY + TurboQuant + ContextLMCompressor Synthesis
+            mfile = warmup_engine.synthesize_multifile_context(
+                self.coe,
+                session,
+                user_prompt,
+                max_files=max_files,
+                top_k_candidates=top_k_candidates,
+            )
+            z_code_0 = mfile.multifile_latent_prior.to(device=device).float()
+
+            rel_path, sym_short = (
+                mfile.primary_symbol.split(":", 1)
+                if ":" in mfile.primary_symbol
+                else (mfile.primary_symbol, mfile.primary_symbol)
+            )
+            mod_short = Path(rel_path).name
+            callee_names = [c["symbol"].split(":")[-1] for c in mfile.callees[:3]]
+            callee_clause = f" and calls {', '.join(callee_names)}" if callee_names else ""
+
+            # Extract clean human-readable docstring sentence from primary_summary
+            summary_no_uses = mfile.primary_summary.split("[uses:", 1)[0].strip()
+            if ": " in summary_no_uses:
+                clean_doc = summary_no_uses.split(": ", 1)[1].split(" | ", 1)[0].strip().rstrip(".")
+            else:
+                clean_doc = summary_no_uses.split(" | ", 1)[0].strip().rstrip(".")
+
+            ast_premise = (
+                f"In {mod_short}, {sym_short} ({clean_doc}){callee_clause}."
+            )
+
+            # Build reference token set for AST & call-graph grounding verification
+            ref_code_tokens = _code_tokens_and_stems(
+                f"{sym_short} {mod_short} {clean_doc} {' '.join(callee_names)} {mfile.focal_statement}"
+            )
+
+            def _score_codebase_pool(
+                pool: list[tuple[int, float, str, int, str]],
+                z_ref: Tensor,
+            ) -> tuple[list[CandidateTraceScore], list[Tensor]]:
+                bodies: list[str] = []
+                for _, _, tr, _, _ in pool:
+                    idx_t = tr.find("#T$#")
+                    b = tr[idx_t:].strip() if idx_t >= 0 else tr.strip()
+                    bodies.append(b if b else "#T$# empty\n#A$# empty")
+
+                ctx_text = (
+                    f"#U$# {user_prompt.strip()}\n"
+                    f"Codebase context: `{mfile.primary_symbol}` ({clean_doc}){callee_clause}.\n"
+                    f"#Q$# [choice] Select the most accurate, codebase-grounded #T$# -> #A$# response."
+                )
+                ex = DecisionExample(
+                    question_id="codebase_rag_loop",
+                    kind="choice",
+                    context=_truncate_to_token_budget(ctx_text, vocab_size, max_seq),
+                    descriptions=tuple(
+                        _truncate_to_token_budget(b, vocab_size, max_seq)
+                        for b in bodies
+                    ),
+                    values=tuple(f"cand_{i}" for i in range(len(bodies))),
+                    target=0,
+                )
+                batch = collate_decisions(
+                    [ex],
+                    max_seq,
+                    device=device,
+                    vocab_size=vocab_size,
+                    tokenizer=self.tokenizer,
+                )
+                ctx_ids = batch["context_ids"]
+                ctx_lens = batch["context_lengths"]
+                opt_ids = batch["option_ids"]
+                opt_lens = batch["option_lengths"]
+
+                k_cands = len(bodies)
+                rep_ctx_ids = ctx_ids.expand(k_cands, -1).contiguous()
+                rep_ctx_lens = ctx_lens.expand(k_cands).contiguous()
+                flat_opt_ids = opt_ids[0]
+                flat_opt_lens = opt_lens[0]
+
+                with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
+                    dec_out = self.coe.forward_decision(
+                        ctx_ids,
+                        ctx_lens,
+                        opt_ids,
+                        opt_lens,
+                        recurrence_steps=self.schedule.recurrence_steps,
+                    )
+                    ded_out = self.coe.forward_deduction(
+                        rep_ctx_ids, rep_ctx_lens, flat_opt_ids, flat_opt_lens
+                    )
+                    eval_out = self.coe.forward_evaluation(
+                        rep_ctx_ids, rep_ctx_lens, flat_opt_ids, flat_opt_lens
+                    )
+                    meta_out = self.coe.forward_metacognition(
+                        rep_ctx_ids, rep_ctx_lens, flat_opt_ids, flat_opt_lens
+                    )
+                    cand_abs_vecs = self.coe.compress_abstraction(
+                        flat_opt_ids, flat_opt_lens, level="detailed"
+                    ).float()
+
+                    # Direct upper-CED cross-attention over ContextLMCompressor multi-file TurboQuant gist tokens!
+                    opt_width = int(flat_opt_lens.max().item())
+                    trimmed_opt_ids = flat_opt_ids[:, :opt_width].long()
+                    opt_valid = (
+                        torch.arange(opt_width, device=device)[None, :] < flat_opt_lens[:, None]
+                    )
+                    owner_rows = torch.zeros(k_cands, dtype=torch.long, device=device)
+                    gist_decoded = self.coe.backbone.decode_candidates(
+                        mfile.compressed_state,
+                        trimmed_opt_ids,
+                        opt_valid,
+                        owner_rows=owner_rows,
+                        recurrence_steps=self.schedule.recurrence_steps,
+                        causal_local=True,
+                    )
+                    dummy_gist_ids = torch.zeros_like(mfile.compressed_state.valid, dtype=torch.long)
+                    paired_gist_state, gist_cand_repr = self.coe.pooler.matched_pair_representations(
+                        mfile.compressed_state.hidden,
+                        dummy_gist_ids,
+                        mfile.compressed_state.valid,
+                        gist_decoded.hidden,
+                        trimmed_opt_ids,
+                        opt_valid,
+                        owner_rows,
+                        cand_anchor=gist_decoded.anchor,
+                        strip_boundary=False,
+                        bos_id=self.coe.config.bos_id,
+                        eos_id=self.coe.config.eos_id,
+                    )
+                    gist_s_proj = self.coe.state_projection(paired_gist_state).float()
+                    gist_c_proj = self.coe.output_projection(gist_cand_repr).float()
+                    gist_sims = pearson_similarity(gist_s_proj, gist_c_proj).detach().cpu().tolist()
+
+                    ref_proj = self.coe.state_projection(
+                        z_ref.to(next(self.coe.state_projection.parameters()).dtype)
+                    ).float()
+                    cand_proj = self.coe.output_projection(
+                        cand_abs_vecs.to(next(self.coe.output_projection.parameters()).dtype)
+                    ).float()
+                    abs_sims = pearson_similarity(
+                        ref_proj.expand_as(cand_proj), cand_proj
+                    ).detach().cpu().tolist()
+
+                dec_sims = dec_out.similarities[0].detach().float().cpu().tolist()
+                dec_probs = dec_out.probabilities[0].detach().float().cpu().tolist()
+                ded_probs = ded_out.probabilities.detach().float().cpu().tolist()
+                eval_utils = eval_out.utilities.detach().float().cpu().tolist()
+                meta_probs = meta_out.probabilities.detach().float().cpu().tolist()
+
+                scored: list[CandidateTraceScore] = []
+                for i, (r_steps, temp, tr, r_id, strat) in enumerate(pool):
+                    d_sim = float(dec_sims[i])
+                    d_prob = float(dec_probs[i])
+                    u_eval = float(eval_utils[i])
+                    p_ent = float(ded_probs[i][0])
+                    p_con = float(ded_probs[i][1])
+                    m_cor = float(meta_probs[i][0])
+                    m_suf = float(meta_probs[i][1])
+                    g_sim = float(gist_sims[i])
+                    a_sim = 0.60 * g_sim + 0.40 * float(abs_sims[i])
+                    s_int = _score_trace_integrity(user_prompt, tr)
+
+                    # AST & Call-Graph grounding bonus: reward traces that reference authentic repo identifiers/concepts
+                    tr_tokens = _code_tokens_and_stems(bodies[i])
+                    ast_ov = len(tr_tokens & ref_code_tokens) / max(1, min(10, len(ref_code_tokens)))
+                    ast_bonus = min(0.18, 0.18 * ast_ov)
+
+                    cand_toks = self.tokenizer.encode(bodies[i], add_bos=False, add_eos=False)
+                    has_doom = detect_doom_loop(cand_toks) is not None
+                    if has_doom:
+                        s_int = max(0.0, s_int - 0.30)
+
+                    is_vetoed = bool(
+                        p_con > self.schedule.max_contradiction_prob
+                        or m_cor < self.schedule.min_correctness_confidence
+                        or s_int < 0.35
+                        or has_doom
+                    )
+                    neural_score = (
+                        0.32 * d_prob
+                        + 0.22 * u_eval
+                        + 0.18 * (p_ent - 0.75 * p_con)
+                        + 0.14 * (0.7 * m_cor + 0.3 * m_suf)
+                        + 0.14 * max(0.0, a_sim)
+                    )
+                    comp_score = neural_score + 0.15 * s_int + ast_bonus - (0.30 if is_vetoed else 0.0)
+                    scored.append(
+                        CandidateTraceScore(
+                            index=i,
+                            recurrence_steps=r_steps,
+                            temperature=temp,
+                            text=tr,
+                            decision_similarity=round(d_sim, 4),
+                            decision_prob=round(d_prob, 4),
+                            evaluation_utility=round(u_eval, 4),
+                            deduction_entailed=round(p_ent, 4),
+                            deduction_contradicted=round(p_con, 4),
+                            metacognition_correctness=round(m_cor, 4),
+                            metacognition_sufficiency=round(m_suf, 4),
+                            structural_score=round(s_int, 4),
+                            composite_score=round(comp_score, 4),
+                            vetoed=is_vetoed,
+                            abstraction_alignment=round(a_sim, 4),
+                            round_id=r_id,
+                            strategy=strat,
+                        )
+                    )
+                return scored, [cand_abs_vecs[i : i + 1].detach() for i in range(k_cands)]
+
+            # 2. Round 1 Rollouts: Unsteered Baseline + Multi-File TurboQuant Latent Prior + AST-Premise Guided
+            r1_specs: tuple[tuple[int, float, Tensor | None, float, str | None, str], ...] = (
+                (1, 0.0, None, 0.0, None, "r1_baseline"),
+                (2, 0.0, None, 0.0, None, "r1_unsteered_r2"),
+                (2, 0.0, z_code_0, prior_scale, None, "r1_multifile_prior"),
+                (2, 0.28, z_code_0, prior_scale, None, "r1_multifile_explore"),
+                (2, 0.0, z_code_0, prior_scale, ast_premise, "r1_ast_premise_guided"),
+                (2, 0.25, z_code_0, prior_scale, ast_premise, "r1_ast_premise_explore"),
+            )
+            r1_pool: list[tuple[int, float, str, int, str]] = []
+            for idx, (r_steps, temp, l_prior, l_scale, t_pref, strat) in enumerate(r1_specs):
+                if temp > 0.0:
+                    torch.manual_seed(seed + idx * 137)
+                tr = self.generate_uta(
+                    user_prompt,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temp,
+                    recurrence_steps=r_steps,
+                    latent_prior=l_prior,
+                    latent_prior_scale=l_scale,
+                    thought_prefix=t_pref,
+                    lock_thought=False,
+                )
+                r1_pool.append((r_steps, temp, tr, 1, strat))
+
+            baseline_text = r1_pool[0][2]
+            r1_scored, r1_abs_vecs = _score_codebase_pool(r1_pool, z_code_0)
+            r1_rewards = torch.tensor(
+                [c.composite_score + 0.04 * max(0.0, c.abstraction_alignment) for c in r1_scored],
+                dtype=torch.float32,
+                device=device,
+            )
+            r1_adv = group_normalized_advantages(r1_rewards)
+            r1_adv_tuple = tuple(round(float(x), 4) for x in r1_adv.detach().cpu().tolist())
+
+            # 3. Transient Inference-Time RL Latent Policy Update: z_code_0 -> z_code_1
+            pos_mask = r1_adv > 0.0
+            neg_mask = r1_adv < 0.0
+            z_delta = torch.zeros_like(z_code_0)
+            if bool(pos_mask.any()):
+                pos_w = torch.softmax(r1_adv[pos_mask] / 0.5, dim=0)
+                pos_stack = torch.cat(
+                    [r1_abs_vecs[i] for i in range(len(r1_pool)) if bool(pos_mask[i])], dim=0
+                )
+                z_pos = (pos_w.unsqueeze(-1) * (pos_stack - z_code_0)).sum(dim=0, keepdim=True)
+                z_delta = z_delta + rl_step_size * z_pos
+            if bool(neg_mask.any()):
+                neg_w = torch.softmax((-r1_adv[neg_mask]) / 0.5, dim=0)
+                neg_stack = torch.cat(
+                    [r1_abs_vecs[i] for i in range(len(r1_pool)) if bool(neg_mask[i])], dim=0
+                )
+                z_neg = (neg_w.unsqueeze(-1) * (neg_stack - z_code_0)).sum(dim=0, keepdim=True)
+                z_delta = z_delta - (0.4 * rl_step_size) * z_neg
+
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
+                z_code_1 = self.coe.abstraction_norm(
+                    (z_code_0 + z_delta).to(next(self.coe.abstraction_norm.parameters()).dtype)
+                ).float()
+                abs_norm = float(z_code_1.norm(dim=-1).mean().item())
+
+            best_r1_idx = int(r1_rewards.argmax().item())
+            best_r1_trace = r1_pool[best_r1_idx][2]
+            best_t_full = ""
+            first_t_sent = ast_premise
+            if "#T$#" in best_r1_trace and "#A$#" in best_r1_trace:
+                t_raw = best_r1_trace.split("#T$#", 1)[1].split("#A$#", 1)[0].strip()
+                best_t_full = t_raw
+                sent_parts = re.split(r"(?<=[.!?])\s+", t_raw)
+                if sent_parts and len(sent_parts[0].strip()) >= 12:
+                    first_t_sent = sent_parts[0].strip()
+
+            # 4. Round 2 Tree-Guided Rollouts conditioned on RL-updated z_code_1
+            r2_pool: list[tuple[int, float, str, int, str]] = []
+
+            torch.manual_seed(seed + 509)
+            tr_r2_full = self.generate_uta(
+                user_prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=0.22,
+                recurrence_steps=2,
+                latent_prior=z_code_1,
+                latent_prior_scale=prior_scale * 1.25,
+                thought_prefix=ast_premise,
+                lock_thought=False,
+            )
+            r2_pool.append((2, 0.22, tr_r2_full, 2, "r2_rl_multifile_steered"))
+
+            torch.manual_seed(seed + 619)
+            tr_r2_tree = self.generate_uta(
+                user_prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=0.18,
+                recurrence_steps=2,
+                latent_prior=z_code_1,
+                latent_prior_scale=prior_scale,
+                thought_prefix=first_t_sent,
+                lock_thought=False,
+            )
+            r2_pool.append((2, 0.18, tr_r2_tree, 2, "r2_tree_thought_cont"))
+
+            torch.manual_seed(seed + 743)
+            tr_r2_refine = self.generate_uta(
+                user_prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=0.20,
+                recurrence_steps=2,
+                latent_prior=z_code_1,
+                latent_prior_scale=prior_scale,
+                thought_prefix=(best_t_full if best_t_full else ast_premise),
+                lock_thought=bool(best_t_full),
+            )
+            r2_pool.append((2, 0.20, tr_r2_refine, 2, "r2_rl_answer_refine"))
+
+            # 5. Joint Warmed-COE + Multi-File ContextLMCompressor Verification across Round 1 + Round 2
+            combined_pool = r1_pool + r2_pool
+            all_scored, _ = _score_codebase_pool(combined_pool, z_code_1)
+
+            r1_joint = [c for c in all_scored if c.round_id == 1]
+            r2_joint = [c for c in all_scored if c.round_id == 2]
+            r1_best = max(r1_joint, key=lambda c: c.composite_score)
+            r2_best = max(r2_joint, key=lambda c: c.composite_score)
+            overall_best = max(
+                all_scored,
+                key=lambda c: c.composite_score + 0.02 * max(0.0, c.abstraction_alignment),
+            )
+
+            return CodebaseRAGGenerationOutput(
+                text=overall_best.text,
+                baseline_text=baseline_text,
+                selected_index=overall_best.index,
+                selected_round=overall_best.round_id,
+                selected_strategy=overall_best.strategy,
+                improved_over_baseline=(overall_best.text != baseline_text),
+                improved_in_round2=(overall_best.round_id == 2),
+                round1_best_score=round(r1_best.composite_score, 4),
+                round2_best_score=round(r2_best.composite_score, 4),
+                final_best_score=round(overall_best.composite_score, 4),
+                routed_address=mfile.primary_address,
+                routed_symbol=mfile.primary_symbol,
+                routed_summary=mfile.primary_summary,
+                routed_confidence=round(mfile.primary_confidence, 4),
+                focal_statement=mfile.focal_statement,
+                focal_invariant=mfile.focal_invariant,
+                callees=tuple(c["symbol"] for c in mfile.callees),
+                participating_files=mfile.participating_files,
+                num_files_folded=mfile.num_files_folded,
+                raw_source_tokens=mfile.raw_source_tokens,
+                compressed_gist_tokens=mfile.compressed_gist_tokens,
+                token_folding_ratio=round(mfile.token_folding_ratio, 2),
+                byte_compression_ratio=round(mfile.byte_compression_ratio, 2),
                 extra_prompt_tokens=0,
                 round1_advantages=r1_adv_tuple,
                 candidates=tuple(all_scored),

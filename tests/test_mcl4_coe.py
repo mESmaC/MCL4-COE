@@ -1525,9 +1525,37 @@ def test_context_memory_turboquant_atxy_and_codebase_warmup(tmp_path: Path) -> N
     )
     assert "symbol" in q_res and "address" in q_res
 
-    # 3. Verify exact <1ms restoration of base weights (0.0 parameter drift)
+    # 3. Verify Tier-3 ContextLMCompressor multi-file synthesis & end-to-end codebase-grounded generation
+    mfile = engine.synthesize_multifile_context(
+        model,
+        session,
+        "How does select_best_page call normalize_scores across modules?",
+        max_files=2,
+        top_k_candidates=4,
+    )
+    assert mfile.num_files_folded == 2
+    assert mfile.compressed_gist_tokens == 12
+    assert mfile.compressed_state.hidden.shape == (1, 12, 64)
+    assert mfile.multifile_latent_prior.shape == (1, 64)
+
+    ctrl = MultiPassController(model)
+    rag_out = ctrl.generate_uta_with_codebase_session(
+        "How does select_best_page call normalize_scores?",
+        engine,
+        session,
+        max_files=2,
+        top_k_candidates=4,
+        max_new_tokens=20,
+    )
+    assert "#T$#" in rag_out.text and "#A$#" in rag_out.text
+    assert rag_out.num_files_folded == 2
+    assert rag_out.extra_prompt_tokens == 0
+    assert len(rag_out.candidates) == 9
+
+    # 4. Verify exact <1ms restoration of base weights (0.0 parameter drift)
     session.restore_base_weights(model)
     for name, param in model.named_parameters():
         if name in session.base_operator_state:
             drift = float((param.detach().cpu() - session.base_operator_state[name]).abs().max().item())
             assert drift == 0.0
+

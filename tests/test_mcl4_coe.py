@@ -1552,10 +1552,43 @@ def test_context_memory_turboquant_atxy_and_codebase_warmup(tmp_path: Path) -> N
     assert rag_out.extra_prompt_tokens == 0
     assert len(rag_out.candidates) == 9
 
-    # 4. Verify exact <1ms restoration of base weights (0.0 parameter drift)
+    # 4. Verify Incremental Dirty-Page Refresh (modifying an existing file + adding a new symbol + WAL framing)
+    assert engine.detect_dirty_files(session) == []
+    (pkg / "router.py").write_text(
+        'from .math_ops import normalize_scores\n\n'
+        'def select_best_page(scores: list[float]) -> int:\n'
+        '    """Route query to the highest normalized page index with tie-breaking."""\n'
+        '    normed = normalize_scores(scores)\n'
+        '    return int(normed.index(max(normed)))\n\n'
+        'def evict_stale_page(ages: list[int], max_age: int = 64) -> list[int]:\n'
+        '    """Evict cached TurboQuant pages older than max_age ticks."""\n'
+        '    return [idx for idx, a in enumerate(ages) if a > max_age]\n',
+        encoding="utf-8",
+    )
+    detected_dirty = engine.detect_dirty_files(session)
+    assert detected_dirty == ["mini_pkg/router.py"]
+
+    wal_file = tmp_path / "session_dirty.wal"
+    refresh_rep = engine.refresh_dirty_files(
+        model,
+        session,
+        micro_warmup_steps=2,
+        wal_path=wal_file,
+    )
+    assert refresh_rep.dirty_files == ("mini_pkg/router.py",)
+    assert "mini_pkg/router.py:evict_stale_page" in refresh_rep.added_symbols
+    assert "mini_pkg/router.py:select_best_page" in refresh_rep.modified_symbols
+    assert refresh_rep.recompressed_pages == 1
+    assert refresh_rep.wal_frames_appended >= 3
+    assert wal_file.is_file() and wal_file.stat().st_size > 0
+    assert engine.detect_dirty_files(session) == []
+    assert session.store.resolve("mini_pkg/router.py:evict_stale_page") is not None
+
+    # 5. Verify exact <1ms restoration of base weights (0.0 parameter drift)
     session.restore_base_weights(model)
     for name, param in model.named_parameters():
         if name in session.base_operator_state:
             drift = float((param.detach().cpu() - session.base_operator_state[name]).abs().max().item())
             assert drift == 0.0
+
 

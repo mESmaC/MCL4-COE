@@ -753,6 +753,22 @@ class ATXYPageStore:
             return None
         return self.lookup(packed)
 
+    def delete(self, addr: str | int | ATXYAddress) -> bool:
+        """Remove an `A.TXY` cell from its page directory and clean up its reverse alias."""
+        a = (
+            addr
+            if isinstance(addr, ATXYAddress)
+            else (unpack_atxy(addr) if isinstance(addr, int) else parse_atxy(addr))
+        )
+        page = self._directory.get(a.directory_index)
+        if page is None or a.cell not in page:
+            return False
+        rec, _ = page.pop(a.cell)
+        norm = self._normalize_alias(rec.payload)
+        if norm and self._aliases.get(norm) == a.packed:
+            self._aliases.pop(norm, None)
+        return True
+
     def records(self) -> list[ATXYRecord]:
         out: list[ATXYRecord] = []
         for di in sorted(self._directory):
@@ -1271,6 +1287,24 @@ class MultiFileSynthesisResult:
 
 
 @dataclass
+class DirtyPageRefreshReport:
+    """Telemetry from an incremental dirty-file AST + `A.TXY` WAL + `TurboQuant` page refresh."""
+
+    dirty_files: tuple[str, ...]
+    updated_file_addresses: tuple[str, ...]
+    updated_symbol_addresses: tuple[str, ...]
+    added_symbols: tuple[str, ...]
+    modified_symbols: tuple[str, ...]
+    removed_symbols: tuple[str, ...]
+    wal_frames_appended: int
+    recompressed_pages: int
+    mean_refresh_cosine: float
+    micro_warmup_steps: int
+    micro_warmup_loss: float
+    elapsed_ms: float
+
+
+@dataclass
 class CodebaseSessionState:
     """Session-scoped virtual memory (`A.TXY` + `TurboQuant`) and reversible fast-weight snapshot."""
 
@@ -1296,6 +1330,9 @@ class CodebaseSessionState:
     context_compressor: ContextLMCompressor | None = None
     base_compressor_state: dict[str, Tensor] = field(default_factory=dict)
     file_token_counts: dict[str, int] = field(default_factory=dict)
+    file_digests: dict[str, str] = field(default_factory=dict)
+    file_addresses: dict[str, str] = field(default_factory=dict)
+    subsystems: tuple[str, ...] = ("src",)
 
     @property
     def compression_ratio(self) -> float:
@@ -1483,6 +1520,8 @@ class CodebaseWarmupEngine:
         file_turboquant_pages: dict[str, CompressedEncodedState] = {}
         file_latent_priors: dict[str, Tensor] = {}
         file_token_counts: dict[str, int] = {}
+        file_digests: dict[str, str] = {}
+        file_addresses: dict[str, str] = {}
 
         d_model = int(coe.backbone.config.d_model)
         context_compressor = ContextLMCompressor(
@@ -1510,8 +1549,11 @@ class CodebaseWarmupEngine:
             if not fpath.is_file():
                 continue
             src_text = fpath.read_text(encoding="utf-8", errors="replace")
+            src_bytes = src_text.encode("utf-8")
             src_lines = src_text.splitlines()
-            total_repo_bytes += len(src_text.encode("utf-8"))
+            total_repo_bytes += len(src_bytes)
+            file_digests[frec.payload] = hashlib.sha256(src_bytes).hexdigest()
+            file_addresses[frec.payload] = frec.address
             toks = tokenizer.encode(src_text, add_bos=False, add_eos=False)
             total_repo_tokens += len(toks)
             file_token_counts[frec.address] = len(toks)
@@ -1606,6 +1648,9 @@ class CodebaseWarmupEngine:
             context_compressor=context_compressor,
             base_compressor_state=base_compressor_state,
             file_token_counts=file_token_counts,
+            file_digests=file_digests,
+            file_addresses=file_addresses,
+            subsystems=self.subsystems,
         )
 
     def _build_codebase_tasks(
@@ -2354,4 +2399,507 @@ class CodebaseWarmupEngine:
             compressed_state=compressed_state,
             multifile_latent_prior=multifile_latent_prior,
         )
+
+    def detect_dirty_files(self, session: CodebaseSessionState) -> list[str]:
+        """Scan `session.repo_root` and return repo-relative POSIX paths of added, modified, or deleted `.py` files."""
+        root = Path(session.repo_root).expanduser().resolve()
+        subsystems = session.subsystems or self.subsystems
+        dirty: set[str] = set()
+        seen_on_disk: set[str] = set()
+
+        for sub in subsystems[:ATXY_BASE]:
+            sub_dir = root / sub
+            if not sub_dir.is_dir():
+                continue
+            py_files = sorted(p for p in sub_dir.rglob("*.py") if "__pycache__" not in p.parts)[
+                :ATXY_BASE
+            ]
+            for py_path in py_files:
+                rel = py_path.relative_to(root).as_posix()
+                seen_on_disk.add(rel)
+                src_bytes = py_path.read_text(encoding="utf-8", errors="replace").encode("utf-8")
+                digest = hashlib.sha256(src_bytes).hexdigest()
+                if session.file_digests.get(rel) != digest:
+                    dirty.add(rel)
+
+        for rel in list(session.file_digests.keys()):
+            if rel not in seen_on_disk and not (root / rel).is_file():
+                dirty.add(rel)
+
+        return sorted(dirty)
+
+    def refresh_dirty_files(
+        self,
+        coe: CognitiveOperatorEnsemble,
+        session: CodebaseSessionState,
+        dirty_paths: Sequence[str | Path] | None = None,
+        *,
+        micro_warmup_steps: int = 3,
+        lr: float = 2.0e-3,
+        wal_path: str | Path | None = None,
+    ) -> DirtyPageRefreshReport:
+        """Incrementally re-index dirty `.py` files into `ATXYPageStore` (`N5` WAL), re-quantize only their 4-bit `TurboQuant` pages, and run a targeted micro-RL fast-weight update."""
+        t0 = time.perf_counter()
+        root = Path(session.repo_root).expanduser().resolve()
+        subsystems = session.subsystems or self.subsystems
+
+        if dirty_paths is None:
+            dirty_rels = self.detect_dirty_files(session)
+        else:
+            norm_rels: list[str] = []
+            for p in dirty_paths:
+                pp = Path(p)
+                if pp.is_absolute():
+                    rel = pp.resolve().relative_to(root).as_posix()
+                else:
+                    rel = pp.as_posix().lstrip("./")
+                if rel not in norm_rels:
+                    norm_rels.append(rel)
+            dirty_rels = norm_rels
+
+        if not dirty_rels:
+            return DirtyPageRefreshReport(
+                dirty_files=(),
+                updated_file_addresses=(),
+                updated_symbol_addresses=(),
+                added_symbols=(),
+                modified_symbols=(),
+                removed_symbols=(),
+                wal_frames_appended=0,
+                recompressed_pages=0,
+                mean_refresh_cosine=session.mean_turboquant_cosine,
+                micro_warmup_steps=0,
+                micro_warmup_loss=0.0,
+                elapsed_ms=(time.perf_counter() - t0) * 1000.0,
+            )
+
+        device = next(coe.parameters()).device
+        vocab_size = int(getattr(coe.backbone.config, "vocab_size", 260))
+        tokenizer = get_tokenizer(vocab_size)
+        max_len = min(self.max_seq_len, int(coe.backbone.config.max_seq_len))
+        initial_wal_len = len(session.store._wal_frames)
+
+        dirty_set = set(dirty_rels)
+        added_symbols: list[str] = []
+        modified_symbols: list[str] = []
+        removed_symbols: list[str] = []
+        updated_file_addrs: list[str] = []
+        updated_sym_addrs: list[str] = []
+
+        # 1. Build symbol index of unchanged files so CALLS edges resolve across the full repo
+        sym_index: dict[str, list[str]] = {}
+        for rec in session.store.records():
+            if rec.parsed_address.A == 1 and ":" in rec.payload:
+                r_rel, s_name = rec.payload.split(":", 1)
+                if r_rel not in dirty_set:
+                    sym_index.setdefault(s_name, []).append(rec.address)
+
+        parsed_dirty: dict[
+            str,
+            tuple[
+                str,
+                int,
+                int,
+                str,
+                list[str],
+                list[tuple[str, str, str, ast.AST]],
+            ],
+        ] = {}
+
+        # 2. Parse dirty files (or clean up deleted files) and register their A.TXY coordinates
+        for rel in dirty_rels:
+            fpath = root / rel
+            old_f_addr = session.file_addresses.get(rel)
+            old_frec = session.store.lookup(old_f_addr) if old_f_addr else None
+
+            if not fpath.is_file():
+                # File was deleted on disk
+                if old_frec is not None:
+                    for s_addr in old_frec.down:
+                        srec = session.store.lookup(s_addr)
+                        if srec is not None:
+                            removed_symbols.append(srec.payload)
+                        session.store.delete(s_addr)
+                        session.symbol_sources.pop(s_addr, None)
+                    session.store.delete(old_frec.address)
+                    session.file_turboquant_pages.pop(old_frec.address, None)
+                    session.file_latent_priors.pop(old_frec.address, None)
+                    session.file_token_counts.pop(old_frec.address, None)
+                session.file_digests.pop(rel, None)
+                session.file_addresses.pop(rel, None)
+                continue
+
+            if old_f_addr is not None:
+                parsed_f = parse_atxy(old_f_addr)
+                t_idx, x_idx = parsed_f.T, parsed_f.X
+                f_addr = old_f_addr
+            else:
+                # Allocate new A=2 file slot in matching subsystem
+                t_idx = 0
+                for idx_sub, sub in enumerate(subsystems[:ATXY_BASE]):
+                    if rel == sub or rel.startswith(sub.rstrip("/") + "/"):
+                        t_idx = idx_sub
+                        break
+                existing_x = [
+                    r.parsed_address.X
+                    for r in session.store.records()
+                    if r.parsed_address.A == 2 and r.parsed_address.T == t_idx
+                ]
+                x_idx = (max(existing_x) + 1) if existing_x else 0
+                f_addr = str(ATXYAddress(2, t_idx, x_idx, 0))
+                session.file_addresses[rel] = f_addr
+
+                sub_addr = str(ATXYAddress(3, t_idx, 0, 0))
+                sub_rec = session.store.lookup(sub_addr)
+                if sub_rec is not None and f_addr not in sub_rec.down:
+                    new_down = tuple(list(sub_rec.down) + [f_addr])
+                    session.store.commit_write(
+                        ATXYRecord(
+                            address=sub_addr,
+                            kind="subsystem",
+                            payload=sub_rec.payload,
+                            summary=f"Subsystem {sub_rec.payload} ({len(new_down)} files)",
+                            down=new_down,
+                            fields={"file_count": len(new_down)},
+                            version=sub_rec.version + 1,
+                            provenance=("ast:subsystem", "refresh:dirty"),
+                        ),
+                        wal_path=wal_path,
+                    )
+
+            src_text = fpath.read_text(encoding="utf-8", errors="replace")
+            src_bytes = src_text.encode("utf-8")
+            src_lines = src_text.splitlines()
+            session.file_digests[rel] = hashlib.sha256(src_bytes).hexdigest()
+
+            syms: list[tuple[str, str, str, ast.AST]] = []
+            try:
+                tree = ast.parse(src_text)
+                for node in tree.body:
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                        kind = "class" if isinstance(node, ast.ClassDef) else "function"
+                        summary = _summarize_ast_symbol(node, rel)
+                        syms.append((node.name, kind, summary, node))
+            except SyntaxError:
+                syms = []
+
+            syms.sort(key=lambda item: item[0].startswith("_"))
+            syms = syms[:ATXY_BASE]
+            parsed_dirty[rel] = (f_addr, t_idx, x_idx, src_text, src_lines, syms)
+
+            for y_idx, (s_name, _kind, _sum, _nd) in enumerate(syms):
+                s_addr = str(ATXYAddress(1, t_idx, x_idx, y_idx))
+                sym_index.setdefault(s_name, []).append(s_addr)
+
+        # 3. Commit updated A=2 file and A=1 symbol records to ATXYPageStore + re-compress 4-bit TurboQuant pages
+        refresh_cosines: list[float] = []
+        with torch.no_grad():
+            for rel, (f_addr, t_idx, x_idx, src_text, src_lines, syms) in parsed_dirty.items():
+                old_frec = session.store.lookup(f_addr)
+                old_sym_map: dict[str, tuple[str, str, str]] = {}
+                if old_frec is not None:
+                    for old_s_addr in old_frec.down:
+                        old_srec = session.store.lookup(old_s_addr)
+                        if old_srec is not None:
+                            old_sym_map[old_srec.payload] = (
+                                old_s_addr,
+                                old_srec.summary,
+                                session.symbol_sources.get(old_s_addr, ""),
+                            )
+
+                new_sym_addrs = tuple(
+                    str(ATXYAddress(1, t_idx, x_idx, y_idx)) for y_idx in range(len(syms))
+                )
+                if old_frec is not None:
+                    for old_s_addr in old_frec.down:
+                        if old_s_addr not in new_sym_addrs:
+                            session.store.delete(old_s_addr)
+                            session.symbol_sources.pop(old_s_addr, None)
+
+                new_payloads = {f"{rel}:{s_name}" for s_name, _, _, _ in syms}
+                for old_payload in old_sym_map:
+                    if old_payload not in new_payloads:
+                        removed_symbols.append(old_payload)
+
+                sub_addr = str(ATXYAddress(3, t_idx, 0, 0))
+                session.store.commit_write(
+                    ATXYRecord(
+                        address=f_addr,
+                        kind="file",
+                        payload=rel,
+                        summary=f"Module {rel} ({len(syms)} top-level symbols)",
+                        up=(sub_addr,),
+                        down=new_sym_addrs,
+                        fields={"symbol_count": len(syms)},
+                        version=(old_frec.version + 1 if old_frec is not None else 1),
+                        provenance=("ast:file", "refresh:dirty"),
+                    ),
+                    wal_path=wal_path,
+                )
+                updated_file_addrs.append(f_addr)
+
+                toks = tokenizer.encode(src_text, add_bos=False, add_eos=False)
+                session.file_token_counts[f_addr] = len(toks)
+
+                module_summary_lines = [f"# Module {rel}"]
+                for y_idx, (s_name, s_kind, s_sum, s_node) in enumerate(syms):
+                    s_addr = str(ATXYAddress(1, t_idx, x_idx, y_idx))
+                    payload = f"{rel}:{s_name}"
+
+                    start_ln = max(0, int(getattr(s_node, "lineno", 1)) - 1)
+                    end_ln = min(
+                        len(src_lines),
+                        int(getattr(s_node, "end_lineno", start_ln + self.max_symbol_lines)),
+                        start_ln + self.max_symbol_lines,
+                    )
+                    snippet = "\n".join(src_lines[start_ln:end_ln]).strip()
+
+                    callees: list[str] = []
+                    for n in ast.walk(s_node):
+                        if isinstance(n, ast.Call):
+                            cname = (
+                                n.func.id
+                                if isinstance(n.func, ast.Name)
+                                else (n.func.attr if isinstance(n.func, ast.Attribute) else None)
+                            )
+                            if cname and cname != s_name and len(sym_index.get(cname, ())) == 1:
+                                tgt = sym_index[cname][0]
+                                if tgt not in callees:
+                                    callees.append(tgt)
+
+                    is_added = payload not in old_sym_map
+                    is_modified = (
+                        not is_added
+                        and (
+                            old_sym_map[payload][1] != s_sum
+                            or old_sym_map[payload][2] != snippet
+                        )
+                    )
+                    if is_added:
+                        added_symbols.append(payload)
+                        updated_sym_addrs.append(s_addr)
+                    elif is_modified:
+                        modified_symbols.append(payload)
+                        updated_sym_addrs.append(s_addr)
+
+                    old_cell_rec = session.store.lookup(s_addr)
+                    session.store.commit_write(
+                        ATXYRecord(
+                            address=s_addr,
+                            kind=s_kind,
+                            payload=payload,
+                            summary=s_sum,
+                            up=(f_addr,),
+                            rels={"CALLS": tuple(callees)} if callees else {},
+                            fields={"lineno": int(getattr(s_node, "lineno", 1))},
+                            version=(old_cell_rec.version + 1 if old_cell_rec is not None else 1),
+                            provenance=("ast:symbol", "refresh:dirty"),
+                        ),
+                        wal_path=wal_path,
+                    )
+                    session.symbol_sources[s_addr] = snippet
+                    module_summary_lines.append(f"{s_name}: {s_sum}")
+
+                # Re-encode only this dirty module through lower-CED & quantize via 4-bit TurboQuant
+                mod_doc = "\n".join(module_summary_lines)
+                mod_ids = tokenizer.encode(mod_doc, add_bos=True, add_eos=True)[:max_len]
+                inp_t = torch.tensor([mod_ids], dtype=torch.long, device=device)
+                len_t = torch.tensor([len(mod_ids)], dtype=torch.long, device=device)
+                valid_mask = torch.ones((1, len(mod_ids)), dtype=torch.bool, device=device)
+                enc_state = coe.backbone.encode_state(inp_t, valid_mask, causal=True)
+                comp_state = compress_encoded_state(enc_state, seed=1337 + x_idx * 17 + t_idx * 101)
+                deq_state = comp_state.decompress()
+
+                cos = float(
+                    F.cosine_similarity(
+                        enc_state.hidden.float().reshape(-1, enc_state.hidden.shape[-1]),
+                        deq_state.hidden.float().reshape(-1, deq_state.hidden.shape[-1]),
+                        dim=-1,
+                    )
+                    .mean()
+                    .item()
+                )
+                refresh_cosines.append(cos)
+                session.file_turboquant_pages[f_addr] = comp_state
+                session.file_latent_priors[f_addr] = coe.compress_abstraction(
+                    inp_t, len_t, level="standard"
+                )[0].detach()
+
+        # Recompute aggregate session statistics
+        all_file_recs = [r for r in session.store.records() if r.parsed_address.A == 2]
+        all_sym_recs = [r for r in session.store.records() if r.parsed_address.A == 1]
+        session.total_repo_files = len(all_file_recs)
+        session.total_repo_symbols = len(all_sym_recs)
+        session.total_repo_tokens = sum(session.file_token_counts.values())
+        session.uncompressed_state_bytes = sum(
+            p.uncompressed_bytes for p in session.file_turboquant_pages.values()
+        )
+        session.compressed_state_bytes = sum(
+            p.compressed_bytes for p in session.file_turboquant_pages.values()
+        )
+        if refresh_cosines:
+            session.mean_turboquant_cosine = 0.85 * session.mean_turboquant_cosine + 0.15 * (
+                sum(refresh_cosines) / len(refresh_cosines)
+            )
+
+        # 4. Targeted Micro-RL Fast-Weight Adaptation exclusively on dirty symbols & pages
+        micro_loss_val = 0.0
+        actual_micro_steps = 0
+        if micro_warmup_steps > 0 and updated_sym_addrs and len(all_sym_recs) >= 4:
+            target_set = set(updated_sym_addrs)
+            sym_toks = [_code_tokens_and_stems(f"{r.payload} {r.summary}") for r in all_sym_recs]
+            k_opts = min(self.num_route_options, len(all_sym_recs))
+            micro_tasks: list[DecisionExample] = []
+
+            for task_i, idx in enumerate(
+                [i for i, r in enumerate(all_sym_recs) if r.address in target_set]
+            ):
+                rec = all_sym_recs[idx]
+                rel_path, sym_name = (
+                    rec.payload.split(":", 1) if ":" in rec.payload else (rec.payload, rec.payload)
+                )
+                mod_short = Path(rel_path).name
+                scored_neg = []
+                for j, other in enumerate(all_sym_recs):
+                    if j == idx:
+                        continue
+                    same_mod = 1.5 if other.up == rec.up else 0.0
+                    ov = len(sym_toks[idx] & sym_toks[j]) / max(1, len(sym_toks[idx]))
+                    scored_neg.append((same_mod + ov, j))
+                scored_neg.sort(key=lambda pair: pair[0], reverse=True)
+                neg_indices = [j for _, j in scored_neg[: k_opts - 1]]
+                target_pos = task_i % k_opts
+                cand_list = [all_sym_recs[j] for j in neg_indices]
+                cand_list.insert(target_pos, rec)
+                desc_tuple = tuple(
+                    _truncate_to_token_budget(c.to_candidate_description(), vocab_size, max_len)
+                    for c in cand_list
+                )
+                val_tuple = tuple(c.address for c in cand_list)
+                q_text = (
+                    f"#U$# Explore {mod_short}: locate {rec.kind} `{sym_name}` — {rec.summary}.\n"
+                    f"#Q$# Select the exact A.TXY record matching the request."
+                )
+                micro_tasks.append(
+                    DecisionExample(
+                        question_id=f"dirty_route_{task_i}",
+                        kind="choice",
+                        context=_truncate_to_token_budget(q_text, vocab_size, max_len),
+                        descriptions=desc_tuple,
+                        values=val_tuple,
+                        target=target_pos,
+                    )
+                )
+
+            if micro_tasks:
+                op_names = set(self._operator_parameter_names(coe))
+                orig_grad = {name: p.requires_grad for name, p in coe.named_parameters()}
+                trainable_params = []
+                for name, p in coe.named_parameters():
+                    if name in op_names:
+                        p.requires_grad_(True)
+                        trainable_params.append(p)
+                    else:
+                        p.requires_grad_(False)
+                coe.train()
+                coe.backbone.eval()
+
+                with torch.enable_grad():
+                    opt = torch.optim.AdamW(trainable_params, lr=lr, weight_decay=1e-4)
+                    batch = collate_decisions(
+                        micro_tasks,
+                        max_length=max_len,
+                        device=device,
+                        vocab_size=vocab_size,
+                        tokenizer=tokenizer,
+                    )
+                    for _ in range(micro_warmup_steps):
+                        opt.zero_grad(set_to_none=True)
+                        dec_out = coe.forward_decision(
+                            batch["context_ids"],
+                            batch["context_lengths"],
+                            batch["option_ids"],
+                            batch["option_lengths"],
+                            recurrence_steps=1,
+                        )
+                        scale = coe._scale()
+                        valid_opts = batch["option_lengths"] > 0
+                        logits = (dec_out.similarities.float() * scale).masked_fill(
+                            ~valid_opts, -torch.inf
+                        )
+                        loss = F.cross_entropy(logits, batch["targets"])
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(trainable_params, 1.0)
+                        opt.step()
+                        micro_loss_val = float(loss.item())
+                        actual_micro_steps += 1
+
+                    if session.context_compressor is not None and updated_file_addrs:
+                        comp_mod = session.context_compressor.to(device=device)
+                        comp_mod.train()
+                        comp_opt = torch.optim.AdamW(comp_mod.parameters(), lr=lr, weight_decay=1e-4)
+                        deq_pages = [
+                            session.file_turboquant_pages[fa].decompress()
+                            for fa in updated_file_addrs
+                            if fa in session.file_turboquant_pages
+                        ]
+                        prior_targets = torch.stack(
+                            [
+                                session.file_latent_priors[fa].to(device=device).float()
+                                for fa in updated_file_addrs
+                                if fa in session.file_latent_priors
+                            ],
+                            dim=0,
+                        )
+                        for _ in range(min(2, micro_warmup_steps)):
+                            comp_opt.zero_grad(set_to_none=True)
+                            folded_means = []
+                            for enc_p in deq_pages:
+                                h = enc_p.hidden.to(device=device)
+                                c_val = enc_p.valid.to(device=device, dtype=torch.bool)
+                                q = comp_mod.gist_queries.unsqueeze(0).to(
+                                    device=device, dtype=h.dtype
+                                )
+                                scores = torch.matmul(
+                                    q.float(), h.float().transpose(-1, -2)
+                                ) / math.sqrt(comp_mod.d_model)
+                                scores = scores.masked_fill(~c_val.unsqueeze(1), -1e9)
+                                attn = F.softmax(scores, dim=-1)
+                                pooled = torch.matmul(attn, h.float())
+                                chunk_gist = 0.85 * pooled + 0.15 * comp_mod.gist_norm(pooled)
+                                folded_means.append(chunk_gist.mean(dim=1).squeeze(0))
+                            folded_stack = torch.stack(folded_means, dim=0)
+                            c_loss = (
+                                1.0
+                                - F.cosine_similarity(folded_stack, prior_targets, dim=-1).mean()
+                            )
+                            c_loss.backward()
+                            comp_opt.step()
+                        comp_mod.eval()
+
+                for name, p in coe.named_parameters():
+                    p.requires_grad_(orig_grad.get(name, True))
+                coe.eval()
+
+        wal_appended = len(session.store._wal_frames) - initial_wal_len
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        return DirtyPageRefreshReport(
+            dirty_files=tuple(dirty_rels),
+            updated_file_addresses=tuple(updated_file_addrs),
+            updated_symbol_addresses=tuple(updated_sym_addrs),
+            added_symbols=tuple(added_symbols),
+            modified_symbols=tuple(modified_symbols),
+            removed_symbols=tuple(removed_symbols),
+            wal_frames_appended=wal_appended,
+            recompressed_pages=len(refresh_cosines),
+            mean_refresh_cosine=(
+                sum(refresh_cosines) / len(refresh_cosines)
+                if refresh_cosines
+                else session.mean_turboquant_cosine
+            ),
+            micro_warmup_steps=actual_micro_steps,
+            micro_warmup_loss=round(micro_loss_val, 4),
+            elapsed_ms=round(elapsed_ms, 2),
+        )
+
 

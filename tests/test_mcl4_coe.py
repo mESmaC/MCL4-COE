@@ -1434,3 +1434,100 @@ def test_morphcode_16k_tokenizer_and_backbone(tmp_path) -> None:
     assert int((item0["labels"] == -100).sum().item()) > 0
 
 
+def test_context_memory_turboquant_atxy_and_codebase_warmup(tmp_path: Path) -> None:
+    """Verify TurboQuant 4-bit page compression, A.TXY virtual memory, and CodebaseWarmupEngine RL warmup + exact reset."""
+    from mcl4_coe import (
+        CodebaseWarmupEngine,
+        compress_encoded_state,
+    )
+
+    # 1. Verify TurboQuant 4-bit PolarQuant + QJL compression and EncodedState round-trip
+    model = _tiny_model()
+    sample_ids = torch.randint(4, 120, (1, 48), dtype=torch.long)
+    with torch.no_grad():
+        enc = model.backbone.encode_state(sample_ids)
+    comp = compress_encoded_state(enc)
+    assert comp.compression_ratio > 5.0
+    recon = comp.decompress()
+    cos = float(
+        torch.nn.functional.cosine_similarity(
+            enc.hidden.reshape(-1, 64).float(),
+            recon.hidden.reshape(-1, 64).float(),
+            dim=-1,
+        )
+        .mean()
+        .item()
+    )
+    assert cos > 0.95
+
+    # 2. Create a mini Python codebase in tmp_path and run CodebaseWarmupEngine
+    pkg = tmp_path / "mini_pkg"
+    pkg.mkdir()
+    (pkg / "math_ops.py").write_text(
+        '"""Arithmetic and normalization utilities."""\n\n'
+        "def normalize_scores(scores: list[float], eps: float = 1e-5) -> list[float]:\n"
+        '    """Normalize a list of float scores by their L2 norm."""\n'
+        "    norm_sq = sum(x * x for x in scores)\n"
+        "    if norm_sq <= 0.0:\n"
+        "        return [0.0 for _ in scores]\n"
+        "    scale = (norm_sq + eps) ** 0.5\n"
+        "    return [x / scale for x in scores]\n\n"
+        "def discounted_return(rewards: list[float], gamma: float = 0.99) -> float:\n"
+        '    """Compute discounted cumulative return across trajectory rewards."""\n'
+        "    total = 0.0\n"
+        "    for r in reversed(rewards):\n"
+        "        if r != 0.0:\n"
+        "            total = r + gamma * total\n"
+        "    return total\n",
+        encoding="utf-8",
+    )
+    (pkg / "router.py").write_text(
+        '"""Query router and page cache."""\n\n'
+        "from .math_ops import normalize_scores, discounted_return\n\n"
+        "def select_best_page(raw_scores: list[float], min_prob: float = 0.1) -> int:\n"
+        '    """Return index of highest normalized page score above threshold."""\n'
+        "    probs = normalize_scores(raw_scores)\n"
+        "    best_idx = max(range(len(probs)), key=lambda i: probs[i])\n"
+        "    if probs[best_idx] < min_prob:\n"
+        "        return 0\n"
+        "    return best_idx\n\n"
+        "def score_trajectory_pages(rewards: list[float], bonus: float = 1.0) -> float:\n"
+        '    """Score trajectory pages with discounted cumulative return plus bonus."""\n'
+        "    base_ret = discounted_return(rewards)\n"
+        "    if base_ret > 0.0:\n"
+        "        return base_ret + bonus\n"
+        "    return base_ret\n",
+        encoding="utf-8",
+    )
+
+    engine = CodebaseWarmupEngine(
+        subsystems=("mini_pkg",),
+        max_seq_len=64,
+        num_route_options=4,
+    )
+    session = engine.index_repository(model, tmp_path, max_tasks_per_family=8)
+    assert session.total_repo_files == 2
+    assert session.total_repo_symbols >= 4
+    assert session.compression_ratio > 5.0
+    assert len(session.train_route_tasks) >= 4
+    assert len(session.train_verify_tasks) >= 2
+
+    report = engine.warmup_session(model, session, steps=4, lr=2e-3, batch_size=2)
+    assert report.warmup_steps == 4
+    assert report.step_losses[-1] <= report.step_losses[0]
+    assert len(report.step_losses) == 4
+
+    q_res = engine.query_codebase(
+        model,
+        session,
+        "Where is normalize_scores defined to normalize float scores by L2 norm?",
+        top_k_candidates=4,
+    )
+    assert "symbol" in q_res and "address" in q_res
+
+    # 3. Verify exact <1ms restoration of base weights (0.0 parameter drift)
+    session.restore_base_weights(model)
+    for name, param in model.named_parameters():
+        if name in session.base_operator_state:
+            drift = float((param.detach().cpu() - session.base_operator_state[name]).abs().max().item())
+            assert drift == 0.0

@@ -1343,7 +1343,7 @@ class CodebaseWarmupEngine:
         coe: CognitiveOperatorEnsemble,
         repo_root: str | Path,
         *,
-        max_tasks_per_family: int = 40,
+        max_tasks_per_family: int = 256,
     ) -> CodebaseSessionState:
         """Index `repo_root` into `ATXYPageStore` + `TurboQuant` pages and synthesize AST self-RL tasks."""
         root = Path(repo_root).expanduser().resolve()

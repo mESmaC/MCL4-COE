@@ -103,6 +103,7 @@ class BackboneOutput:
     router_z_loss: Tensor
     expert_load: Tensor
     anchor: Tensor | None = None
+    step_states: tuple[Tensor, ...] = ()
 
 
 @dataclass
@@ -113,6 +114,7 @@ class CausalLMOutput:
     aux_loss: Tensor
     router_z_loss: Tensor
     expert_load: Tensor
+    step_states: tuple[Tensor, ...] = ()
 
 
 class RecurrentFeedback(nn.Module):
@@ -649,6 +651,8 @@ class MCL4CEDBackbone(nn.Module):
         causal_cross_mask: Tensor | None = None,
         causal_cross: bool = False,
         candidate_encoded: EncodedState | None = None,
+        recurrent_kv: bool = False,
+        depth_ponder: bool = False,
     ) -> BackboneOutput:
         """Run upper CED decoder layers over candidates cross-attending to `encoded_state`."""
         if recurrence_steps < 1:
@@ -674,12 +678,26 @@ class MCL4CEDBackbone(nn.Module):
         ]
 
         state = anchor
+        step_states: list[Tensor] = []
         aux_losses = [candidate_encoded.aux_loss]
         z_losses = [candidate_encoded.router_z_loss]
         loads = [candidate_encoded.expert_load]
         for step in range(recurrence_steps):
             x = anchor if step == 0 else self.feedback(anchor, state, valid=candidate_valid)
-            for layer, (k_global, v_global) in zip(self.decoder_layers, global_kv_cache):
+            step_kv_cache = global_kv_cache
+            if (
+                recurrent_kv
+                and step > 0
+                and owner_rows is None
+                and x.shape == encoded_state.hidden.shape
+            ):
+                kv_state = self.encoder_norm(0.70 * encoded_state.hidden + 0.30 * x).masked_fill(
+                    ~encoded_state.valid.unsqueeze(-1), 0
+                )
+                step_kv_cache = [
+                    layer.project_global_kv(kv_state) for layer in self.decoder_layers
+                ]
+            for layer, (k_global, v_global) in zip(self.decoder_layers, step_kv_cache):
                 x, aux, z, load = layer(
                     x,
                     original_inputs,
@@ -697,6 +715,38 @@ class MCL4CEDBackbone(nn.Module):
                 z_losses.append(z)
                 loads.append(load.unsqueeze(0))
             state = self.final_norm(x).masked_fill(~candidate_valid.unsqueeze(-1), 0)
+            step_states.append(state)
+
+        if depth_ponder and len(step_states) > 1:
+            s1 = step_states[0]
+            if len(step_states) == 2:
+                s_deep = step_states[1]
+            else:
+                deep_stack = torch.stack(step_states[1:], dim=0)
+                w_decay = torch.pow(
+                    0.65,
+                    torch.arange(
+                        len(step_states) - 1,
+                        device=s1.device,
+                        dtype=s1.dtype,
+                    ),
+                )
+                w_decay = (w_decay / w_decay.sum()).view(-1, 1, 1, 1)
+                s_deep = (deep_stack * w_decay).sum(dim=0)
+
+            if causal_cross:
+                with torch.no_grad():
+                    l1 = self.lm_head(s1).float()
+                    p1 = F.softmax(l1, dim=-1)
+                    ent1 = -(p1 * p1.clamp_min(1e-9).log()).sum(dim=-1, keepdim=True)
+                    gate_ent = (0.40 * torch.sigmoid((ent1 - 1.8) / 0.6)).to(s1.dtype)
+                state = (s1 + gate_ent * (s_deep - s1)).masked_fill(
+                    ~candidate_valid.unsqueeze(-1), 0
+                )
+            else:
+                state = (0.75 * s1 + 0.25 * s_deep).masked_fill(
+                    ~candidate_valid.unsqueeze(-1), 0
+                )
 
         return BackboneOutput(
             hidden=state,
@@ -705,6 +755,7 @@ class MCL4CEDBackbone(nn.Module):
             router_z_loss=torch.stack(z_losses).mean(),
             expert_load=torch.cat(loads, dim=0),
             anchor=anchor,
+            step_states=tuple(step_states),
         )
 
     def encode(
@@ -714,6 +765,8 @@ class MCL4CEDBackbone(nn.Module):
         recurrence_steps: int = 1,
         latent_prior: Tensor | None = None,
         latent_prior_scale: float = 0.0,
+        recurrent_kv: bool = False,
+        depth_ponder: bool = False,
     ) -> BackboneOutput:
         """Causal full-sequence pass through lower encoder and upper CED decoder."""
         valid = input_ids != self.config.pad_id
@@ -748,6 +801,8 @@ class MCL4CEDBackbone(nn.Module):
             causal_local=True,
             causal_cross=True,
             candidate_encoded=encoded,
+            recurrent_kv=recurrent_kv,
+            depth_ponder=depth_ponder,
         )
         return BackboneOutput(
             hidden=decoded.hidden,
@@ -756,6 +811,7 @@ class MCL4CEDBackbone(nn.Module):
             router_z_loss=decoded.router_z_loss,
             expert_load=decoded.expert_load,
             anchor=decoded.anchor,
+            step_states=decoded.step_states,
         )
 
     def forward(
@@ -766,6 +822,8 @@ class MCL4CEDBackbone(nn.Module):
         recurrence_steps: int = 1,
         latent_prior: Tensor | None = None,
         latent_prior_scale: float = 0.0,
+        recurrent_kv: bool = False,
+        depth_ponder: bool = False,
     ) -> CausalLMOutput:
         """Autoregressive `U$ -> T$ -> A$` language modeling pass."""
         if targets is not None and targets.shape != input_ids.shape:
@@ -775,6 +833,8 @@ class MCL4CEDBackbone(nn.Module):
             recurrence_steps=recurrence_steps,
             latent_prior=latent_prior,
             latent_prior_scale=latent_prior_scale,
+            recurrent_kv=recurrent_kv,
+            depth_ponder=depth_ponder,
         )
         logits = self.lm_head(encoded.hidden)
         ce_loss, loss = None, None
@@ -798,4 +858,5 @@ class MCL4CEDBackbone(nn.Module):
             aux_loss=encoded.aux_loss,
             router_z_loss=encoded.router_z_loss,
             expert_load=encoded.expert_load,
+            step_states=encoded.step_states,
         )

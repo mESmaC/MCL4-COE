@@ -106,6 +106,8 @@ class COEConfig:
     initial_scale: float = 15.0
     eps: float = 1e-6
     recurrence_steps: int = 1
+    depth_ponder: bool = False
+    margin_halt_threshold: float | None = None
     strip_boundary_tokens_in_pool: bool = True
     bos_id: int = 257
     eos_id: int = 258
@@ -527,6 +529,8 @@ class CognitiveOperatorEnsemble(nn.Module):
         targets: Tensor | None = None,
         *,
         recurrence_steps: int | None = None,
+        depth_ponder: bool | None = None,
+        margin_halt_threshold: float | None = None,
     ) -> DecisionOutput:
         """Evaluate `Decision` (`Choice` / `Noul` / `Score`) with CED cross-attention.
 
@@ -554,7 +558,20 @@ class CognitiveOperatorEnsemble(nn.Module):
             if not valid_options.gather(-1, targets.long().unsqueeze(-1)).all():
                 raise ValueError("targets cannot select a masked option")
 
-        steps = self.config.recurrence_steps if recurrence_steps is None else recurrence_steps
+        use_ponder = self.config.depth_ponder if depth_ponder is None else depth_ponder
+        halt_thresh = (
+            self.config.margin_halt_threshold
+            if margin_halt_threshold is None
+            else margin_halt_threshold
+        )
+        if recurrence_steps is None:
+            steps = (
+                max(2, self.config.recurrence_steps)
+                if (use_ponder or halt_thresh is not None)
+                else self.config.recurrence_steps
+            )
+        else:
+            steps = recurrence_steps
         ctx_width = int(context_lengths.max().item())
         trimmed_ctx_ids = context_ids[:, :ctx_width].long()
         ctx_valid = (
@@ -608,6 +625,36 @@ class CognitiveOperatorEnsemble(nn.Module):
         canon_cand_proj = self.output_projection(cand_repr)
         canon_scores = self._similarity(canon_state_proj, canon_cand_proj)
 
+        similarities_step1: Tensor | None = None
+        if (use_ponder or halt_thresh is not None) and len(decoded_options.step_states) > 1:
+            ps_1, cr_1 = self.pooler.matched_pair_representations(
+                encoded_state.hidden,
+                trimmed_ctx_ids,
+                ctx_valid,
+                decoded_options.step_states[0],
+                canon_opt_ids,
+                canon_valid,
+                canon_owners,
+                cand_anchor=decoded_options.anchor,
+                strip_boundary=self.config.strip_boundary_tokens_in_pool,
+                bos_id=self.config.bos_id,
+                eos_id=self.config.eos_id,
+            )
+            cs_1 = self._similarity(
+                self.state_projection(ps_1),
+                self.output_projection(cr_1),
+            )
+            v_scores_1 = cs_1.index_select(0, inv_perm)
+            similarities_step1 = v_scores_1.new_zeros(valid_options.shape).masked_scatter(
+                valid_options, v_scores_1
+            )
+            if use_ponder and halt_thresh is None:
+                canon_scores = 0.70 * cs_1 + 0.30 * canon_scores
+            paired_state_repr = 0.70 * ps_1 + 0.30 * paired_state_repr
+            cand_repr = 0.70 * cr_1 + 0.30 * cand_repr
+            canon_state_proj = self.state_projection(paired_state_repr)
+            canon_cand_proj = self.output_projection(cand_repr)
+
         # Restore original caller option order via inv_perm
         valid_scores = canon_scores.index_select(0, inv_perm)
         state_proj = canon_state_proj.index_select(0, inv_perm)
@@ -619,6 +666,19 @@ class CognitiveOperatorEnsemble(nn.Module):
 
         with torch.autocast(device_type=context_ids.device.type, enabled=False):
             scale = self._scale()
+            if halt_thresh is not None and similarities_step1 is not None:
+                logits_1 = (similarities_step1.float() * scale).masked_fill(
+                    ~valid_options, -torch.inf
+                )
+                sorted_logits_1, _ = logits_1.sort(dim=-1, descending=True)
+                sorted_probs_1 = sorted_logits_1.softmax(dim=-1)
+                margin_1 = (sorted_probs_1[:, 0] - sorted_probs_1[:, 1]).unsqueeze(-1)
+                blended_sims = 0.70 * similarities_step1 + 0.30 * similarities
+                similarities = torch.where(
+                    margin_1 >= float(halt_thresh),
+                    similarities_step1,
+                    blended_sims,
+                )
             logits = (similarities.float() * scale).masked_fill(~valid_options, -torch.inf)
             probabilities = logits.softmax(dim=-1)
             aux_loss = 0.5 * (encoded_state.aux_loss.float() + decoded_options.aux_loss.float())
@@ -657,6 +717,8 @@ class CognitiveOperatorEnsemble(nn.Module):
         targets: Tensor,
         *,
         recurrence_steps: int | None = None,
+        depth_ponder: bool | None = None,
+        margin_halt_threshold: float | None = None,
     ) -> AllOperatorsOutput:
         """Train all COE operators in a single shared `encode_state` + `decode_candidates` pass.
 
@@ -672,7 +734,20 @@ class CognitiveOperatorEnsemble(nn.Module):
         """
         batch = context_ids.shape[0]
         valid_options = option_lengths > 0
-        steps = self.config.recurrence_steps if recurrence_steps is None else recurrence_steps
+        use_ponder = self.config.depth_ponder if depth_ponder is None else depth_ponder
+        halt_thresh = (
+            self.config.margin_halt_threshold
+            if margin_halt_threshold is None
+            else margin_halt_threshold
+        )
+        if recurrence_steps is None:
+            steps = (
+                max(2, self.config.recurrence_steps)
+                if (use_ponder or halt_thresh is not None)
+                else self.config.recurrence_steps
+            )
+        else:
+            steps = recurrence_steps
         ctx_width = int(context_lengths.max().item())
         trimmed_ctx_ids = context_ids[:, :ctx_width].long()
         ctx_valid = (
@@ -723,6 +798,50 @@ class CognitiveOperatorEnsemble(nn.Module):
         canon_state_proj = self.state_projection(state_in)
         canon_cand_proj = self.output_projection(cand_in)
         canon_scores = self._similarity(canon_state_proj, canon_cand_proj)
+
+        if (use_ponder or halt_thresh is not None) and len(decoded_options.step_states) > 1:
+            ps_1, cr_1 = self.pooler.matched_pair_representations(
+                encoded_state.hidden,
+                trimmed_ctx_ids,
+                ctx_valid,
+                decoded_options.step_states[0],
+                canon_opt_ids,
+                canon_valid,
+                canon_owners,
+                cand_anchor=decoded_options.anchor,
+                strip_boundary=self.config.strip_boundary_tokens_in_pool,
+                bos_id=self.config.bos_id,
+                eos_id=self.config.eos_id,
+            )
+            cs_1 = self._similarity(
+                self.state_projection(F.dropout(ps_1, p=0.10, training=self.training)),
+                self.output_projection(F.dropout(cr_1, p=0.10, training=self.training)),
+            )
+            if halt_thresh is not None:
+                v_s1 = cs_1.index_select(0, inv_perm)
+                sims_1 = v_s1.new_zeros(valid_options.shape).masked_scatter(valid_options, v_s1)
+                with torch.autocast(device_type=context_ids.device.type, enabled=False):
+                    sc = self._scale()
+                    sorted_l1, _ = (
+                        (sims_1.float() * sc).masked_fill(~valid_options, -torch.inf)
+                    ).sort(dim=-1, descending=True)
+                    sorted_p1 = sorted_l1.softmax(dim=-1)
+                    m1 = (sorted_p1[:, 0] - sorted_p1[:, 1]).index_select(0, canon_owners)
+                canon_scores = torch.where(
+                    m1 >= float(halt_thresh),
+                    cs_1,
+                    0.70 * cs_1 + 0.30 * canon_scores,
+                )
+            elif use_ponder:
+                canon_scores = 0.70 * cs_1 + 0.30 * canon_scores
+            paired_state_repr = 0.70 * ps_1 + 0.30 * paired_state_repr
+            cand_repr = 0.70 * cr_1 + 0.30 * cand_repr
+            canon_state_proj = self.state_projection(
+                F.dropout(paired_state_repr, p=0.10, training=self.training)
+            )
+            canon_cand_proj = self.output_projection(
+                F.dropout(cand_repr, p=0.10, training=self.training)
+            )
 
         valid_scores = canon_scores.index_select(0, inv_perm)
         state_proj = canon_state_proj.index_select(0, inv_perm)
@@ -1177,13 +1296,26 @@ class CognitiveOperatorEnsemble(nn.Module):
         recurrence_steps: int | None = None,
         latent_prior: Tensor | None = None,
         latent_prior_scale: float = 0.0,
+        recurrent_kv: bool = False,
+        depth_ponder: bool | None = None,
     ):
         """Operator 9 (`Inference`): Autoregressive `U$ -> T$ -> A$` synthesis on the shared backbone."""
-        steps = self.config.recurrence_steps if recurrence_steps is None else recurrence_steps
+        use_ponder = self.config.depth_ponder if depth_ponder is None else depth_ponder
+        if recurrence_steps is None:
+            steps = (
+                max(2, self.config.recurrence_steps)
+                if use_ponder
+                else self.config.recurrence_steps
+            )
+        else:
+            steps = recurrence_steps
         return self.backbone.forward(
             input_ids,
             targets=targets,
             recurrence_steps=steps,
             latent_prior=latent_prior,
             latent_prior_scale=latent_prior_scale,
+            recurrent_kv=recurrent_kv,
+            depth_ponder=use_ponder,
         )
+

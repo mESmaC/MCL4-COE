@@ -968,6 +968,9 @@ class COEAddressRouter:
         *,
         top_k_candidates: int = 8,
         plane_filter: int | None = None,
+        recurrence_steps: int | None = None,
+        depth_ponder: bool | None = None,
+        margin_halt_threshold: float | None = None,
     ) -> dict[str, Any]:
         all_recs = [
             r
@@ -1041,6 +1044,9 @@ class COEAddressRouter:
             batch["context_lengths"],
             batch["option_ids"],
             batch["option_lengths"],
+            recurrence_steps=recurrence_steps,
+            depth_ponder=depth_ponder,
+            margin_halt_threshold=margin_halt_threshold,
         )
         dec_sim = dec_out.similarities[0].float()
         if any(s > 0.0 for s in cand_sketch):
@@ -1841,6 +1847,9 @@ class CodebaseWarmupEngine:
         examples: Sequence[DecisionExample],
         *,
         batch_size: int = 8,
+        recurrence_steps: int | None = None,
+        depth_ponder: bool | None = None,
+        margin_halt_threshold: float | None = None,
     ) -> dict[str, float]:
         """Evaluate `Decision` top-1 accuracy, mean target confidence, and multi-operator loss."""
         if not examples:
@@ -1870,6 +1879,9 @@ class CodebaseWarmupEngine:
                 batch["option_ids"],
                 batch["option_lengths"],
                 batch["targets"],
+                recurrence_steps=recurrence_steps,
+                depth_ponder=depth_ponder,
+                margin_halt_threshold=margin_halt_threshold,
             )
             probs = op_out.decision.probabilities
             targets = batch["targets"].long()
@@ -2195,6 +2207,9 @@ class CodebaseWarmupEngine:
         user_query: str,
         *,
         top_k_candidates: int = 6,
+        recurrence_steps: int | None = None,
+        depth_ponder: bool | None = None,
+        margin_halt_threshold: float | None = None,
     ) -> dict[str, Any]:
         """Route a user debugging/codebase query via warmed `COEAddressRouter`, traverse `A.TXY` `CALLS` edges, and retrieve `TurboQuant` page state."""
         route_res = session.router.route_query(
@@ -2202,6 +2217,9 @@ class CodebaseWarmupEngine:
             user_query,
             top_k_candidates=top_k_candidates,
             plane_filter=1,
+            recurrence_steps=recurrence_steps,
+            depth_ponder=depth_ponder,
+            margin_halt_threshold=margin_halt_threshold,
         )
         primary_rec: ATXYRecord = route_res["record"]
         primary_source = session.symbol_sources.get(primary_rec.address, "")
@@ -2266,6 +2284,9 @@ class CodebaseWarmupEngine:
         *,
         max_files: int = 3,
         top_k_candidates: int = 6,
+        recurrence_steps: int | None = None,
+        depth_ponder: bool | None = None,
+        margin_halt_threshold: float | None = None,
     ) -> MultiFileSynthesisResult:
         """Synthesize multi-file context via `A.TXY` routing, `CALLS` traversal, `TurboQuant` page decompression, and `ContextLMCompressor` folding."""
         device = next(coe.parameters()).device
@@ -2274,6 +2295,9 @@ class CodebaseWarmupEngine:
             user_query,
             top_k_candidates=top_k_candidates,
             plane_filter=1,
+            recurrence_steps=recurrence_steps,
+            depth_ponder=depth_ponder,
+            margin_halt_threshold=margin_halt_threshold,
         )
         primary_rec: ATXYRecord = route_res["record"]
         primary_source = session.symbol_sources.get(primary_rec.address, "")

@@ -1592,3 +1592,83 @@ def test_context_memory_turboquant_atxy_and_codebase_warmup(tmp_path: Path) -> N
             assert drift == 0.0
 
 
+def test_recurrent_depth_trajectory_pondering_and_adaptive_halting() -> None:
+    """Verify Recurrent Depth trajectory pondering (`step_states`), `recurrent_kv`, `margin_halt_threshold`, 0-ULP candidate permutation invariance, and adaptive entropy halting."""
+    model = _tiny_model().eval()
+    x = torch.randint(4, 120, (2, 24), dtype=torch.long)
+
+    # 1. Verify step_states trajectory length and entropy-gated residual recurrent depth + recurrent_kv
+    out_r1 = model.forward_inference(x, recurrence_steps=1)
+    assert len(out_r1.step_states) == 1
+    out_r3 = model.forward_inference(
+        x,
+        recurrence_steps=3,
+        recurrent_kv=True,
+        depth_ponder=True,
+    )
+    assert len(out_r3.step_states) == 3
+    assert out_r3.logits.shape == out_r1.logits.shape
+    assert not torch.allclose(out_r3.logits, out_r1.logits)
+
+    # 2. Verify 0-ULP bitwise candidate permutation invariance under depth_ponder and margin_halt_threshold
+    ctx_ids = torch.randint(4, 120, (2, 20), dtype=torch.long)
+    ctx_lens = torch.tensor([20, 16], dtype=torch.long)
+    opt_ids = torch.randint(4, 120, (2, 4, 18), dtype=torch.long)
+    opt_lens = torch.tensor([[18, 15, 12, 14], [14, 18, 11, 16]], dtype=torch.long)
+    targets = torch.tensor([1, 2], dtype=torch.long)
+
+    perm_idx = torch.tensor([2, 0, 3, 1], dtype=torch.long)
+    inv_idx = torch.argsort(perm_idx)
+    opt_ids_perm = opt_ids[:, perm_idx, :]
+    opt_lens_perm = opt_lens[:, perm_idx]
+
+    dec_ponder = model.forward_decision(
+        ctx_ids,
+        ctx_lens,
+        opt_ids,
+        opt_lens,
+        recurrence_steps=2,
+        depth_ponder=True,
+        margin_halt_threshold=0.35,
+    )
+    dec_ponder_perm = model.forward_decision(
+        ctx_ids,
+        ctx_lens,
+        opt_ids_perm,
+        opt_lens_perm,
+        recurrence_steps=2,
+        depth_ponder=True,
+        margin_halt_threshold=0.35,
+    )
+    assert torch.equal(dec_ponder.similarities, dec_ponder_perm.similarities[:, inv_idx])
+    assert torch.equal(dec_ponder.logits, dec_ponder_perm.logits[:, inv_idx])
+    assert torch.allclose(
+        dec_ponder.probabilities, dec_ponder_perm.probabilities[:, inv_idx], atol=1e-7
+    )
+
+    all_op_ponder = model.forward_all_operators(
+        ctx_ids,
+        ctx_lens,
+        opt_ids,
+        opt_lens,
+        targets,
+        recurrence_steps=2,
+        depth_ponder=True,
+        margin_halt_threshold=0.35,
+    )
+    assert torch.isfinite(all_op_ponder.total_loss)
+
+    # 3. Verify adaptive_recurrent_depth in MultiPassController.generate_uta
+    ctrl = MultiPassController(model)
+    trace_adapt = ctrl.generate_uta(
+        "Explain recurrent depth pondering.",
+        max_new_tokens=20,
+        adaptive_recurrent_depth=True,
+        max_recurrence_steps=3,
+        recurrent_entropy_threshold=1.5,
+        recurrent_kv=True,
+    )
+    assert "#U$#" in trace_adapt and "#T$#" in trace_adapt and "#A$#" in trace_adapt
+
+
+

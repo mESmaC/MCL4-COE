@@ -392,6 +392,11 @@ class MultiPassController(nn.Module):
         thought_prefix: str | None = None,
         lock_thought: bool = False,
         answer_prefix: str | None = None,
+        recurrent_kv: bool = False,
+        depth_ponder: bool | None = None,
+        adaptive_recurrent_depth: bool = False,
+        max_recurrence_steps: int = 3,
+        recurrent_entropy_threshold: float = 1.5,
     ) -> str:
         """Synthesize a `#U$# -> #T$# -> #A$#` trace, guaranteeing complete `#T$#` and `#A$#` segments."""
         was_training = self.coe.training
@@ -554,14 +559,37 @@ class MultiPassController(nn.Module):
                         break
 
                 inp = torch.tensor([tokens], dtype=torch.long, device=device)
-                with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
-                    out = self.coe.forward_inference(
-                        inp,
-                        recurrence_steps=recurrence_steps,
-                        latent_prior=latent_prior,
-                        latent_prior_scale=latent_prior_scale,
-                    )
                 logit_bound = vocab_size if is_morph else 259
+                with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
+                    if adaptive_recurrent_depth and max_recurrence_steps > 1:
+                        out = self.coe.forward_inference(
+                            inp,
+                            recurrence_steps=1,
+                            latent_prior=latent_prior,
+                            latent_prior_scale=latent_prior_scale,
+                            recurrent_kv=False,
+                            depth_ponder=False,
+                        )
+                        p1 = torch.softmax(out.logits[0, -1, :logit_bound].float(), dim=-1)
+                        ent1 = float((-(p1 * p1.clamp_min(1e-9).log()).sum()).item())
+                        if ent1 > recurrent_entropy_threshold:
+                            out = self.coe.forward_inference(
+                                inp,
+                                recurrence_steps=max_recurrence_steps,
+                                latent_prior=latent_prior,
+                                latent_prior_scale=latent_prior_scale,
+                                recurrent_kv=recurrent_kv,
+                                depth_ponder=True if depth_ponder is None else depth_ponder,
+                            )
+                    else:
+                        out = self.coe.forward_inference(
+                            inp,
+                            recurrence_steps=recurrence_steps,
+                            latent_prior=latent_prior,
+                            latent_prior_scale=latent_prior_scale,
+                            recurrent_kv=recurrent_kv,
+                            depth_ponder=depth_ponder,
+                        )
                 next_logits = out.logits[0, -1, :logit_bound].float()
 
                 # Mask control bytes (<32 except newline=10), DEL..0xFF (127..255), pad_id (256), bos_id (257), unk_id (259)
@@ -1255,6 +1283,9 @@ class MultiPassController(nn.Module):
         prior_scale: float = 0.08,
         rl_step_size: float = 0.35,
         seed: int = 42,
+        depth_ponder: bool | None = True,
+        margin_halt_threshold: float | None = 0.35,
+        recurrent_kv: bool = True,
     ) -> CodebaseRAGGenerationOutput:
         """Synthesize `#U$# -> #T$# -> #A$#` grounded in a warmed `CodebaseSessionState` (`A.TXY` + `TurboQuant` + `ContextLMCompressor` + 2-Round RL).
 
@@ -1303,6 +1334,8 @@ class MultiPassController(nn.Module):
                 user_prompt,
                 max_files=max_files,
                 top_k_candidates=top_k_candidates,
+                depth_ponder=depth_ponder,
+                margin_halt_threshold=margin_halt_threshold,
             )
             z_code_0 = mfile.multifile_latent_prior.to(device=device).float()
 
@@ -1400,6 +1433,8 @@ class MultiPassController(nn.Module):
                         opt_ids,
                         opt_lens,
                         recurrence_steps=self.schedule.recurrence_steps,
+                        depth_ponder=depth_ponder,
+                        margin_halt_threshold=margin_halt_threshold,
                     )
                     ded_out = self.coe.forward_deduction(
                         rep_ctx_ids, rep_ctx_lens, flat_opt_ids, flat_opt_lens
@@ -1428,6 +1463,7 @@ class MultiPassController(nn.Module):
                         owner_rows=owner_rows,
                         recurrence_steps=self.schedule.recurrence_steps,
                         causal_local=True,
+                        depth_ponder=bool(depth_ponder),
                     )
                     dummy_gist_ids = torch.zeros_like(mfile.compressed_state.valid, dtype=torch.long)
                     paired_gist_state, gist_cand_repr = self.coe.pooler.matched_pair_representations(
@@ -1562,6 +1598,8 @@ class MultiPassController(nn.Module):
                     thought_prefix=t_pref,
                     lock_thought=False,
                     answer_prefix=a_pref,
+                    recurrent_kv=bool(recurrent_kv and r_steps > 1),
+                    depth_ponder=bool(depth_ponder and r_steps > 1),
                 )
                 r1_pool.append((r_steps, temp, tr, 1, strat))
 
@@ -1625,6 +1663,8 @@ class MultiPassController(nn.Module):
                 thought_prefix=ast_premise,
                 lock_thought=False,
                 answer_prefix=ast_answer_prefix,
+                recurrent_kv=recurrent_kv,
+                depth_ponder=bool(depth_ponder),
             )
             r2_pool.append((2, 0.22, tr_r2_full, 2, "r2_rl_multifile_steered"))
 
@@ -1639,6 +1679,8 @@ class MultiPassController(nn.Module):
                 thought_prefix=first_t_sent,
                 lock_thought=False,
                 answer_prefix=ast_answer_prefix,
+                recurrent_kv=recurrent_kv,
+                depth_ponder=bool(depth_ponder),
             )
             r2_pool.append((2, 0.18, tr_r2_tree, 2, "r2_tree_thought_cont"))
 
@@ -1653,6 +1695,8 @@ class MultiPassController(nn.Module):
                 thought_prefix=(best_t_full if best_t_full else ast_premise),
                 lock_thought=bool(best_t_full),
                 answer_prefix=ast_answer_prefix,
+                recurrent_kv=recurrent_kv,
+                depth_ponder=bool(depth_ponder),
             )
             r2_pool.append((2, 0.20, tr_r2_refine, 2, "r2_rl_answer_refine"))
 

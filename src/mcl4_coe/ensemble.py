@@ -283,9 +283,20 @@ class MultiPassController(nn.Module):
                 if tokens[-1] == 10 and (has_emitted_a or step < min(48, thought_budget)):
                     next_logits[ord("#")] = -torch.inf
 
-                # Prevent consecutive spaces or single-letter space alternation ("t a e o")
-                if tokens[-1] in (32, 10):
-                    next_logits[32] = -torch.inf
+                # Prevent mid-line consecutive spaces or single-letter space alternation ("t a e o"),
+                # while permitting up to 8 leading indentation spaces immediately following a newline.
+                if tokens[-1] == 10:
+                    next_logits[10] = -torch.inf
+                elif tokens[-1] == 32:
+                    # Check if we are in a leading-indentation run right after a newline
+                    indent_run = 0
+                    idx_back = len(tokens) - 1
+                    while idx_back >= 0 and tokens[idx_back] == 32:
+                        indent_run += 1
+                        idx_back -= 1
+                    is_leading_indent = (idx_back >= 0 and tokens[idx_back] == 10 and indent_run < 8)
+                    if not is_leading_indent:
+                        next_logits[32] = -torch.inf
                     next_logits[10] = -torch.inf
                 elif (
                     len(tokens) >= 2

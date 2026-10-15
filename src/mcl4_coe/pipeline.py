@@ -474,16 +474,29 @@ def _split_thought_and_answer(raw_response: str, explicit_thought: str | None = 
     if m_box and len(resp) > len(m_box[-1]) + 10:
         return resp, m_box[-1].strip()
 
-    # 4. Multi-paragraph or multi-line derivation: use preceding steps as `#T$#` and final block as `#A$#`
+    # 4. Code responses: preserve leading indentation and keep the complete executable block in `#A$#`
+    raw_lines = [ln.rstrip() for ln in resp.splitlines() if ln.strip()]
+    has_code_indent = any(ln.startswith(("    ", "\t")) for ln in raw_lines)
+    starts_with_code = resp.startswith(("def ", "class ", "import ", "from ", "#include", "function ", "const ", "let ", "public ", "```"))
+    if starts_with_code or has_code_indent or "```" in resp:
+        if "```" in resp:
+            parts = resp.split("```", 1)
+            prose_head = parts[0].strip()
+            code_body = "```" + parts[1].strip()
+            if prose_head:
+                return prose_head, code_body
+        first_line = raw_lines[0].strip() if raw_lines else "implementation"
+        return f"Outline the structure and control flow for `{first_line}`.", "\n".join(raw_lines)
+
+    # 5. Multi-paragraph or multi-line prose derivation: use preceding steps as `#T$#` and final block as `#A$#`
     paragraphs = [p.strip() for p in resp.split("\n\n") if p.strip()]
     if len(paragraphs) >= 2:
         return "\n\n".join(paragraphs[:-1]), paragraphs[-1]
 
-    lines = [ln.strip() for ln in resp.splitlines() if ln.strip()]
-    if len(lines) >= 2:
-        return "\n".join(lines[:-1]), lines[-1]
+    if len(raw_lines) >= 2:
+        return "\n".join(raw_lines[:-1]), raw_lines[-1].strip()
 
-    # 5. Single-sentence fallback: split sentences or clause boundaries without duplicating resp or injecting boilerplate
+    # 6. Single-sentence fallback: split sentences or clause boundaries without duplicating resp or injecting boilerplate
     sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", resp) if s.strip()]
     if len(sentences) >= 2:
         return " ".join(sentences[:-1]), sentences[-1]

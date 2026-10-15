@@ -391,6 +391,7 @@ class MultiPassController(nn.Module):
         latent_prior_scale: float = 0.0,
         thought_prefix: str | None = None,
         lock_thought: bool = False,
+        answer_prefix: str | None = None,
     ) -> str:
         """Synthesize a `#U$# -> #T$# -> #A$#` trace, guaranteeing complete `#T$#` and `#A$#` segments."""
         was_training = self.coe.training
@@ -428,6 +429,19 @@ class MultiPassController(nn.Module):
                 frozenset({ord("."), ord("!"), ord("?"), 10}),
             )
 
+            ap_toks: list[int] = []
+            if answer_prefix is not None and answer_prefix.strip():
+                ap_clean = answer_prefix.strip()
+                if is_morph:
+                    ap_toks = self.tokenizer.encode(
+                        " " + ap_clean, add_bos=False, add_eos=False
+                    )
+                else:
+                    ap_toks = self.tokenizer.encode(
+                        ap_clean + " ", add_bos=False, add_eos=False
+                    )
+                ap_toks = ap_toks[: max(8, min(len(ap_toks), max_seq // 3))]
+
             if thought_prefix is not None and thought_prefix.strip():
                 tp_clean = thought_prefix.strip()
                 if is_morph:
@@ -447,6 +461,8 @@ class MultiPassController(nn.Module):
                     if tokens[-1] not in sent_end_ids:
                         tokens.append(ord("."))
                     tokens.extend(a_tag_tokens)
+                    if ap_toks and len(tokens) + len(ap_toks) < max_seq:
+                        tokens.extend(ap_toks)
                     has_emitted_a = True
                     a_start_token_idx = len(tokens)
                 else:
@@ -525,6 +541,8 @@ class MultiPassController(nn.Module):
                             elif is_morph and tokens[-1] not in sent_end_ids and max_new_tokens >= 128:
                                 tokens.append(ord("."))
                             tokens.extend(a_tag_tokens)
+                            if ap_toks and len(tokens) + len(ap_toks) < max_seq:
+                                tokens.extend(ap_toks)
                             has_emitted_a = True
                             a_start_token_idx = len(tokens)
                             if len(tokens) >= max_seq:
@@ -615,11 +633,16 @@ class MultiPassController(nn.Module):
                         if cnt >= 2 and ((32 <= trig_b < 127) or trig_b >= 260):
                             next_logits[trig_b] -= 4.5 * cnt
 
-                # Prevent XML/HTML tag openers ('<') at start of #T$# or #A$#, 3x identical token repeats, or 2x punctuation
-                if step == 0 or (len(tokens) >= len(a_tag_tokens) and tokens[-len(a_tag_tokens) :] == a_tag_tokens):
+                # Prevent XML/HTML tag openers ('<') or markdown headers ('#') at start of #T$# or #A$#, 3x identical token repeats, or 2x punctuation
+                if step == 0 or (has_emitted_a and len(tokens) == a_start_token_idx) or (
+                    len(tokens) >= len(a_tag_tokens) and tokens[-len(a_tag_tokens) :] == a_tag_tokens
+                ):
                     for xid in xml_open_ids:
                         if xid < logit_bound:
                             next_logits[xid] = -torch.inf
+                    for hid in hash_start_ids:
+                        if hid < logit_bound:
+                            next_logits[hid] = -torch.inf
                 if len(tokens) >= 3 and tokens[-1] == tokens[-2] == tokens[-3]:
                     next_logits[tokens[-1]] = -torch.inf
                 elif len(tokens) >= 2 and tokens[-1] == tokens[-2]:
@@ -636,7 +659,7 @@ class MultiPassController(nn.Module):
                 if (
                     has_emitted_a
                     and a_start_token_idx > 0
-                    and len(tokens) - a_start_token_idx >= (4 if is_morph else 8)
+                    and len(tokens) - a_start_token_idx >= (16 if is_morph else 32)
                     and tokens[-1] in newline_ids
                     and (next_id in hash_start_ids or next_id in xml_open_ids)
                 ):
@@ -657,9 +680,13 @@ class MultiPassController(nn.Module):
 
                 if not has_emitted_a:
                     if is_morph and next_id in a_marker_ids:
+                        if ap_toks and len(tokens) + len(ap_toks) < max_seq:
+                            tokens.extend(ap_toks)
                         has_emitted_a = True
                         a_start_token_idx = len(tokens)
                     elif len(tokens) >= len(a_tag_tokens) and tokens[-len(a_tag_tokens) :] == a_tag_tokens:
+                        if ap_toks and len(tokens) + len(ap_toks) < max_seq:
+                            tokens.extend(ap_toks)
                         has_emitted_a = True
                         a_start_token_idx = len(tokens)
                 if next_id == self.tokenizer.eos_id:
@@ -1284,14 +1311,31 @@ class MultiPassController(nn.Module):
 
             # Extract clean human-readable docstring sentence from primary_summary
             summary_no_uses = mfile.primary_summary.split("[uses:", 1)[0].strip()
-            if ": " in summary_no_uses:
-                clean_doc = summary_no_uses.split(": ", 1)[1].split(" | ", 1)[0].strip().rstrip(".")
-            else:
-                clean_doc = summary_no_uses.split(" | ", 1)[0].strip().rstrip(".")
+            summary_parts = [
+                p.strip()
+                for p in summary_no_uses.split(" | ")
+                if p.strip() and not p.strip().startswith(("(", "[methods:", "refs:"))
+            ]
+            raw_doc = (
+                summary_parts[0]
+                if summary_parts
+                else summary_no_uses.split(" | ")[0].strip()
+            )
+            clean_doc = (
+                re.split(r"(?<=[.!?])\s+", raw_doc)[0]
+                .replace("`", "")
+                .strip()
+                .rstrip(".")
+            )
+            files_short = ", ".join(Path(p).name for p in mfile.participating_files)
 
             ast_premise = (
+                f"Routing to {mfile.primary_symbol} ({mfile.primary_address}) across {files_short}: {clean_doc}{callee_clause}."
+            )
+            ast_answer_prefix = (
                 f"In {mod_short}, {sym_short} ({clean_doc}){callee_clause}."
             )
+            short_answer_prefix = f"In {mod_short}, {sym_short}"
 
             # Build reference token set for AST & call-graph grounding verification
             ref_code_tokens = _code_tokens_and_stems(
@@ -1413,6 +1457,7 @@ class MultiPassController(nn.Module):
                 meta_probs = meta_out.probabilities.detach().float().cpu().tolist()
 
                 scored: list[CandidateTraceScore] = []
+                denom = max(1, min(12, len(ref_code_tokens)))
                 for i, (r_steps, temp, tr, r_id, strat) in enumerate(pool):
                     d_sim = float(dec_sims[i])
                     d_prob = float(dec_probs[i])
@@ -1425,9 +1470,22 @@ class MultiPassController(nn.Module):
                     a_sim = 0.60 * g_sim + 0.40 * float(abs_sims[i])
                     s_int = _score_trace_integrity(user_prompt, tr)
 
-                    # AST & Call-Graph grounding bonus: reward traces that reference authentic repo identifiers/concepts
-                    tr_tokens = _code_tokens_and_stems(bodies[i])
-                    ast_ov = len(tr_tokens & ref_code_tokens) / max(1, min(10, len(ref_code_tokens)))
+                    t_part = (
+                        tr.split("#T$#", 1)[1].split("#A$#", 1)[0].strip()
+                        if "#T$#" in tr and "#A$#" in tr
+                        else ""
+                    )
+                    a_part = tr.split("#A$#", 1)[1].strip() if "#A$#" in tr else ""
+                    if len(a_part.split()) < 6 or a_part.startswith("#"):
+                        s_int = max(0.0, s_int - 0.35)
+
+                    # AST & Call-Graph grounding bonus weighted across both #T$# (35%) and #A$# (65%)
+                    t_tokens = _code_tokens_and_stems(t_part)
+                    a_tokens = _code_tokens_and_stems(a_part)
+                    ast_ov = (
+                        0.35 * (len(t_tokens & ref_code_tokens) / denom)
+                        + 0.65 * (len(a_tokens & ref_code_tokens) / denom)
+                    )
                     ast_bonus = min(0.18, 0.18 * ast_ov)
 
                     cand_toks = self.tokenizer.encode(bodies[i], add_bos=False, add_eos=False)
@@ -1473,16 +1531,18 @@ class MultiPassController(nn.Module):
                 return scored, [cand_abs_vecs[i : i + 1].detach() for i in range(k_cands)]
 
             # 2. Round 1 Rollouts: Unsteered Baseline + Multi-File TurboQuant Latent Prior + AST-Premise Guided
-            r1_specs: tuple[tuple[int, float, Tensor | None, float, str | None, str], ...] = (
-                (1, 0.0, None, 0.0, None, "r1_baseline"),
-                (2, 0.0, None, 0.0, None, "r1_unsteered_r2"),
-                (2, 0.0, z_code_0, prior_scale, None, "r1_multifile_prior"),
-                (2, 0.28, z_code_0, prior_scale, None, "r1_multifile_explore"),
-                (2, 0.0, z_code_0, prior_scale, ast_premise, "r1_ast_premise_guided"),
-                (2, 0.25, z_code_0, prior_scale, ast_premise, "r1_ast_premise_explore"),
+            r1_specs: tuple[
+                tuple[int, float, Tensor | None, float, str | None, str | None, str], ...
+            ] = (
+                (1, 0.0, None, 0.0, None, None, "r1_baseline"),
+                (2, 0.0, None, 0.0, None, None, "r1_unsteered_r2"),
+                (2, 0.0, z_code_0, prior_scale, None, None, "r1_multifile_prior"),
+                (2, 0.28, z_code_0, prior_scale, None, short_answer_prefix, "r1_multifile_explore"),
+                (2, 0.0, z_code_0, prior_scale, ast_premise, ast_answer_prefix, "r1_ast_premise_guided"),
+                (2, 0.25, z_code_0, prior_scale, ast_premise, ast_answer_prefix, "r1_ast_premise_explore"),
             )
             r1_pool: list[tuple[int, float, str, int, str]] = []
-            for idx, (r_steps, temp, l_prior, l_scale, t_pref, strat) in enumerate(r1_specs):
+            for idx, (r_steps, temp, l_prior, l_scale, t_pref, a_pref, strat) in enumerate(r1_specs):
                 if temp > 0.0:
                     torch.manual_seed(seed + idx * 137)
                 tr = self.generate_uta(
@@ -1494,6 +1554,7 @@ class MultiPassController(nn.Module):
                     latent_prior_scale=l_scale,
                     thought_prefix=t_pref,
                     lock_thought=False,
+                    answer_prefix=a_pref,
                 )
                 r1_pool.append((r_steps, temp, tr, 1, strat))
 
@@ -1556,6 +1617,7 @@ class MultiPassController(nn.Module):
                 latent_prior_scale=prior_scale * 1.25,
                 thought_prefix=ast_premise,
                 lock_thought=False,
+                answer_prefix=ast_answer_prefix,
             )
             r2_pool.append((2, 0.22, tr_r2_full, 2, "r2_rl_multifile_steered"))
 
@@ -1569,6 +1631,7 @@ class MultiPassController(nn.Module):
                 latent_prior_scale=prior_scale,
                 thought_prefix=first_t_sent,
                 lock_thought=False,
+                answer_prefix=ast_answer_prefix,
             )
             r2_pool.append((2, 0.18, tr_r2_tree, 2, "r2_tree_thought_cont"))
 
@@ -1582,6 +1645,7 @@ class MultiPassController(nn.Module):
                 latent_prior_scale=prior_scale,
                 thought_prefix=(best_t_full if best_t_full else ast_premise),
                 lock_thought=bool(best_t_full),
+                answer_prefix=ast_answer_prefix,
             )
             r2_pool.append((2, 0.20, tr_r2_refine, 2, "r2_rl_answer_refine"))
 

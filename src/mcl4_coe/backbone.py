@@ -707,7 +707,14 @@ class MCL4CEDBackbone(nn.Module):
             anchor=anchor,
         )
 
-    def encode(self, input_ids: Tensor, *, recurrence_steps: int = 1) -> BackboneOutput:
+    def encode(
+        self,
+        input_ids: Tensor,
+        *,
+        recurrence_steps: int = 1,
+        latent_prior: Tensor | None = None,
+        latent_prior_scale: float = 0.0,
+    ) -> BackboneOutput:
         """Causal full-sequence pass through lower encoder and upper CED decoder."""
         valid = input_ids != self.config.pad_id
         if not valid.any(dim=-1).all():
@@ -715,8 +722,26 @@ class MCL4CEDBackbone(nn.Module):
             valid = valid.clone()
             valid[:, 0] = True
         encoded = self.encode_state(input_ids, valid, causal=True)
+        state_for_kv = encoded
+        if latent_prior is not None and latent_prior_scale != 0.0:
+            prior = latent_prior.to(device=encoded.hidden.device, dtype=encoded.hidden.dtype)
+            if prior.ndim == 1:
+                prior = prior.unsqueeze(0)
+            if prior.ndim == 2:
+                prior = prior.unsqueeze(1)
+            prior_normed = self.encoder_norm(prior)
+            steered_hidden = self.encoder_norm(
+                encoded.hidden + float(latent_prior_scale) * prior_normed
+            ).masked_fill(~valid.unsqueeze(-1), 0)
+            state_for_kv = EncodedState(
+                hidden=steered_hidden,
+                valid=encoded.valid,
+                aux_loss=encoded.aux_loss,
+                router_z_loss=encoded.router_z_loss,
+                expert_load=encoded.expert_load,
+            )
         decoded = self.decode_candidates(
-            encoded,
+            state_for_kv,
             input_ids,
             valid,
             recurrence_steps=recurrence_steps,
@@ -739,11 +764,18 @@ class MCL4CEDBackbone(nn.Module):
         targets: Tensor | None = None,
         *,
         recurrence_steps: int = 1,
+        latent_prior: Tensor | None = None,
+        latent_prior_scale: float = 0.0,
     ) -> CausalLMOutput:
         """Autoregressive `U$ -> T$ -> A$` language modeling pass."""
         if targets is not None and targets.shape != input_ids.shape:
             raise ValueError("targets must match input_ids shape [batch, seq_len]")
-        encoded = self.encode(input_ids, recurrence_steps=recurrence_steps)
+        encoded = self.encode(
+            input_ids,
+            recurrence_steps=recurrence_steps,
+            latent_prior=latent_prior,
+            latent_prior_scale=latent_prior_scale,
+        )
         logits = self.lm_head(encoded.hidden)
         ce_loss, loss = None, None
         if targets is not None:

@@ -1175,7 +1175,15 @@ class CognitiveOperatorEnsemble(nn.Module):
         targets: Tensor | None = None,
         *,
         recurrence_steps: int | None = None,
+        latent_prior: Tensor | None = None,
+        latent_prior_scale: float = 0.0,
     ):
         """Operator 9 (`Inference`): Autoregressive `U$ -> T$ -> A$` synthesis on the shared backbone."""
         steps = self.config.recurrence_steps if recurrence_steps is None else recurrence_steps
-        return self.backbone.forward(input_ids, targets=targets, recurrence_steps=steps)
+        return self.backbone.forward(
+            input_ids,
+            targets=targets,
+            recurrence_steps=steps,
+            latent_prior=latent_prior,
+            latent_prior_scale=latent_prior_scale,
+        )

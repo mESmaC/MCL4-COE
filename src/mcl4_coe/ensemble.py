@@ -128,6 +128,9 @@ class CandidateTraceScore:
     structural_score: float
     composite_score: float
     vetoed: bool
+    abstraction_alignment: float = 0.0
+    round_id: int = 1
+    strategy: str = "standard"
 
 
 @dataclass
@@ -138,6 +141,30 @@ class COEGenerationOutput:
     baseline_text: str
     selected_index: int
     improved_over_baseline: bool
+    candidates: tuple[CandidateTraceScore, ...]
+    abstraction_norm: float
+
+
+@dataclass
+class DreamRLGenerationOutput:
+    """Output of `MultiPassController.generate_uta_with_dream_rl` (Dream-RSI Cache + 2-Round Inference RL)."""
+
+    text: str
+    baseline_text: str
+    selected_index: int
+    selected_round: int
+    selected_strategy: str
+    improved_over_baseline: bool
+    improved_in_round2: bool
+    round1_best_score: float
+    round2_best_score: float
+    final_best_score: float
+    dream_cache_matched: bool
+    dream_top_similarity: float
+    dream_matched_domains: tuple[str, ...]
+    dream_recommended_scaffold: str
+    extra_prompt_tokens: int
+    round1_advantages: tuple[float, ...]
     candidates: tuple[CandidateTraceScore, ...]
     abstraction_norm: float
 
@@ -327,6 +354,10 @@ class MultiPassController(nn.Module):
         max_new_tokens: int = 320,
         temperature: float = 0.0,
         recurrence_steps: int | None = None,
+        latent_prior: Tensor | None = None,
+        latent_prior_scale: float = 0.0,
+        thought_prefix: str | None = None,
+        lock_thought: bool = False,
     ) -> str:
         """Synthesize a `#U$# -> #T$# -> #A$#` trace, guaranteeing complete `#T$#` and `#A$#` segments."""
         was_training = self.coe.training
@@ -363,6 +394,31 @@ class MultiPassController(nn.Module):
                 "_sentence_end_ids",
                 frozenset({ord("."), ord("!"), ord("?"), 10}),
             )
+
+            if thought_prefix is not None and thought_prefix.strip():
+                tp_clean = thought_prefix.strip()
+                if is_morph:
+                    tp_toks = self.tokenizer.encode(
+                        " " + tp_clean, add_bos=False, add_eos=False
+                    )
+                else:
+                    tp_toks = self.tokenizer.encode(
+                        tp_clean + ("" if lock_thought else " "),
+                        add_bos=False,
+                        add_eos=False,
+                    )
+                max_tp = max(8, min(len(tp_toks), max_seq // 3))
+                tp_toks = tp_toks[:max_tp]
+                tokens.extend(tp_toks)
+                if lock_thought:
+                    if tokens[-1] not in sent_end_ids:
+                        tokens.append(ord("."))
+                    tokens.extend(a_tag_tokens)
+                    has_emitted_a = True
+                    a_start_token_idx = len(tokens)
+                else:
+                    thought_budget = max(16, thought_budget - len(tp_toks))
+
             clause_end_ids = getattr(
                 self.tokenizer,
                 "_clause_end_ids",
@@ -448,7 +504,12 @@ class MultiPassController(nn.Module):
 
                 inp = torch.tensor([tokens], dtype=torch.long, device=device)
                 with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
-                    out = self.coe.forward_inference(inp, recurrence_steps=recurrence_steps)
+                    out = self.coe.forward_inference(
+                        inp,
+                        recurrence_steps=recurrence_steps,
+                        latent_prior=latent_prior,
+                        latent_prior_scale=latent_prior_scale,
+                    )
                 logit_bound = vocab_size if is_morph else 259
                 next_logits = out.logits[0, -1, :logit_bound].float()
 
@@ -741,6 +802,370 @@ class MultiPassController(nn.Module):
                 selected_index=best_cand.index,
                 improved_over_baseline=(best_cand.text != baseline_text),
                 candidates=tuple(scored_candidates),
+                abstraction_norm=round(abs_norm, 4),
+            )
+        finally:
+            self.coe.train(was_training)
+
+    @torch.no_grad()
+    def generate_uta_with_dream_rl(
+        self,
+        user_prompt: str,
+        *,
+        dream_cache: object | None = None,
+        max_new_tokens: int = 384,
+        prior_scale: float = 0.08,
+        rl_step_size: float = 0.35,
+        min_dream_similarity: float = 0.05,
+        exclude_exact_dream_match: bool = True,
+        seed: int = 42,
+    ) -> DreamRLGenerationOutput:
+        """Synthesize `#U$# -> #T$# -> #A$#` with User-Seeded Dream-RSI Prior + 2-Round Inference-Time RL.
+
+        1. **Zero-Token Dream Prior Retrieval:** Queries `dream_cache` (`DreamContextCache`) using the
+           32-d centered Pearson embedding of `#U$# {user_prompt}` to retrieve the interpolated
+           `d_model` `Abstraction` vector $\\mathbf{z}_{\\text{abs}}^{(0)}$ and optimal `#S$#` cognitive
+           operator scaffold from similar or adjacent OOD past user contexts in **0 prompt tokens**.
+        2. **Round 1 Rollouts & Group-Relative Advantage ($A_i$):** Samples Round 1 trajectories
+           (including the exact unsteered `r=1, temp=0.0` baseline and Dream-steered `r=2` rollouts),
+           evaluates them through the 9 `COE` operators + anti-doom loop detector, and computes
+           Ornith-1.5 group-normalized advantages $A_i = (R_i - \\mu_R) / (\\sigma_R + \\epsilon)$.
+        3. **Transient Inference-Time RL Latent Policy Step ($\\mathbf{z}_{\\text{abs}}^{(0)} \\to \\mathbf{z}_{\\text{abs}}^{(1)}$):**
+           Updates the latent `Abstraction` vector toward positive-advantage Round 1 rollouts and
+           away from negative-advantage rollouts without mutating permanent base weights.
+        4. **Round 2 Tree-Guided Rollouts:** Generates Round 2 trajectories conditioned on
+           $\\mathbf{z}_{\\text{abs}}^{(1)}$ and the winning Round 1 `#T$#` node (full RL-steered rollout,
+           tree thought-prefix continuation, and locked-`#T$#` answer refinement), then verifies the
+           combined Round 1 + Round 2 pool through `COE`.
+        """
+        from .data import DecisionExample, collate_decisions
+        from .operators import pearson_similarity
+        from .ornith_rl import detect_doom_loop, group_normalized_advantages
+
+        was_training = self.coe.training
+        self.coe.eval()
+        try:
+            device = next(self.coe.parameters()).device
+            max_seq = self.coe.backbone.config.max_seq_len
+            use_amp = device.type == "cuda"
+
+            # 1. Compute 32-d Pearson intent embedding for the live user prompt and query DreamContextCache
+            u_ids = self.tokenizer.encode(
+                f"#U$# {user_prompt.strip()}", add_bos=True, add_eos=True
+            )[:max_seq]
+            u_t = torch.tensor([u_ids], dtype=torch.long, device=device)
+            u_len = torch.tensor([len(u_ids)], dtype=torch.long, device=device)
+
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
+                q_emb = self.coe.embed_items(u_t, u_len)
+
+            dream_matched = False
+            dream_top_sim = 0.0
+            dream_domains: tuple[str, ...] = ()
+            dream_scaffold = "abduction -> association -> decision -> deduction -> evaluation -> metacognition"
+            z_dream_interp: Tensor | None = None
+
+            if dream_cache is not None and hasattr(dream_cache, "retrieve"):
+                ret = dream_cache.retrieve(
+                    q_emb,
+                    top_k=3,
+                    min_similarity=min_dream_similarity,
+                    exclude_exact_text=(user_prompt if exclude_exact_dream_match else None),
+                    device=device,
+                )
+                dream_matched = bool(ret.has_match)
+                dream_top_sim = float(ret.top_similarity)
+                dream_domains = tuple(ret.matched_domains)
+                dream_scaffold = str(ret.recommended_scaffold)
+                z_dream_interp = ret.interpolated_z_abs
+
+            sc_ids = self.tokenizer.encode(
+                f"#U$# {user_prompt.strip()}\n#S$# {dream_scaffold}",
+                add_bos=True,
+                add_eos=True,
+            )[:max_seq]
+            sc_t = torch.tensor([sc_ids], dtype=torch.long, device=device)
+            sc_len = torch.tensor([len(sc_ids)], dtype=torch.long, device=device)
+
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
+                z_self = self.coe.compress_abstraction(sc_t, sc_len, level="standard").float()
+                if dream_matched and z_dream_interp is not None:
+                    blend_w = min(0.45, max(0.20, 0.45 * max(0.2, dream_top_sim)))
+                    z_raw = (1.0 - blend_w) * z_self + blend_w * z_dream_interp.to(device).float()
+                    z_prior_0 = self.coe.abstraction_norm(
+                        z_raw.to(next(self.coe.abstraction_norm.parameters()).dtype)
+                    ).float()
+                else:
+                    z_prior_0 = z_self
+
+            def _score_pool(
+                pool: list[tuple[int, float, str, int, str]],
+                z_ref: Tensor,
+            ) -> tuple[list[CandidateTraceScore], list[Tensor]]:
+                bodies: list[str] = []
+                for _, _, tr, _, _ in pool:
+                    idx_t = tr.find("#T$#")
+                    b = tr[idx_t:].strip() if idx_t >= 0 else tr.strip()
+                    bodies.append(b if b else "#T$# empty\n#A$# empty")
+
+                ctx_text = (
+                    f"#U$# {user_prompt.strip()}\n"
+                    f"#Q$# [choice] Select the most accurate, complete, and logically entailed #T$# -> #A$# response."
+                )
+                ex = DecisionExample(
+                    question_id="dream_rl_loop",
+                    kind="choice",
+                    context=ctx_text.encode("utf-8")[: max_seq - 4].decode("utf-8", errors="ignore"),
+                    descriptions=tuple(
+                        b.encode("utf-8")[: max_seq - 4].decode("utf-8", errors="ignore")
+                        for b in bodies
+                    ),
+                    values=tuple(f"cand_{i}" for i in range(len(bodies))),
+                    target=0,
+                )
+                batch = collate_decisions([ex], max_seq, device=device, tokenizer=self.tokenizer)
+                ctx_ids = batch["context_ids"]
+                ctx_lens = batch["context_lengths"]
+                opt_ids = batch["option_ids"]
+                opt_lens = batch["option_lengths"]
+
+                k_cands = len(bodies)
+                rep_ctx_ids = ctx_ids.expand(k_cands, -1).contiguous()
+                rep_ctx_lens = ctx_lens.expand(k_cands).contiguous()
+                flat_opt_ids = opt_ids[0]
+                flat_opt_lens = opt_lens[0]
+
+                with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
+                    dec_out = self.coe.forward_decision(
+                        ctx_ids,
+                        ctx_lens,
+                        opt_ids,
+                        opt_lens,
+                        recurrence_steps=self.schedule.recurrence_steps,
+                    )
+                    ded_out = self.coe.forward_deduction(
+                        rep_ctx_ids, rep_ctx_lens, flat_opt_ids, flat_opt_lens
+                    )
+                    eval_out = self.coe.forward_evaluation(
+                        rep_ctx_ids, rep_ctx_lens, flat_opt_ids, flat_opt_lens
+                    )
+                    meta_out = self.coe.forward_metacognition(
+                        rep_ctx_ids, rep_ctx_lens, flat_opt_ids, flat_opt_lens
+                    )
+                    cand_abs_vecs = self.coe.compress_abstraction(
+                        flat_opt_ids, flat_opt_lens, level="detailed"
+                    ).float()
+                    ref_proj = self.coe.state_projection(
+                        z_ref.to(next(self.coe.state_projection.parameters()).dtype)
+                    ).float()
+                    cand_proj = self.coe.output_projection(
+                        cand_abs_vecs.to(next(self.coe.output_projection.parameters()).dtype)
+                    ).float()
+                    abs_sims = pearson_similarity(
+                        ref_proj.expand_as(cand_proj), cand_proj
+                    ).detach().cpu().tolist()
+
+                dec_sims = dec_out.similarities[0].detach().float().cpu().tolist()
+                dec_probs = dec_out.probabilities[0].detach().float().cpu().tolist()
+                ded_probs = ded_out.probabilities.detach().float().cpu().tolist()
+                eval_utils = eval_out.utilities.detach().float().cpu().tolist()
+                meta_probs = meta_out.probabilities.detach().float().cpu().tolist()
+
+                scored: list[CandidateTraceScore] = []
+                for i, (r_steps, temp, tr, r_id, strat) in enumerate(pool):
+                    d_sim = float(dec_sims[i])
+                    d_prob = float(dec_probs[i])
+                    u_eval = float(eval_utils[i])
+                    p_ent = float(ded_probs[i][0])
+                    p_con = float(ded_probs[i][1])
+                    m_cor = float(meta_probs[i][0])
+                    m_suf = float(meta_probs[i][1])
+                    a_sim = float(abs_sims[i])
+                    s_int = _score_trace_integrity(user_prompt, tr)
+
+                    cand_toks = self.tokenizer.encode(bodies[i], add_bos=False, add_eos=False)
+                    has_doom = detect_doom_loop(cand_toks) is not None
+                    if has_doom:
+                        s_int = max(0.0, s_int - 0.30)
+
+                    is_vetoed = bool(
+                        p_con > self.schedule.max_contradiction_prob
+                        or m_cor < self.schedule.min_correctness_confidence
+                        or s_int < 0.35
+                        or has_doom
+                    )
+                    neural_score = (
+                        0.35 * d_prob
+                        + 0.25 * u_eval
+                        + 0.20 * (p_ent - 0.75 * p_con)
+                        + 0.15 * (0.7 * m_cor + 0.3 * m_suf)
+                    )
+                    comp_score = neural_score + 0.15 * s_int - (0.30 if is_vetoed else 0.0)
+                    scored.append(
+                        CandidateTraceScore(
+                            index=i,
+                            recurrence_steps=r_steps,
+                            temperature=temp,
+                            text=tr,
+                            decision_similarity=round(d_sim, 4),
+                            decision_prob=round(d_prob, 4),
+                            evaluation_utility=round(u_eval, 4),
+                            deduction_entailed=round(p_ent, 4),
+                            deduction_contradicted=round(p_con, 4),
+                            metacognition_correctness=round(m_cor, 4),
+                            metacognition_sufficiency=round(m_suf, 4),
+                            structural_score=round(s_int, 4),
+                            composite_score=round(comp_score, 4),
+                            vetoed=is_vetoed,
+                            abstraction_alignment=round(a_sim, 4),
+                            round_id=r_id,
+                            strategy=strat,
+                        )
+                    )
+                return scored, [cand_abs_vecs[i : i + 1].detach() for i in range(k_cands)]
+
+            # 2. Round 1 Rollouts: Baseline + Unsteered r=2 + Zero-Token Dream-Prior Steered Rollouts
+            r1_specs: tuple[tuple[int, float, Tensor | None, float, str], ...] = (
+                (1, 0.0, None, 0.0, "r1_baseline"),
+                (2, 0.0, None, 0.0, "r1_unsteered_r2"),
+                (2, 0.0, z_prior_0, prior_scale, "r1_dream_steered"),
+                (2, 0.30, z_prior_0, prior_scale, "r1_dream_explore"),
+            )
+            r1_pool: list[tuple[int, float, str, int, str]] = []
+            for idx, (r_steps, temp, l_prior, l_scale, strat) in enumerate(r1_specs):
+                if temp > 0.0:
+                    torch.manual_seed(seed + idx * 131)
+                tr = self.generate_uta(
+                    user_prompt,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temp,
+                    recurrence_steps=r_steps,
+                    latent_prior=l_prior,
+                    latent_prior_scale=l_scale,
+                )
+                r1_pool.append((r_steps, temp, tr, 1, strat))
+
+            baseline_text = r1_pool[0][2]
+            r1_scored, r1_abs_vecs = _score_pool(r1_pool, z_prior_0)
+            r1_rewards = torch.tensor(
+                [c.composite_score + 0.05 * max(0.0, c.abstraction_alignment) for c in r1_scored],
+                dtype=torch.float32,
+                device=device,
+            )
+            r1_adv = group_normalized_advantages(r1_rewards)
+            r1_adv_tuple = tuple(round(float(x), 4) for x in r1_adv.detach().cpu().tolist())
+
+            # 3. Transient Inference-Time RL Latent Policy Update: z_prior_0 -> z_prior_1
+            pos_mask = r1_adv > 0.0
+            neg_mask = r1_adv < 0.0
+            z_delta = torch.zeros_like(z_prior_0)
+            if bool(pos_mask.any()):
+                pos_w = torch.softmax(r1_adv[pos_mask] / 0.5, dim=0)
+                pos_stack = torch.cat(
+                    [r1_abs_vecs[i] for i in range(len(r1_pool)) if bool(pos_mask[i])], dim=0
+                )
+                z_pos = (pos_w.unsqueeze(-1) * (pos_stack - z_prior_0)).sum(dim=0, keepdim=True)
+                z_delta = z_delta + rl_step_size * z_pos
+            if bool(neg_mask.any()):
+                neg_w = torch.softmax((-r1_adv[neg_mask]) / 0.5, dim=0)
+                neg_stack = torch.cat(
+                    [r1_abs_vecs[i] for i in range(len(r1_pool)) if bool(neg_mask[i])], dim=0
+                )
+                z_neg = (neg_w.unsqueeze(-1) * (neg_stack - z_prior_0)).sum(dim=0, keepdim=True)
+                z_delta = z_delta - (0.4 * rl_step_size) * z_neg
+
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
+                z_prior_1 = self.coe.abstraction_norm(
+                    (z_prior_0 + z_delta).to(next(self.coe.abstraction_norm.parameters()).dtype)
+                ).float()
+                abs_norm = float(z_prior_1.norm(dim=-1).mean().item())
+
+            # Extract winning Round 1 thought trace for Tree-Guided Round 2 continuations
+            best_r1_idx = int(r1_rewards.argmax().item())
+            best_r1_trace = r1_pool[best_r1_idx][2]
+            best_t_full = ""
+            first_t_sent = ""
+            if "#T$#" in best_r1_trace and "#A$#" in best_r1_trace:
+                t_raw = best_r1_trace.split("#T$#", 1)[1].split("#A$#", 1)[0].strip()
+                best_t_full = t_raw
+                sent_parts = re.split(r"(?<=[.!?])\s+", t_raw)
+                if sent_parts and len(sent_parts[0].strip()) >= 12:
+                    first_t_sent = sent_parts[0].strip()
+
+            # 4. Round 2 Tree-Guided Rollouts conditioned on RL-updated z_prior_1
+            r2_pool: list[tuple[int, float, str, int, str]] = []
+
+            # R2-0: Full trajectory rollout steered by RL-updated z_prior_1
+            torch.manual_seed(seed + 503)
+            tr_r2_full = self.generate_uta(
+                user_prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=0.25,
+                recurrence_steps=2,
+                latent_prior=z_prior_1,
+                latent_prior_scale=prior_scale * 1.25,
+            )
+            r2_pool.append((2, 0.25, tr_r2_full, 2, "r2_rl_steered"))
+
+            # R2-1: Tree thought-prefix continuation from the winning Round 1 premise
+            torch.manual_seed(seed + 617)
+            tr_r2_tree = self.generate_uta(
+                user_prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=0.20,
+                recurrence_steps=2,
+                latent_prior=z_prior_1,
+                latent_prior_scale=prior_scale,
+                thought_prefix=(first_t_sent if first_t_sent else None),
+                lock_thought=False,
+            )
+            r2_pool.append((2, 0.20, tr_r2_tree, 2, "r2_tree_thought_cont"))
+
+            # R2-2: Answer refinement with locked winning Round 1 #T$# scratchpad
+            torch.manual_seed(seed + 739)
+            tr_r2_refine = self.generate_uta(
+                user_prompt,
+                max_new_tokens=max_new_tokens,
+                temperature=0.22,
+                recurrence_steps=2,
+                latent_prior=z_prior_1,
+                latent_prior_scale=prior_scale,
+                thought_prefix=(best_t_full if best_t_full else None),
+                lock_thought=bool(best_t_full),
+            )
+            r2_pool.append((2, 0.22, tr_r2_refine, 2, "r2_rl_answer_refine"))
+
+            # 5. Joint COE Verification across all Round 1 + Round 2 candidates
+            combined_pool = r1_pool + r2_pool
+            all_scored, _ = _score_pool(combined_pool, z_prior_1)
+
+            r1_joint = [c for c in all_scored if c.round_id == 1]
+            r2_joint = [c for c in all_scored if c.round_id == 2]
+            r1_best = max(r1_joint, key=lambda c: c.composite_score)
+            r2_best = max(r2_joint, key=lambda c: c.composite_score)
+            overall_best = max(
+                all_scored,
+                key=lambda c: c.composite_score + 0.03 * max(0.0, c.abstraction_alignment),
+            )
+
+            return DreamRLGenerationOutput(
+                text=overall_best.text,
+                baseline_text=baseline_text,
+                selected_index=overall_best.index,
+                selected_round=overall_best.round_id,
+                selected_strategy=overall_best.strategy,
+                improved_over_baseline=(overall_best.text != baseline_text),
+                improved_in_round2=(overall_best.round_id == 2),
+                round1_best_score=round(r1_best.composite_score, 4),
+                round2_best_score=round(r2_best.composite_score, 4),
+                final_best_score=round(overall_best.composite_score, 4),
+                dream_cache_matched=dream_matched,
+                dream_top_similarity=round(dream_top_sim, 4),
+                dream_matched_domains=dream_domains,
+                dream_recommended_scaffold=dream_scaffold,
+                extra_prompt_tokens=0,
+                round1_advantages=r1_adv_tuple,
+                candidates=tuple(all_scored),
                 abstraction_norm=round(abs_norm, 4),
             )
         finally:

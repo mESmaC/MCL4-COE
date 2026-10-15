@@ -1623,3 +1623,465 @@ class DreamRSIEngine:
             active_policy_text=self.state.program.to_text(),
             active_policy=self.state.program.to_dict(),
         )
+
+    @torch.no_grad()
+    def run_user_context_dream_session(
+        self,
+        coe: Any,
+        user_buffer: "UserContextDreamBuffer",
+        dream_cache: "DreamContextCache",
+        *,
+        max_cycles: int | None = None,
+        rollout_tokens: int = 160,
+        seed: int = 42,
+    ) -> list[DreamCycleOutput]:
+        """Run idle or manual Dream-RSI cycles seeded strictly with human `#U$#` contexts.
+
+        Leaves out all model-generated prompts/responses in the seed buffer, evolves the
+        Dream-RSI exploration policy $\\pi_t$, and distills a zero-token latent `Abstraction`
+        prior ($\\mathbf{z}_{\\text{abs}}^{*} \\in \\mathbb{R}^{d_{\\text{model}}}$) + optimal `#S$#`
+        cognitive operator scaffold into `dream_cache` for future similar or adjacent OOD topics.
+        """
+        from .data import get_tokenizer
+        from .ensemble import MultiPassController, _score_trace_integrity
+        from .ornith_rl import OrnithTask
+
+        was_training = coe.training
+        coe.eval()
+        outputs: list[DreamCycleOutput] = []
+        try:
+            device = next(coe.parameters()).device
+            vocab_size = int(getattr(coe.backbone.config, "vocab_size", 260))
+            tokenizer = get_tokenizer(vocab_size)
+            controller = MultiPassController(coe)
+            records = user_buffer.pending_records(limit=max_cycles)
+
+            for idx, rec in enumerate(records):
+                u_prompt = rec.user_context
+                # Generate 4 candidate trajectories from the human #U$# context to evaluate scaffolds
+                cand_specs = ((1, 0.0), (2, 0.0), (1, 0.28), (2, 0.35))
+                cand_bodies: list[str] = []
+                for c_idx, (r_steps, temp) in enumerate(cand_specs):
+                    if temp > 0.0:
+                        torch.manual_seed(seed + idx * 97 + c_idx * 31)
+                    tr = controller.generate_uta(
+                        u_prompt,
+                        max_new_tokens=rollout_tokens,
+                        temperature=temp,
+                        recurrence_steps=r_steps,
+                    )
+                    t_pos = tr.find("#T$#")
+                    body = tr[t_pos:].strip() if t_pos >= 0 else tr.strip()
+                    cand_bodies.append(body if body else "#T$# empty\n#A$# empty")
+
+                # Compute self-supervised structural + COE harness scores for the 4 rollouts
+                h_scores = tuple(
+                    round(max(0.05, _score_trace_integrity(u_prompt, f"#U$# {u_prompt}\n{b}")), 4)
+                    for b in cand_bodies
+                )
+                gold_idx = int(max(range(len(h_scores)), key=lambda i: h_scores[i]))
+                best_body = cand_bodies[gold_idx]
+                if "#A$#" in best_body:
+                    t_seg, a_seg = best_body.split("#A$#", 1)
+                    gold_t = t_seg.replace("#T$#", "", 1).strip()
+                    gold_a = a_seg.strip()
+                else:
+                    gold_t = best_body.replace("#T$#", "", 1).strip()
+                    gold_a = best_body
+
+                task = OrnithTask(
+                    task_id=rec.context_id,
+                    domain=rec.domain,
+                    prompt_q=f"#U$# {u_prompt}",
+                    harness_h="user_context_dream_rsi",
+                    scaffold_s="abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+                    candidate_rollouts=tuple(cand_bodies),
+                    harness_scores=h_scores,
+                    gold_index=gold_idx,
+                    gold_thought=gold_t,
+                    gold_answer=gold_a,
+                )
+
+                cycle_out = self.step_cycle(
+                    coe,
+                    task,
+                    max_seq_len=int(getattr(coe.backbone.config, "max_seq_len", 512)),
+                )
+                rec.dreamed_cycles += 1
+                outputs.append(cycle_out)
+
+                # Distill zero-token latent Abstraction prior z_abs* and 32-d Pearson intent key q_emb
+                max_seq = int(getattr(coe.backbone.config, "max_seq_len", 512))
+                u_ids = tokenizer.encode(f"#U$# {u_prompt}", add_bos=True, add_eos=True)[:max_seq]
+                sc_ids = tokenizer.encode(
+                    f"#U$# {u_prompt}\n#S$# {cycle_out.best_scaffold}",
+                    add_bos=True,
+                    add_eos=True,
+                )[:max_seq]
+                b_ids = tokenizer.encode(best_body, add_bos=True, add_eos=True)[:max_seq]
+
+                u_t = torch.tensor([u_ids], dtype=torch.long, device=device)
+                u_len = torch.tensor([len(u_ids)], dtype=torch.long, device=device)
+                sc_t = torch.tensor([sc_ids], dtype=torch.long, device=device)
+                sc_len = torch.tensor([len(sc_ids)], dtype=torch.long, device=device)
+                b_t = torch.tensor([b_ids], dtype=torch.long, device=device)
+                b_len = torch.tensor([len(b_ids)], dtype=torch.long, device=device)
+
+                use_amp = device.type == "cuda"
+                with torch.autocast(
+                    device_type=device.type, dtype=torch.bfloat16, enabled=use_amp
+                ):
+                    q_emb = coe.embed_items(u_t, u_len)[0].detach().float().cpu()
+                    z_prompt = coe.compress_abstraction(sc_t, sc_len, level="standard")[0].float()
+                    z_cand = coe.compress_abstraction(b_t, b_len, level="detailed")[0].float()
+                    z_blend = coe.abstraction_norm(
+                        (0.65 * z_prompt + 0.35 * z_cand).to(
+                            next(coe.abstraction_norm.parameters()).dtype
+                        )
+                    ).detach().float().cpu()
+
+                dream_cache.upsert(
+                    DreamContextEntry(
+                        context_id=rec.context_id,
+                        user_context=u_prompt,
+                        domain=rec.domain,
+                        q_emb=tuple(round(float(x), 6) for x in q_emb.tolist()),
+                        z_abs=tuple(round(float(x), 6) for x in z_blend.tolist()),
+                        best_scaffold=cycle_out.best_scaffold,
+                        best_node_score=cycle_out.best_node_score,
+                        active_policy_text=cycle_out.active_policy_text,
+                    )
+                )
+
+            if self.out_dir is not None:
+                dream_cache.save(self.out_dir / "dream_context_cache.json")
+            return outputs
+        finally:
+            coe.train(was_training)
+
+
+_MODEL_GENERATED_CUT_MARKERS: tuple[str, ...] = (
+    "#T$#",
+    "#A$#",
+    "#S$#",
+    "#H$#",
+    "#Q$#",
+    "#H_ANC$#",
+    "<eos>",
+    "\nAssistant:",
+    "\nModel:",
+    "\nAI:",
+)
+
+_SYNTHETIC_SELF_PROMPT_PREFIXES: tuple[str, ...] = (
+    "the user asks:",
+    "user asks:",
+    "let's analyze",
+    "we need to",
+    "step 1:",
+)
+
+
+def extract_user_only_context(raw_text: str) -> str:
+    """Strictly extract human-authored `#U$#` context, stripping all model-generated prompts/outputs.
+
+    Prevents autophagous mode collapse during idle/manual Dream-RSI by guaranteeing that
+    no `#T$#` scratchpads, `#A$#` answers, `#S$#` scaffolds, or synthetic self-prompts enter
+    the Dream seed buffer.
+    """
+    text = str(raw_text or "").replace("<bos>", "").strip()
+    if not text:
+        return ""
+
+    # If explicit #U$# markers are present (e.g., multi-turn transcript), extract only human #U$# segments
+    if "#U$#" in text:
+        parts = text.split("#U$#")[1:]
+        user_turns: list[str] = []
+        for part in parts:
+            seg = part
+            for marker in _MODEL_GENERATED_CUT_MARKERS:
+                idx = seg.find(marker)
+                if idx >= 0:
+                    seg = seg[:idx]
+            cleaned = " ".join(seg.strip().split())
+            if cleaned and not cleaned.lower().startswith(_SYNTHETIC_SELF_PROMPT_PREFIXES):
+                user_turns.append(cleaned)
+        return " ".join(user_turns).strip()
+
+    # Otherwise strip from the earliest model-generated marker onward
+    seg = text
+    for marker in _MODEL_GENERATED_CUT_MARKERS:
+        idx = seg.find(marker)
+        if idx >= 0:
+            seg = seg[:idx]
+    cleaned = " ".join(seg.strip().split())
+    if cleaned.lower().startswith(_SYNTHETIC_SELF_PROMPT_PREFIXES):
+        return ""
+    return cleaned
+
+
+@dataclass
+class UserContextRecord:
+    """A sanitized human-only user prompt/context record for seeding idle/manual Dream-RSI."""
+
+    context_id: str
+    user_context: str
+    domain: str = "general"
+    dreamed_cycles: int = 0
+
+
+class UserContextDreamBuffer:
+    """Buffer of strictly human-provided `#U$#` contexts for idle or manual Dream-RSI seeding."""
+
+    def __init__(self, max_size: int = 256) -> None:
+        if max_size < 1:
+            raise ValueError("max_size must be >= 1")
+        self.max_size = max_size
+        self._records: list[UserContextRecord] = []
+        self._seen_texts: set[str] = set()
+
+    def __len__(self) -> int:
+        return len(self._records)
+
+    @property
+    def records(self) -> tuple[UserContextRecord, ...]:
+        return tuple(self._records)
+
+    def add_user_context(
+        self,
+        raw_text: str,
+        *,
+        domain: str = "general",
+        context_id: str | None = None,
+    ) -> UserContextRecord | None:
+        """Sanitize `raw_text` (stripping any model `#T$#`/`#A$#` text) and append if non-empty & unique."""
+        clean = extract_user_only_context(raw_text)
+        if len(clean) < 8:
+            return None
+        key = clean.lower()
+        if key in self._seen_texts:
+            for existing in self._records:
+                if existing.user_context.lower() == key:
+                    return existing
+            return None
+        cid = context_id or f"uctx_{len(self._records) + 1:04d}"
+        rec = UserContextRecord(context_id=cid, user_context=clean, domain=domain)
+        if len(self._records) >= self.max_size:
+            evicted = self._records.pop(0)
+            self._seen_texts.discard(evicted.user_context.lower())
+        self._records.append(rec)
+        self._seen_texts.add(key)
+        return rec
+
+    def add_conversation_history(
+        self,
+        turns: Sequence[str | dict[str, Any]],
+        *,
+        domain: str = "general",
+    ) -> int:
+        """Ingest a conversation history, keeping ONLY user turns and discarding all model turns."""
+        added = 0
+        for item in turns:
+            if isinstance(item, dict):
+                role = str(item.get("role", "user")).lower()
+                if role not in ("user", "human"):
+                    continue
+                content = str(item.get("content", ""))
+                dom = str(item.get("domain", domain))
+            else:
+                content = str(item)
+                dom = domain
+            if self.add_user_context(content, domain=dom) is not None:
+                added += 1
+        return added
+
+    def pending_records(self, limit: int | None = None) -> list[UserContextRecord]:
+        """Return user contexts ordered by fewest dreamed cycles first."""
+        ordered = sorted(self._records, key=lambda r: r.dreamed_cycles)
+        return ordered if limit is None else ordered[: max(0, int(limit))]
+
+
+@dataclass(frozen=True)
+class DreamContextEntry:
+    """Distilled zero-token latent prior from a Dream-RSI cycle on a user context."""
+
+    context_id: str
+    user_context: str
+    domain: str
+    q_emb: tuple[float, ...]
+    z_abs: tuple[float, ...]
+    best_scaffold: str
+    best_node_score: float
+    active_policy_text: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "context_id": self.context_id,
+            "user_context": self.user_context,
+            "domain": self.domain,
+            "q_emb": list(self.q_emb),
+            "z_abs": list(self.z_abs),
+            "best_scaffold": self.best_scaffold,
+            "best_node_score": self.best_node_score,
+            "active_policy_text": self.active_policy_text,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "DreamContextEntry":
+        return cls(
+            context_id=str(data["context_id"]),
+            user_context=str(data["user_context"]),
+            domain=str(data.get("domain", "general")),
+            q_emb=tuple(float(x) for x in data["q_emb"]),
+            z_abs=tuple(float(x) for x in data["z_abs"]),
+            best_scaffold=str(data["best_scaffold"]),
+            best_node_score=float(data["best_node_score"]),
+            active_policy_text=str(data.get("active_policy_text", "")),
+        )
+
+
+@dataclass(frozen=True)
+class DreamRetrievalResult:
+    """Zero-token prior retrieved from `DreamContextCache` for a new or adjacent OOD user prompt."""
+
+    has_match: bool
+    top_similarity: float
+    matched_contexts: tuple[str, ...]
+    matched_domains: tuple[str, ...]
+    matched_similarities: tuple[float, ...]
+    interpolated_z_abs: torch.Tensor | None
+    recommended_scaffold: str
+    recommended_policy_text: str
+
+
+class DreamContextCache:
+    """Latent episodic cache mapping user intent embeddings to pre-dreamed `#S$#` scaffolds & `Abstraction` vectors."""
+
+    def __init__(self) -> None:
+        self._entries: dict[str, DreamContextEntry] = {}
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    @property
+    def entries(self) -> tuple[DreamContextEntry, ...]:
+        return tuple(self._entries.values())
+
+    def upsert(self, entry: DreamContextEntry) -> None:
+        self._entries[entry.context_id] = entry
+
+    def save(self, path: str | Path) -> None:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"entries": [e.to_dict() for e in self._entries.values()]}
+        _atomic_write_json(p, payload)
+
+    @classmethod
+    def load(cls, path: str | Path) -> "DreamContextCache":
+        cache = cls()
+        p = Path(path)
+        if p.exists():
+            raw = json.loads(p.read_text(encoding="utf-8"))
+            for item in raw.get("entries", []):
+                cache.upsert(DreamContextEntry.from_dict(item))
+        return cache
+
+    @torch.no_grad()
+    def retrieve(
+        self,
+        query_q_emb: torch.Tensor,
+        *,
+        top_k: int = 3,
+        min_similarity: float = 0.05,
+        exclude_exact_text: str | None = None,
+        device: str | torch.device | None = None,
+    ) -> DreamRetrievalResult:
+        """Retrieve top-$k$ adjacent user-context priors in 0 prompt tokens via Pearson similarity."""
+        from .operators import pearson_similarity
+
+        default_scaffold = "abduction -> association -> decision -> deduction -> evaluation -> metacognition"
+        if not self._entries:
+            return DreamRetrievalResult(
+                has_match=False,
+                top_similarity=0.0,
+                matched_contexts=(),
+                matched_domains=(),
+                matched_similarities=(),
+                interpolated_z_abs=None,
+                recommended_scaffold=default_scaffold,
+                recommended_policy_text="",
+            )
+
+        excl = extract_user_only_context(exclude_exact_text).lower() if exclude_exact_text else None
+        candidates = [
+            e
+            for e in self._entries.values()
+            if excl is None or e.user_context.lower() != excl
+        ]
+        if not candidates:
+            return DreamRetrievalResult(
+                has_match=False,
+                top_similarity=0.0,
+                matched_contexts=(),
+                matched_domains=(),
+                matched_similarities=(),
+                interpolated_z_abs=None,
+                recommended_scaffold=default_scaffold,
+                recommended_policy_text="",
+            )
+
+        target_dev = (
+            torch.device(device)
+            if device is not None
+            else query_q_emb.device
+        )
+        q_vec = query_q_emb.detach().float().view(1, -1).to(target_dev)
+        keys = torch.tensor(
+            [e.q_emb for e in candidates], dtype=torch.float32, device=target_dev
+        )
+        sims = pearson_similarity(q_vec.expand_as(keys), keys).view(-1)
+
+        ranked_indices = torch.argsort(sims, descending=True).tolist()
+        kept: list[tuple[DreamContextEntry, float]] = []
+        for idx in ranked_indices:
+            s_val = float(sims[idx].item())
+            if s_val >= min_similarity or (not kept and len(ranked_indices) > 0):
+                kept.append((candidates[idx], s_val))
+            if len(kept) >= max(1, top_k):
+                break
+
+        top_entry, top_sim = kept[0]
+        if top_sim < min_similarity:
+            return DreamRetrievalResult(
+                has_match=False,
+                top_similarity=round(top_sim, 4),
+                matched_contexts=(top_entry.user_context,),
+                matched_domains=(top_entry.domain,),
+                matched_similarities=(round(top_sim, 4),),
+                interpolated_z_abs=None,
+                recommended_scaffold=top_entry.best_scaffold,
+                recommended_policy_text=top_entry.active_policy_text,
+            )
+
+        sim_tensor = torch.tensor(
+            [max(0.01, s) * max(0.1, e.best_node_score) for e, s in kept],
+            dtype=torch.float32,
+            device=target_dev,
+        )
+        weights = F.softmax(sim_tensor / 0.15, dim=0).unsqueeze(-1)
+        z_stack = torch.tensor(
+            [e.z_abs for e, _ in kept], dtype=torch.float32, device=target_dev
+        )
+        z_interp = (weights * z_stack).sum(dim=0, keepdim=True)
+
+        return DreamRetrievalResult(
+            has_match=True,
+            top_similarity=round(top_sim, 4),
+            matched_contexts=tuple(e.user_context for e, _ in kept),
+            matched_domains=tuple(e.domain for e, _ in kept),
+            matched_similarities=tuple(round(s, 4) for _, s in kept),
+            interpolated_z_abs=z_interp,
+            recommended_scaffold=top_entry.best_scaffold,
+            recommended_policy_text=top_entry.active_policy_text,
+        )
+

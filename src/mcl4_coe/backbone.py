@@ -249,13 +249,20 @@ class SparseMoE(nn.Module):
             for expert, chunk in zip(self.experts, expert_chunks)
             if chunk.shape[0] > 0
         ]
-        active_out = torch.zeros_like(active_x)
         if expert_outs:
             all_expert_out = torch.cat(expert_outs, dim=0)
             weighted = (all_expert_out * sorted_weights.to(all_expert_out.dtype)).to(
-                active_out.dtype
+                active_x.dtype
             )
-            active_out.index_add_(0, sorted_tokens, weighted)
+            unpermed = torch.empty_like(weighted)
+            unpermed.index_copy_(0, perm, weighted)
+            active_out = (
+                unpermed.view(active_x.shape[0], self.top_k, active_x.shape[-1])
+                .sum(dim=1)
+                .to(active_x.dtype)
+            )
+        else:
+            active_out = torch.zeros_like(active_x)
 
         output = torch.zeros_like(flat)
         output.index_copy_(0, active_indices, active_out)

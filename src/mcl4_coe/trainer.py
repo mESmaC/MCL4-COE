@@ -417,26 +417,24 @@ class MCL4COETrainer:
         )
 
         self.decision_streamer: TypedDecisionShardStreamer | None = None
+        self._decision_pool: list[Any] = []
+        self._decision_seq_len: int = min(512, self.config.max_seq_len)
+        self._decision_epoch: int = 0
         self.decision_batches: list[dict[str, torch.Tensor]] = []
         self._decision_cursor = 0
         dec_cache = shards_root / "typed_decision" / "decision_examples_cache.pt"
         ts_dir = Path(self.config.corpora_root) / "text" / "tasksource-jev-typed-decisions"
-        dec_seq_len = min(384, self.config.max_seq_len)
+        dec_seq_len = self._decision_seq_len
         if dec_cache.is_file() or ts_dir.is_dir():
             self.decision_streamer = TypedDecisionShardStreamer(
                 self.config.corpora_root,
                 max_seq_len=dec_seq_len,
-                max_options=6,
+                max_options=8,
                 cache_path=dec_cache,
-                max_cached_examples=2048,
+                max_cached_examples=8192,
             )
-            pool = list(self.decision_streamer.iter_decision_examples())
-            bsz = max(1, self.config.decision_batch_size)
-            for i in range(0, len(pool) - bsz + 1, bsz):
-                collated = collate_decisions(pool[i : i + bsz], dec_seq_len, device="cpu")
-                if self.device.type == "cuda":
-                    collated = {k: v.pin_memory() for k, v in collated.items()}
-                self.decision_batches.append(collated)
+            self._decision_pool = list(self.decision_streamer.iter_decision_examples())
+            self._rebuild_decision_batches()
 
         # Held-out validation datasets (split="val") and uncontaminated MCQA val cache
         from .pipeline import ShardedTokenBlockDataset
@@ -474,9 +472,31 @@ class MCL4COETrainer:
             except Exception:
                 pass
 
+    def _rebuild_decision_batches(self) -> None:
+        from .data import collate_decisions
+        import random
+
+        self.decision_batches = []
+        if not self._decision_pool:
+            return
+        pool = list(self._decision_pool)
+        if self._decision_epoch > 0:
+            rng = random.Random(self.config.seed + self._decision_epoch * 1009)
+            rng.shuffle(pool)
+        bsz = max(1, self.config.decision_batch_size)
+        for i in range(0, len(pool) - bsz + 1, bsz):
+            collated = collate_decisions(pool[i : i + bsz], self._decision_seq_len, device="cpu")
+            if self.device.type == "cuda":
+                collated = {k: v.pin_memory() for k, v in collated.items()}
+            self.decision_batches.append(collated)
+
     def _next_decision_batch(self) -> dict[str, torch.Tensor] | None:
         if not self.decision_batches:
             return None
+        if self._decision_cursor >= len(self.decision_batches):
+            self._decision_epoch += 1
+            self._decision_cursor = 0
+            self._rebuild_decision_batches()
         batch_cpu = self.decision_batches[self._decision_cursor % len(self.decision_batches)]
         self._decision_cursor += 1
         return {k: v.to(self.device, non_blocking=True) for k, v in batch_cpu.items()}
@@ -1022,6 +1042,8 @@ class MCL4COETrainer:
             )
 
         self.model.load_state_dict(model_state, strict=False)
+        with torch.no_grad():
+            self.model.log_scale.data.clamp_(math.log(0.5), math.log(3.5))
         if existing_pairs and not self._get_model_mitotic_pairs():
             self._set_model_mitotic_pairs(existing_pairs + added_pairs)
         if self.config.cpu_offload_optimizer:
@@ -1283,6 +1305,7 @@ class MCL4COETrainer:
                     del scaled_lm_loss
 
                 if dec_batch is not None:
+                    eff_w_dec = w_dec if w_dec > 0.0 else 0.12
                     with torch.autocast(
                         device_type=self.device.type,
                         dtype=torch.bfloat16,
@@ -1295,7 +1318,7 @@ class MCL4COETrainer:
                         step_eval_gpu = op_out.evaluation_loss.detach().float()
                         step_meta_gpu = op_out.metacognition_loss.detach().float()
                         step_abs_gpu = op_out.abstraction_loss.detach().float()
-                        scaled_op_loss = w_dec * op_out.total_loss
+                        scaled_op_loss = eff_w_dec * op_out.total_loss
                     step_total_gpu = step_total_gpu + scaled_op_loss.detach().float()
                     del op_out
                     scaled_op_loss.backward()

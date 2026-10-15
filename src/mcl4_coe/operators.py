@@ -491,7 +491,7 @@ class CognitiveOperatorEnsemble(nn.Module):
             return (left.float() * right.float()).sum(-1) / math.sqrt(self.config.projection_dim)
 
     def _scale(self) -> Tensor:
-        return self.log_scale.float().clamp(math.log(0.1), math.log(20.0)).exp()
+        return self.log_scale.float().clamp(math.log(0.5), math.log(4.5)).exp()
 
     def forward_decision(
         self,
@@ -639,7 +639,7 @@ class CognitiveOperatorEnsemble(nn.Module):
         from `Decision` to simultaneously supervise:
         1. `Decision` / `Abduction` / `Induction` (option cross-entropy over Pearson similarities)
         2. `Deduction` (3-way `entailed=0`, `contradicted=1`, `undetermined=2` over positive,
-           hardest-negative, and cross-row unrelated state-candidate pairs)
+           hardest-negative, second-negative, and cross-row unrelated state-candidate pairs)
         3. `Evaluation` & `Association` (`assoc_alpha`, `assoc_beta` utility calibration in `[0, 1]`)
         4. `Metacognition` (`correctness`, `evidence_sufficiency`, `context_benefit` across
            entailed `[1, 1, 1]`, contradicted `[0, 1, 0.5]`, and undetermined `[0, 0, 0]` pairs)
@@ -693,8 +693,10 @@ class CognitiveOperatorEnsemble(nn.Module):
             eos_id=self.config.eos_id,
         )
 
-        canon_state_proj = self.state_projection(paired_state_repr)
-        canon_cand_proj = self.output_projection(cand_repr)
+        state_in = F.dropout(paired_state_repr, p=0.10, training=self.training)
+        cand_in = F.dropout(cand_repr, p=0.10, training=self.training)
+        canon_state_proj = self.state_projection(state_in)
+        canon_cand_proj = self.output_projection(cand_in)
         canon_scores = self._similarity(canon_state_proj, canon_cand_proj)
 
         valid_scores = canon_scores.index_select(0, inv_perm)
@@ -726,13 +728,23 @@ class CognitiveOperatorEnsemble(nn.Module):
         s_neg = state_grid[b_rows, d_idx]
         c_neg = opt_grid[b_rows, d_idx]
 
+        # Also select the second-highest (or alternate) valid distractor so Deduction and
+        # Metacognition learn contradiction across all distractors rather than a single pair
+        distractor_mask_2 = distractor_mask.clone()
+        distractor_mask_2[b_rows, d_idx] = False
+        has_second = distractor_mask_2.any(dim=-1)
+        neg_scores_2 = similarities.float().masked_fill(~distractor_mask_2, -torch.inf)
+        d_idx2 = torch.where(has_second, neg_scores_2.argmax(dim=-1), d_idx)
+        s_neg2 = state_grid[b_rows, d_idx2]
+        c_neg2 = opt_grid[b_rows, d_idx2]
+
         # Cross-row mismatched pair represents `undetermined` (unrelated state and candidate)
         s_und = s_pos
         c_und = torch.roll(c_pos, shifts=1, dims=0) if batch > 1 else (0.5 * (c_pos + c_neg))
 
-        s_all3 = torch.cat([s_pos, s_neg, s_und], dim=0)
-        c_all3 = torch.cat([c_pos, c_neg, c_und], dim=0)
-        joint_pair = torch.cat([s_all3, c_all3], dim=-1)
+        s_all4 = torch.cat([s_pos, s_neg, s_neg2, s_und], dim=0)
+        c_all4 = torch.cat([c_pos, c_neg, c_neg2, c_und], dim=0)
+        joint_pair = F.dropout(torch.cat([s_all4, c_all4], dim=-1), p=0.10, training=self.training)
 
         ded_joint = self.deduction_query_proj(joint_pair)
         meta_joint = self.meta_query_proj(joint_pair)
@@ -759,7 +771,8 @@ class CognitiveOperatorEnsemble(nn.Module):
             router_z_loss = 0.5 * (
                 encoded_state.router_z_loss.float() + decoded_options.router_z_loss.float()
             )
-            ce_loss = F.cross_entropy(logits, t_idx)
+            smooth_dec = 0.05 if self.training else 0.0
+            ce_loss = F.cross_entropy(logits, t_idx, label_smoothing=smooth_dec)
             dec_loss = (
                 ce_loss
                 + self.backbone.config.aux_loss_coef * aux_loss
@@ -776,17 +789,22 @@ class CognitiveOperatorEnsemble(nn.Module):
                 [
                     torch.zeros(batch, device=context_ids.device, dtype=torch.long),
                     torch.ones(batch, device=context_ids.device, dtype=torch.long),
+                    torch.ones(batch, device=context_ids.device, dtype=torch.long),
                     torch.full((batch,), 2, device=context_ids.device, dtype=torch.long),
                 ],
                 dim=0,
             )
-            deduction_loss = F.cross_entropy(ded_logits, ded_targets)
+            deduction_loss = F.cross_entropy(
+                ded_logits, ded_targets, label_smoothing=(0.04 if self.training else 0.0)
+            )
 
             # 3. Evaluation & Association utility loss in [0, 1]
             eval_logits = valid_scores.float() * self.assoc_alpha.float() + self.assoc_beta.float()
             eval_utilities = eval_logits.sigmoid()
             target_grid = F.one_hot(t_idx, num_classes=num_opts).float()
             eval_targets = target_grid[valid_options]
+            if self.training:
+                eval_targets = eval_targets * 0.92 + 0.04
             evaluation_loss = F.binary_cross_entropy_with_logits(eval_logits, eval_targets)
 
             # 4. Metacognition 3-signal loss (`correctness`, `evidence_sufficiency`, `context_benefit`)
@@ -804,7 +822,9 @@ class CognitiveOperatorEnsemble(nn.Module):
             t_und_meta = torch.tensor(
                 [0.0, 0.0, 0.0], device=context_ids.device, dtype=torch.float32
             ).expand(batch, 3)
-            meta_targets = torch.cat([t_pos_meta, t_neg_meta, t_und_meta], dim=0)
+            meta_targets = torch.cat([t_pos_meta, t_neg_meta, t_neg_meta, t_und_meta], dim=0)
+            if self.training:
+                meta_targets = meta_targets * 0.92 + 0.04
             metacognition_loss = F.binary_cross_entropy_with_logits(meta_logits, meta_targets)
 
             # 5. Abstraction alignment loss

@@ -858,6 +858,7 @@ class MultiPassController(nn.Module):
 
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
                 q_emb = self.coe.embed_items(u_t, u_len)
+                z_query = self.coe.compress_abstraction(u_t, u_len, level="standard").float()
 
             dream_matched = False
             dream_top_sim = 0.0
@@ -868,6 +869,8 @@ class MultiPassController(nn.Module):
             if dream_cache is not None and hasattr(dream_cache, "retrieve"):
                 ret = dream_cache.retrieve(
                     q_emb,
+                    query_z_abs=z_query,
+                    query_text=user_prompt,
                     top_k=3,
                     min_similarity=min_dream_similarity,
                     exclude_exact_text=(user_prompt if exclude_exact_dream_match else None),
@@ -1024,10 +1027,12 @@ class MultiPassController(nn.Module):
                     )
                 return scored, [cand_abs_vecs[i : i + 1].detach() for i in range(k_cands)]
 
-            # 2. Round 1 Rollouts: Baseline + Unsteered r=2 + Zero-Token Dream-Prior Steered Rollouts
+            # 2. Round 1 Rollouts: Unsteered COE candidates + Zero-Token Dream-Prior Steered Rollouts
             r1_specs: tuple[tuple[int, float, Tensor | None, float, str], ...] = (
                 (1, 0.0, None, 0.0, "r1_baseline"),
                 (2, 0.0, None, 0.0, "r1_unsteered_r2"),
+                (1, 0.28, None, 0.0, "r1_unsteered_explore"),
+                (2, 0.35, None, 0.0, "r1_unsteered_r2_explore"),
                 (2, 0.0, z_prior_0, prior_scale, "r1_dream_steered"),
                 (2, 0.30, z_prior_0, prior_scale, "r1_dream_explore"),
             )
@@ -1048,7 +1053,7 @@ class MultiPassController(nn.Module):
             baseline_text = r1_pool[0][2]
             r1_scored, r1_abs_vecs = _score_pool(r1_pool, z_prior_0)
             r1_rewards = torch.tensor(
-                [c.composite_score + 0.05 * max(0.0, c.abstraction_alignment) for c in r1_scored],
+                [c.composite_score + 0.04 * max(0.0, c.abstraction_alignment) for c in r1_scored],
                 dtype=torch.float32,
                 device=device,
             )
@@ -1145,7 +1150,7 @@ class MultiPassController(nn.Module):
             r2_best = max(r2_joint, key=lambda c: c.composite_score)
             overall_best = max(
                 all_scored,
-                key=lambda c: c.composite_score + 0.03 * max(0.0, c.abstraction_alignment),
+                key=lambda c: c.composite_score + 0.015 * max(0.0, c.abstraction_alignment),
             )
 
             return DreamRLGenerationOutput(

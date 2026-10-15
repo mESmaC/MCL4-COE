@@ -1986,17 +1986,42 @@ class DreamContextCache:
                 cache.upsert(DreamContextEntry.from_dict(item))
         return cache
 
+    @staticmethod
+    def _extract_morpheme_features(text: str) -> set[str]:
+        import re
+
+        stop = {
+            "what", "when", "where", "which", "that", "this", "with", "from",
+            "into", "your", "does", "have", "explain", "how", "why", "write",
+            "find", "finds", "between", "even", "less", "than", "each", "more",
+        }
+        words = [
+            w
+            for w in re.findall(r"[a-z0-9_]{3,}", text.lower())
+            if w not in stop
+        ]
+        feats: set[str] = set()
+        for w in words:
+            feats.add(f"w:{w[:6]}")
+            if len(w) >= 4:
+                for i in range(len(w) - 3):
+                    feats.add(f"g:{w[i:i+4]}")
+        return feats
+
     @torch.no_grad()
     def retrieve(
         self,
         query_q_emb: torch.Tensor,
         *,
+        query_z_abs: torch.Tensor | None = None,
+        query_text: str | None = None,
+        whiten: bool = True,
         top_k: int = 3,
         min_similarity: float = 0.05,
         exclude_exact_text: str | None = None,
         device: str | torch.device | None = None,
     ) -> DreamRetrievalResult:
-        """Retrieve top-$k$ adjacent user-context priors in 0 prompt tokens via Pearson similarity."""
+        """Retrieve top-$k$ adjacent user-context priors in 0 prompt tokens via whitened Pearson similarity."""
         from .operators import pearson_similarity
 
         default_scaffold = "abduction -> association -> decision -> deduction -> evaluation -> metacognition"
@@ -2036,10 +2061,67 @@ class DreamContextCache:
             else query_q_emb.device
         )
         q_vec = query_q_emb.detach().float().view(1, -1).to(target_dev)
-        keys = torch.tensor(
+        keys_q = torch.tensor(
             [e.q_emb for e in candidates], dtype=torch.float32, device=target_dev
         )
-        sims = pearson_similarity(q_vec.expand_as(keys), keys).view(-1)
+
+        # 1. Cache-Key Whitening on 32-d q_emb: removes the shared #U$# prompt-cone mean
+        if whiten and len(candidates) >= 2:
+            mu_q = keys_q.mean(dim=0, keepdim=True)
+            std_q = keys_q.std(dim=0, unbiased=False, keepdim=True).clamp_min(1e-4)
+            q_whitened = (q_vec - mu_q) / std_q
+            keys_q_whitened = (keys_q - mu_q) / std_q
+            sims_q = pearson_similarity(q_whitened.expand_as(keys_q_whitened), keys_q_whitened).view(-1)
+        else:
+            sims_q = pearson_similarity(q_vec.expand_as(keys_q), keys_q).view(-1)
+
+        # 2. Optional 384-d Abstraction Space Whitening (query_z_abs vs cached z_abs)
+        z_stack_all = torch.tensor(
+            [e.z_abs for e in candidates], dtype=torch.float32, device=target_dev
+        )
+        if query_z_abs is not None and query_z_abs.numel() == z_stack_all.shape[-1]:
+            qz = query_z_abs.detach().float().view(1, -1).to(target_dev)
+            if whiten and len(candidates) >= 2:
+                mu_z = z_stack_all.mean(dim=0, keepdim=True)
+                std_z = z_stack_all.std(dim=0, unbiased=False, keepdim=True).clamp_min(1e-4)
+                qz_w = (qz - mu_z) / std_z
+                kz_w = (z_stack_all - mu_z) / std_z
+                sims_z = pearson_similarity(qz_w.expand_as(kz_w), kz_w).view(-1)
+            else:
+                sims_z = pearson_similarity(qz.expand_as(z_stack_all), z_stack_all).view(-1)
+        else:
+            sims_z = sims_q
+
+        # 3. IDF-weighted Morpheme / Stem similarity for sharp domain disambiguation
+        q_clean = extract_user_only_context(query_text or exclude_exact_text or "")
+        if q_clean:
+            q_feats = self._extract_morpheme_features(q_clean)
+            cand_feats = [self._extract_morpheme_features(e.user_context) for e in candidates]
+            df: dict[str, int] = {}
+            for cf in cand_feats:
+                for f in cf:
+                    df[f] = df.get(f, 0) + 1
+            n_docs = len(candidates)
+            lex_scores: list[float] = []
+            for cf in cand_feats:
+                if not q_feats or not cf:
+                    lex_scores.append(0.0)
+                    continue
+                inter = q_feats & cf
+                if not inter:
+                    lex_scores.append(0.0)
+                    continue
+                w_inter = sum(math.log(1.0 + n_docs / max(1, df.get(f, 1))) for f in inter)
+                w_q = sum(math.log(1.0 + n_docs / max(1, df.get(f, 1))) for f in q_feats)
+                w_c = sum(math.log(1.0 + n_docs / max(1, df.get(f, 1))) for f in cf)
+                lex_scores.append(w_inter / math.sqrt(max(1e-6, w_q * w_c)))
+            sims_lex_raw = torch.tensor(lex_scores, dtype=torch.float32, device=target_dev)
+            sims_lex = (sims_lex_raw / sims_lex_raw.max().clamp_min(0.20)).clamp(0.0, 1.0)
+            # Combine whitened neural similarity (mapped from [-1, 1] to [0, 1]) with calibrated morphemic similarity
+            neural_01 = (0.55 * sims_q + 0.45 * sims_z).clamp(-1.0, 1.0) * 0.5 + 0.5
+            sims = 0.50 * neural_01 + 0.50 * sims_lex
+        else:
+            sims = (0.60 * sims_q + 0.40 * sims_z).clamp(-1.0, 1.0)
 
         ranked_indices = torch.argsort(sims, descending=True).tolist()
         kept: list[tuple[DreamContextEntry, float]] = []
@@ -2063,12 +2145,13 @@ class DreamContextCache:
                 recommended_policy_text=top_entry.active_policy_text,
             )
 
+        # Concentrate interpolation weight on the top whitened match so unrelated domains do not dilute z_abs
         sim_tensor = torch.tensor(
             [max(0.01, s) * max(0.1, e.best_node_score) for e, s in kept],
             dtype=torch.float32,
             device=target_dev,
         )
-        weights = F.softmax(sim_tensor / 0.15, dim=0).unsqueeze(-1)
+        weights = F.softmax(sim_tensor / 0.08, dim=0).unsqueeze(-1)
         z_stack = torch.tensor(
             [e.z_abs for e, _ in kept], dtype=torch.float32, device=target_dev
         )
@@ -2084,4 +2167,5 @@ class DreamContextCache:
             recommended_scaffold=top_entry.best_scaffold,
             recommended_policy_text=top_entry.active_policy_text,
         )
+
 

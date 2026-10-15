@@ -1,0 +1,19 @@
+{
+  "accepted_revisions": 0,
+  "cycle": 18,
+  "initial_score": 0.611035,
+  "latest_score": 0.6163538189784705,
+  "program": {
+    "patience": 0,
+    "rank": [
+      "SHALLOW",
+      "SCORE"
+    ],
+    "root_every": 1,
+    "rounds": 3,
+    "stop": null,
+    "width": 1
+  },
+  "program_text": "WIDTH 1\nROOT 1\nRANK SHALLOW SCORE\nSTOP NEVER\nPATIENCE 0\nROUNDS 3",
+  "total_replays_dreamed": 3420
+}

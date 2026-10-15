@@ -803,7 +803,7 @@ def test_forward_all_operators_and_ornith_self_improver() -> None:
     u, t, a = eps[0]
     tok_ids = ByteTokenizer().encode_masked_turn(u, t, a, seq_len=2048)
     assert len(tok_ids) <= 2048
-    assert "..." in t
+    assert "\n...\n" not in t and t.endswith(".")
 
     # Verify Nemotron-Math-Proofs-v2 and hh-rlhf extraction schemas
     nemotron_eps = extract_uta_episodes(

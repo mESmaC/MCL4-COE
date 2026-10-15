@@ -1246,18 +1246,22 @@ class OrnithSelfImprover:
             tasks[0] = replace(tasks[0], scaffold_s=dream_out.best_scaffold)
 
         # Note: Solver context includes #U$#, #Q$#, and #S$# scaffold, NEVER the secret #H$# answer assertion!
+        max_dec_len = max(eff_seq_len, 512)
         examples = [
             DecisionExample(
                 question_id=t.task_id,
                 kind="choice",
-                context=f"{t.prompt_q}\n#S$# {t.scaffold_s}",
-                descriptions=t.candidate_rollouts,
+                context=f"{t.prompt_q}\n#S$# {t.scaffold_s}".encode("utf-8")[: max_dec_len - 4].decode("utf-8", errors="ignore"),
+                descriptions=tuple(
+                    d.encode("utf-8")[: max_dec_len - 4].decode("utf-8", errors="ignore")
+                    for d in t.candidate_rollouts
+                ),
                 values=("opt_0", "opt_1", "opt_2", "opt_3"),
                 target=t.gold_index,
             )
             for t in tasks
         ]
-        batch = collate_decisions(examples, max(eff_seq_len, 512), device=self.device)
+        batch = collate_decisions(examples, max_dec_len, device=self.device)
         ctx_ids = batch["context_ids"]
         ctx_lens = batch["context_lengths"]
         opt_ids = batch["option_ids"]

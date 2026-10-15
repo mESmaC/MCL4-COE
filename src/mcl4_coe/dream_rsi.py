@@ -1155,25 +1155,34 @@ class MCL4DreamDiscovery:
 
         ancestor_trace = []
         for anc in ancestors[1:][-3:]:
+            sc_head = str(anc.observation.get("scaffold", "")).split("->")[0].strip()[:12]
             ancestor_trace.append(
                 f"[d={anc.observation.get('depth', 1)} s={anc.score:.3f} "
-                f"conf={anc.observation.get('confidence', 0.5):.2f}] "
-                f"{anc.observation.get('scaffold', '')}"
+                f"c={anc.observation.get('confidence', 0.5):.2f} {sc_head}]"
             )
         history_block = (
             "\n#H_ANC$# " + " | ".join(ancestor_trace) if ancestor_trace else ""
         )
-        context_text = f"{self.task.prompt_q}{history_block}\n#S$# {scaffold}"
+        max_tok_len = max(self.max_seq_len, 512)
+        suffix = f"\n#S$# {scaffold}"
+        prefix = f"{self.task.prompt_q}{history_block}"
+        max_prefix_bytes = max(64, max_tok_len - len(suffix.encode("utf-8")) - 4)
+        prefix_trimmed = prefix.encode("utf-8")[:max_prefix_bytes].decode("utf-8", errors="ignore")
+        context_text = f"{prefix_trimmed}{suffix}"
+        bounded_descs = tuple(
+            d.encode("utf-8")[: max_tok_len - 4].decode("utf-8", errors="ignore")
+            for d in self.task.candidate_rollouts
+        )
 
         ex = DecisionExample(
             question_id=f"{self.task.task_id}_n{node_id}",
             kind="choice",
             context=context_text,
-            descriptions=self.task.candidate_rollouts,
+            descriptions=bounded_descs,
             values=("opt_0", "opt_1", "opt_2", "opt_3"),
             target=self.task.gold_index,
         )
-        batch = collate_decisions([ex], max(self.max_seq_len, 512), device=self.device)
+        batch = collate_decisions([ex], max_tok_len, device=self.device)
         ctx_ids = batch["context_ids"]
         ctx_lens = batch["context_lengths"]
         opt_ids = batch["option_ids"]

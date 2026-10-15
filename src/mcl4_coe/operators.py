@@ -265,12 +265,37 @@ class AttentiveMatchedFilterPool(nn.Module):
             state_ids, state_valid, strip_boundary=strip_boundary, bos_id=bos_id, eos_id=eos_id
         )
         b, t = state_ids.shape
-        if t < 6:
+        if t < 2:
             return mask
         positions = torch.arange(t, device=state_ids.device)[None, :]
         trimmed = mask.clone()
 
-        # Detect `\n#Q$#` ([10, 35, 81, 36, 35]) and mask from `\n#Q$#` to the end of the sequence.
+        # 1. MorphCode-16K atomic `#Q$#` / `#S$#` / `#H$#` / `#T$#` / `#A$#` marker tokens:
+        #    261..265 ("#Q$#".."#A$#"), 267..271 ("\n#Q$#".."\n#A$#"), 273..275 ("#Q$# ".."#A$# ")
+        is_morph_q = (
+            ((state_ids >= 261) & (state_ids <= 265))
+            | ((state_ids >= 267) & (state_ids <= 271))
+            | ((state_ids >= 273) & (state_ids <= 275))
+        ) & state_valid
+        if is_morph_q.any():
+            has_mq = is_morph_q.any(dim=-1, keepdim=True)
+            first_mq = torch.where(
+                has_mq,
+                is_morph_q.int().argmax(dim=-1, keepdim=True),
+                torch.full((b, 1), t, device=state_ids.device, dtype=torch.long),
+            )
+            trimmed = trimmed & (positions < first_mq)
+
+        # Strip MorphCode-16K atomic `#U$#` marker tokens (260="#U$#", 266="\n#U$#", 272="#U$# ")
+        is_morph_u = ((state_ids == 260) | (state_ids == 266) | (state_ids == 272)) & state_valid
+        if is_morph_u.any():
+            trimmed = trimmed & ~is_morph_u
+
+        if t < 6:
+            return torch.where(trimmed.any(dim=-1, keepdim=True), trimmed, mask)
+
+        # 2. ByteTokenizer 5-byte sequences:
+        #    Detect `\n#Q$#` ([10, 35, 81, 36, 35]) and mask from `\n#Q$#` to the end of the sequence.
         is_nq = (
             (state_ids[:, :-4] == 10)
             & (state_ids[:, 1:-3] == 35)

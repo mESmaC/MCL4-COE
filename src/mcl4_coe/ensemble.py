@@ -407,17 +407,23 @@ class MultiPassController(nn.Module):
                                 and tokens[-1] in (32, 10)
                             )
                         )
-                        at_clause_word = (
-                            step >= thought_budget + (10 if is_morph else 28)
-                            and tokens[-1] in clause_end_ids
-                        )
-                        force_transition = step >= min(
-                            thought_budget + (18 if is_morph else 44),
-                            max_new_tokens - (24 if is_morph else 64),
-                        )
-                        at_boundary = at_sentence or at_clause_word
+                        if is_morph:
+                            at_boundary = at_sentence
+                            force_transition = step >= max(
+                                thought_budget + 36, max_new_tokens - 36
+                            )
+                        else:
+                            at_clause_word = (
+                                step >= thought_budget + 28
+                                and tokens[-1] in clause_end_ids
+                            )
+                            force_transition = step >= min(
+                                thought_budget + 44,
+                                max_new_tokens - 64,
+                            )
+                            at_boundary = at_sentence or at_clause_word
                     else:
-                        at_boundary = tokens[-1] in clause_end_ids
+                        at_boundary = tokens[-1] in (sent_end_ids if is_morph else clause_end_ids)
                         force_transition = step >= min(
                             max(thought_budget, max_new_tokens - 12), thought_budget + 12
                         )
@@ -503,7 +509,7 @@ class MultiPassController(nn.Module):
                         if gen_window[i : i + 5] == ctx5:
                             trig_b = gen_window[i + 5]
                             if (32 <= trig_b < 127) or trig_b >= 260:
-                                next_logits[trig_b] -= 8.0 if is_morph else 6.0
+                                next_logits[trig_b] -= 6.0
                 if len(gen_window) >= 4:
                     ctx3 = gen_window[-3:]
                     hits_3: dict[int, int] = {}
@@ -512,19 +518,8 @@ class MultiPassController(nn.Module):
                             trig_b = gen_window[i + 3]
                             hits_3[trig_b] = hits_3.get(trig_b, 0) + 1
                     for trig_b, cnt in hits_3.items():
-                        min_cnt = 1 if is_morph else 2
-                        if cnt >= min_cnt and ((32 <= trig_b < 127) or trig_b >= 260):
-                            next_logits[trig_b] -= (7.5 if is_morph else 3.5) * cnt
-                if is_morph and len(gen_window) >= 3:
-                    ctx2 = gen_window[-2:]
-                    hits_2: dict[int, int] = {}
-                    for i in range(len(gen_window) - 2):
-                        if gen_window[i : i + 2] == ctx2:
-                            trig_b = gen_window[i + 2]
-                            hits_2[trig_b] = hits_2.get(trig_b, 0) + 1
-                    for trig_b, cnt in hits_2.items():
-                        if (32 <= trig_b < 127) or trig_b >= 260:
-                            next_logits[trig_b] -= 5.0 * cnt
+                        if cnt >= 2 and ((32 <= trig_b < 127) or trig_b >= 260):
+                            next_logits[trig_b] -= 4.5 * cnt
 
                 # Prevent XML/HTML tag openers ('<') at start of #T$# or #A$#, 3x identical token repeats, or 2x punctuation
                 if step == 0 or (len(tokens) >= len(a_tag_tokens) and tokens[-len(a_tag_tokens) :] == a_tag_tokens):

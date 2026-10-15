@@ -1428,13 +1428,15 @@ class OrnithSelfImprover:
             if loop_hit is not None:
                 trig_local, rej_tok, _ = loop_hit
                 pos_idx = int(valid_pos[min(trig_local, valid_pos.numel() - 1)].item())
-            else:
+            elif vocab_size <= 1024:
                 mismatches = (pred_ids[b_i, valid_pos] != lbl_tensor[b_i, valid_pos]).nonzero(as_tuple=False).squeeze(-1)
                 if mismatches.numel() == 0:
                     continue
                 first_err_local = int(mismatches[0].item())
                 pos_idx = int(valid_pos[first_err_local].item())
                 rej_tok = int(pred_ids[b_i, pos_idx].item())
+            else:
+                continue
             gold_tok = int(lbl_tensor[b_i, pos_idx].item())
             if rej_tok == gold_tok:
                 continue

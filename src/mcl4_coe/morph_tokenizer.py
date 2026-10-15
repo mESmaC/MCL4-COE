@@ -387,7 +387,7 @@ class MorphCodeTokenizer:
         suffix_set = frozenset(MORPHEME_SUFFIXES)
 
         sentence_end_ids: set[int] = {ord("."), ord("!"), ord("?"), 10}
-        clause_end_ids: set[int] = {32, 10, ord("."), ord("!"), ord("?"), ord(","), ord(";"), ord(":")}
+        clause_end_ids: set[int] = {10, ord("."), ord("!"), ord("?"), ord(","), ord(";"), ord(":")}
         newline_ids: set[int] = {10}
         hash_start_ids: set[int] = {ord("#")}
         xml_open_ids: set[int] = {ord("<")}
@@ -400,7 +400,7 @@ class MorphCodeTokenizer:
             if stripped.endswith((".", "!", "?")) or piece.endswith("\n"):
                 sentence_end_ids.add(idx)
                 clause_end_ids.add(idx)
-            elif stripped.endswith((",", ";", ":")) or piece.endswith(" "):
+            elif stripped.endswith((",", ";", ":")):
                 clause_end_ids.add(idx)
             if "\n" in piece:
                 newline_ids.add(idx)

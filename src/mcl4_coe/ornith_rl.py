@@ -1388,10 +1388,12 @@ class OrnithSelfImprover:
         )
         lm_distill_out = coe.forward_inference(inp_tensor, targets=lbl_tensor)
         assert lm_distill_out.loss is not None
-        self_distill_loss = 0.5 * decision_distill_loss + 0.5 * lm_distill_out.loss
+        self_distill_loss = 0.80 * decision_distill_loss + 0.20 * lm_distill_out.loss
 
-        # LiquidAI Antidoom FTPO: locate inner repetition trigger in model greedy predictions
-        # (or the first divergent repeat token) and prefer the gold + top-3 non-repeating ASCII tokens.
+        # LiquidAI Antidoom FTPO + Compiler-in-the-Loop Token Targeting:
+        # Strictly target either (a) an inner repetition trigger (`loop_hit is not None`), or
+        # (b) the exact first token where the model's on-policy prediction diverges from the
+        # verified rollout (`pred != gold`). Never penalize second-best tokens when greedy is 100% verified.
         ftpo_pos_logits: list[Tensor] = []
         ftpo_rej_ids: list[int] = []
         ftpo_cho_ids: list[list[int]] = []
@@ -1407,14 +1409,15 @@ class OrnithSelfImprover:
                 trig_local, rej_tok, _ = loop_hit
                 pos_idx = int(valid_pos[min(trig_local, valid_pos.numel() - 1)].item())
             else:
-                pos_idx = int(valid_pos[valid_pos.numel() // 2].item())
+                mismatches = (pred_ids[b_i, valid_pos] != lbl_tensor[b_i, valid_pos]).nonzero(as_tuple=False).squeeze(-1)
+                if mismatches.numel() == 0:
+                    continue
+                first_err_local = int(mismatches[0].item())
+                pos_idx = int(valid_pos[first_err_local].item())
                 rej_tok = int(pred_ids[b_i, pos_idx].item())
             gold_tok = int(lbl_tensor[b_i, pos_idx].item())
-            if rej_tok == gold_tok and loop_hit is None:
-                # If greedy already matches gold with no loop, use the highest non-gold ASCII repeat candidate
-                row_l = lm_distill_out.logits[b_i, pos_idx, 32:127].detach()
-                top2 = row_l.topk(2).indices + 32
-                rej_tok = int(top2[1].item() if int(top2[0].item()) == gold_tok else top2[0].item())
+            if rej_tok == gold_tok:
+                continue
             row_ascii = lm_distill_out.logits[b_i, pos_idx, 32:127].detach().clone()
             if 32 <= rej_tok < 127:
                 row_ascii[rej_tok - 32] = -torch.inf
@@ -1438,7 +1441,7 @@ class OrnithSelfImprover:
             )
         else:
             antidoom_loss_t = torch.zeros((), device=self.device)
-            antidoom_win = 0.0
+            antidoom_win = 1.0
 
         total_ornith_loss = (
             op_out.total_loss

@@ -1240,14 +1240,18 @@ class MCL4DreamDiscovery:
 # Curated library of diverse, valid 6-line exploration policy candidates that
 # `MCL4PolicyProposer` scores and adapts using `MCL4-COE` operators + replay feedback.
 _CANDIDATE_POLICY_TEMPLATES: tuple[Program, ...] = (
-    Program(width=1, root_every=1, rank=("SCORE", "GAIN", "UTILITY"), stop=0.72, patience=1, rounds=2),
-    Program(width=2, root_every=2, rank=("SCORE", "GAIN", "UTILITY"), stop=1.0, patience=2, rounds=3),
-    Program(width=2, root_every=1, rank=("SCORE", "GAIN", "UTILITY"), stop=1.0, patience=2, rounds=3),
-    Program(width=2, root_every=1, rank=("UTILITY", "SCORE", "GAIN", "CONFIDENCE"), stop=None, patience=3, rounds=3),
-    Program(width=2, root_every=2, rank=("UTILITY", "SCORE", "GAIN"), stop=0.78, patience=2, rounds=3),
-    Program(width=1, root_every=2, rank=("SCORE", "CONFIDENCE", "DEEP"), stop=0.80, patience=2, rounds=3),
-    Program(width=3, root_every=2, rank=("CONFIDENCE", "UTILITY", "SCORE"), stop=0.85, patience=2, rounds=4),
-    Program(width=2, root_every=0, rank=("GAIN", "DEEP", "SCORE"), stop=0.75, patience=1, rounds=2),
+    Program(width=1, root_every=2, rank=("SCORE", "GAIN", "UTILITY"), stop=0.90, patience=3, rounds=4),
+    Program(width=2, root_every=2, rank=("SCORE", "GAIN", "UTILITY"), stop=0.88, patience=3, rounds=4),
+    Program(width=2, root_every=2, rank=("UTILITY", "SCORE", "GAIN"), stop=0.85, patience=2, rounds=3),
+    Program(width=2, root_every=1, rank=("SCORE", "GAIN", "UTILITY"), stop=0.84, patience=2, rounds=3),
+    Program(width=2, root_every=2, rank=("UTILITY", "CONFIDENCE", "SCORE", "GAIN"), stop=0.82, patience=2, rounds=3),
+    Program(width=2, root_every=2, rank=("CONFIDENCE", "UTILITY", "SCORE", "DEEP"), stop=0.80, patience=2, rounds=3),
+    Program(width=2, root_every=2, rank=("GAIN", "UTILITY", "SCORE", "NOVELTY"), stop=0.78, patience=2, rounds=3),
+    Program(width=2, root_every=2, rank=("SCORE", "UTILITY", "CONFIDENCE", "GAIN"), stop=0.76, patience=1, rounds=2),
+    Program(width=2, root_every=0, rank=("SCORE", "DEEP", "UTILITY", "GAIN"), stop=0.75, patience=1, rounds=2),
+    Program(width=2, root_every=2, rank=("UTILITY", "SCORE", "GAIN", "CONFIDENCE"), stop=0.73, patience=1, rounds=2),
+    Program(width=2, root_every=2, rank=("CONFIDENCE", "SCORE", "GAIN", "UTILITY"), stop=0.71, patience=1, rounds=2),
+    Program(width=2, root_every=1, rank=("UTILITY", "SCORE", "GAIN", "CONFIDENCE"), stop=None, patience=2, rounds=3),
 )
 
 
@@ -1278,16 +1282,28 @@ class MCL4PolicyProposer:
 
         # Construct adaptive candidate programs informed by replay diagnostics
         dynamic_candidates: list[Program] = []
-        if incumbent.rounds > 2:
-            # Test compact 2-round depth-refinement policies that hit the world ceiling in fewer calls
+        if incumbent.width < max_w or incumbent.root_every == 1:
+            # Step 1 progression: move from sequential root-only to parallel depth-refinement
             dynamic_candidates.append(
                 Program(
-                    width=min(max_w, incumbent.width),
-                    root_every=max(1, incumbent.root_every),
+                    width=min(max_w, max(1, incumbent.width)),
+                    root_every=2,
                     rank=("SCORE", "GAIN", "UTILITY"),
-                    stop=0.72,
-                    patience=1,
-                    rounds=min(max_r, 2),
+                    stop=0.90,
+                    patience=3,
+                    rounds=min(max_r, incumbent.rounds),
+                )
+            )
+        if incumbent.rounds > 2:
+            # Test compact depth-refinement policies that hit the world ceiling in fewer calls
+            dynamic_candidates.append(
+                Program(
+                    width=min(max_w, max(2, incumbent.width)),
+                    root_every=2,
+                    rank=("SCORE", "GAIN", "UTILITY"),
+                    stop=0.82 if incumbent.stop is None else max(0.70, round(float(incumbent.stop) - 0.03, 2)),
+                    patience=max(1, min(2, incumbent.patience or 2)),
+                    rounds=min(max_r, max(2, incumbent.rounds - 1)),
                 )
             )
         if mean_penalty > 0.35:
@@ -1295,21 +1311,22 @@ class MCL4PolicyProposer:
             dynamic_candidates.append(
                 Program(
                     width=min(max_w, max(2, incumbent.width)),
-                    root_every=max(1, incumbent.root_every),
-                    rank=("UTILITY", "SCORE", "GAIN"),
-                    stop=0.70 if mean_hv < 0.5 else 0.78,
+                    root_every=2,
+                    rank=("UTILITY", "SCORE", "GAIN", "CONFIDENCE"),
+                    stop=0.76 if mean_hv < 0.55 else 0.80,
                     patience=1,
                     rounds=min(max_r, max(2, incumbent.rounds - 1)),
                 )
             )
-        if mean_hv < 0.45:
-            # Low Pareto hypervolume -> stop earlier once a strong branch is found to save calls
+        if mean_hv < 0.65:
+            # Refine stop threshold and operator feature ranking to capture deeper nodes efficiently
+            stop_cand = 0.78 if incumbent.stop is None else max(0.68, round(float(incumbent.stop) - 0.02, 2))
             dynamic_candidates.append(
                 Program(
                     width=min(max_w, 2),
                     root_every=2,
-                    rank=("GAIN", "UTILITY", "CONFIDENCE", "SCORE"),
-                    stop=0.74,
+                    rank=("UTILITY", "CONFIDENCE", "SCORE", "GAIN"),
+                    stop=stop_cand,
                     patience=1,
                     rounds=min(max_r, 2),
                 )
@@ -1493,8 +1510,19 @@ class DreamRSIEngine:
         world_id = f"world_{cycle_idx:04d}_{task.task_id}"
 
         discovery = MCL4DreamDiscovery(coe, task, max_seq_len=max_seq_len)
+        # Ensure online tree expansion uses the active policy's feature ranking while exploring
+        # both root branches and depth-2+ leaf refinements up to `max_calls` so the recorded
+        # `World` supports rich counterfactual replay across stopping and width strategies.
+        online_explorer = Program(
+            width=max(self.workers, self.state.program.width),
+            root_every=2 if (self.state.program.width <= 1 and self.state.program.root_every == 1) else max(2, self.state.program.root_every),
+            rank=self.state.program.rank,
+            stop=None,
+            patience=0,
+            rounds=max(self.max_rounds, self.state.program.rounds),
+        )
         online_res = online_rollout(
-            self.state.program,
+            online_explorer,
             discovery,
             world_id=world_id,
             root_observation={"task_id": task.task_id, "domain": task.domain},

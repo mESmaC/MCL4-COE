@@ -1322,3 +1322,115 @@ def test_antidoom_ftpo_and_housekeeping_fixes() -> None:
         ce6 = float(m6.forward_inference(inp, targets=lbl).ce_loss.item())
     assert abs(ce6 - ce4) < 2e-3
 
+
+def test_morphcode_16k_tokenizer_and_backbone(tmp_path) -> None:
+    """Verify MorphCode-16K (`vocab_size=16384`) lossless round-trip, morpheme splitting, factorized PLE, and shard transcoding."""
+    from mcl4_coe import (
+        MORPHCODE_16K_VOCAB_SIZE,
+        MorphCodeTokenizer,
+        MultiPassController,
+        ShardedTokenBlockDataset,
+        get_tokenizer,
+        transcode_byte_shards_to_morphcode,
+    )
+    from mcl4_coe.pipeline import BlockAlignedShardWriter
+
+    mt = get_tokenizer(MORPHCODE_16K_VOCAB_SIZE)
+    assert isinstance(mt, MorphCodeTokenizer)
+    assert mt.vocab_size == 16384
+    assert (mt.pad_id, mt.bos_id, mt.eos_id, mt.unk_id) == (256, 257, 258, 259)
+
+    # 1. Atomic control markers + morpheme decomposition + lossless round-trip
+    uta_sample = (
+        "#U$# How do plants use capillary action to transport water?\n"
+        "#T$# Plants use adhesion and cohesion in narrow xylem tubes.\n"
+        "#A$# Capillary action pulls water upward against gravity."
+    )
+    ids = mt.encode(uta_sample)
+    assert mt.decode(ids) == uta_sample
+    assert mt.compression_ratio(uta_sample) > 4.0
+    tokens = mt.tokenize_to_strings(uta_sample)
+    assert tokens[0] == "#U$#"
+    assert "\n#T$#" in tokens and "\n#A$#" in tokens
+    # Verify inflectional morpheme splitting (`plant + s`, `adhes + ion`, `cohes + ion`)
+    assert " plant" in tokens and "s" in tokens
+    assert " adhes" in tokens and "ion" in tokens
+
+    # 2. Single-digit splitting for arithmetic and Python code operators
+    math_sample = "Solve 3 * x + 5 = 20 for x == 5 using \\frac{15}{3}."
+    math_ids = mt.encode(math_sample)
+    assert mt.decode(math_ids) == math_sample
+    math_toks = mt.tokenize_to_strings(math_sample)
+    assert "2" in math_toks and "0" in math_toks
+    assert " ==" in math_toks and "\\frac{" in math_toks
+
+    # 3. Arbitrary UTF-8 byte fallback (emoji + accented characters)
+    utf8_sample = "Café Δx ≈ 0.001 🚀"
+    assert mt.decode(mt.encode(utf8_sample)) == utf8_sample
+
+    # 4. Factorized PerLayerEmbedding + tied lm_head on 16,384 vocab
+    cfg16k = MCL4CEDConfig(
+        vocab_size=16384,
+        d_model=64,
+        n_heads=4,
+        n_encoder_layers=1,
+        n_decoder_layers=1,
+        ple_dim=16,
+        expert_hidden_dim=128,
+        num_experts=4,
+        top_k=2,
+        max_seq_len=64,
+    )
+    m16k = CognitiveOperatorEnsemble(MCL4CEDBackbone(cfg16k), COEConfig(projection_dim=16))
+    assert m16k.backbone.lm_head.weight is m16k.backbone.token_embedding.weight
+    assert m16k.backbone.encoder_layers[0].ple.factorized_vocab
+
+    inp16k = torch.tensor([ids[:32]], dtype=torch.long)
+    lbl16k = torch.tensor([ids[1:33]], dtype=torch.long)
+    out16k = m16k.forward_inference(inp16k, targets=lbl16k)
+    assert out16k.logits.shape == (1, 32, 16384)
+    assert out16k.ce_loss is not None and float(out16k.ce_loss.item()) > 0.0
+    assert mt.count_utf8_bytes(lbl16k) == len(mt.decode(ids[1:33]).encode("utf-8"))
+
+    ctrl16k = MultiPassController(m16k)
+    coe_gen = ctrl16k.generate_uta_with_coe(
+        "What is 2 + 2?",
+        max_new_tokens=16,
+        candidate_specs=((1, 0.0), (2, 0.35)),
+    )
+    assert (
+        "#U$#" in coe_gen.text
+        and "#T$#" in coe_gen.text
+        and "#A$#" in coe_gen.text
+    )
+
+    # 5. Transcode uint16 byte shards with 0x8000 prompt masking to MorphCode-16K shards
+    src_shards = tmp_path / "byte_shards"
+    dst_shards = tmp_path / "morph16k_shards"
+    writer = BlockAlignedShardWriter(
+        src_shards / "uta_trace",
+        track="uta_trace",
+        seq_len=192,
+        max_blocks_per_shard=64,
+        vocab_size=260,
+    )
+    for i in range(6):
+        assert writer.add_uta_episode(
+            f"Question {i}: Why do objects fall?",
+            "Gravity accelerates masses toward each other.",
+            "Gravitational attraction pulls objects downward.",
+        )
+    writer.flush_shard()
+    receipts_16k = transcode_byte_shards_to_morphcode(src_shards, dst_shards, seq_len=64)
+    assert "uta_trace" in receipts_16k
+    ds16k = ShardedTokenBlockDataset(
+        dst_shards / "uta_trace" / "index_receipt.json",
+        track="uta_trace",
+        split="train",
+    )
+    assert len(ds16k) > 0
+    item0 = ds16k[0]
+    assert int(item0["input_ids"].max().item()) < 16384
+    assert int((item0["labels"] == -100).sum().item()) > 0
+
+

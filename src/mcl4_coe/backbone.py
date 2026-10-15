@@ -591,8 +591,11 @@ class MCL4CEDBackbone(nn.Module):
         if 0 <= config.pad_id < config.vocab_size:
             with torch.no_grad():
                 self.token_embedding.weight[config.pad_id].zero_()
-        with torch.no_grad():
-            self.lm_head.weight.copy_(self.token_embedding.weight)
+        if config.vocab_size > 1024:
+            self.lm_head.weight = self.token_embedding.weight
+        else:
+            with torch.no_grad():
+                self.lm_head.weight.copy_(self.token_embedding.weight)
 
     @staticmethod
     def _initialize(module: nn.Module) -> None:

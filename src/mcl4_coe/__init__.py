@@ -57,6 +57,7 @@ from .data import (
     TokenBlockDataset,
     collate_decisions,
     format_answers,
+    get_tokenizer,
     parse_request,
 )
 from .dream_rsi import (
@@ -90,6 +91,7 @@ from .ensemble import (
     compute_joint_coe_loss,
 )
 from .markov_local4 import MarkovLocal4Router, coalesce_candidates
+from .morph_tokenizer import MORPHCODE_16K_VOCAB_SIZE, MorphCodeTokenizer
 from .nvfp4 import (
     NVFP4Conv2d,
     NVFP4Linear,
@@ -157,6 +159,7 @@ from .pipeline import (
     extract_uta_episodes,
     iter_source_records,
     parse_mcqa_decision_fields,
+    transcode_byte_shards_to_morphcode,
 )
 from .ple import PerLayerEmbedding, RMSNorm
 from .trainer import (
@@ -226,8 +229,10 @@ __all__ = [
     "MCL4CEDBackbone",
     "MCL4CEDConfig",
     "MCL4COETrainer",
+    "MORPHCODE_16K_VOCAB_SIZE",
     "MarkovLocal4Router",
     "MetacognitionOutput",
+    "MorphCodeTokenizer",
     "MultiPassController",
     "MultiPassOutput",
     "MultiTrackMixtureDataset",
@@ -275,6 +280,7 @@ __all__ = [
     "format_answers",
     "frontier_difficulty",
     "get_gemm_counts",
+    "get_tokenizer",
     "group_normalized_advantages",
     "grpo_clipped_loss",
     "grow_experts",
@@ -304,6 +310,7 @@ __all__ = [
     "sanitize_trace_markers",
     "staleness_weight",
     "start_web_ui_server",
+    "transcode_byte_shards_to_morphcode",
     "turboquant_compress",
     "turboquant_decompress",
     "turboquant_inner_product",

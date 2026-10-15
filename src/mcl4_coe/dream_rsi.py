@@ -1182,7 +1182,12 @@ class MCL4DreamDiscovery:
             values=("opt_0", "opt_1", "opt_2", "opt_3"),
             target=self.task.gold_index,
         )
-        batch = collate_decisions([ex], max_tok_len, device=self.device)
+        batch = collate_decisions(
+            [ex],
+            max_tok_len,
+            device=self.device,
+            vocab_size=int(getattr(self.coe.backbone.config, "vocab_size", 260)),
+        )
         ctx_ids = batch["context_ids"]
         ctx_lens = batch["context_lengths"]
         opt_ids = batch["option_ids"]
@@ -1376,7 +1381,12 @@ class MCL4PolicyProposer:
                 values=("p0", "p1", "p2", "p3"),
                 target=0,
             )
-            batch = collate_decisions([ex], 512, device=dev)
+            batch = collate_decisions(
+                [ex],
+                512,
+                device=dev,
+                vocab_size=int(getattr(self.coe.backbone.config, "vocab_size", 260)),
+            )
             use_amp = dev.type == "cuda"
             with torch.autocast(
                 device_type=dev.type, dtype=torch.bfloat16, enabled=use_amp

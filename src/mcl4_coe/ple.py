@@ -62,7 +62,24 @@ class PerLayerEmbedding(nn.Module):
 
         self.input_projection = nn.Linear(d_model, ple_dim, bias=False)
         self.projection_norm = RMSNorm(ple_dim, eps=rms_norm_eps)
-        self.token_embedding = nn.Embedding(vocab_size, ple_dim, padding_idx=pad_id)
+        self.factorized_vocab = vocab_size > 1024
+        if self.factorized_vocab:
+            self.token_embedding = nn.Embedding(512, ple_dim)
+            self.bucket_embedding: nn.Embedding | None = nn.Embedding(256, ple_dim)
+            nn.init.normal_(self.token_embedding.weight, mean=0.0, std=0.02)
+            nn.init.normal_(self.bucket_embedding.weight, mean=0.0, std=0.02)
+        else:
+            self.token_embedding = nn.Embedding(
+                vocab_size,
+                ple_dim,
+                padding_idx=pad_id if 0 <= pad_id < vocab_size else None,
+            )
+            self.bucket_embedding = None
+            nn.init.normal_(self.token_embedding.weight, mean=0.0, std=0.02)
+            if 0 <= pad_id < vocab_size:
+                with torch.no_grad():
+                    self.token_embedding.weight[pad_id].zero_()
+
         self.ngram_conv = nn.Conv1d(ple_dim, ple_dim, kernel_size=4, groups=ple_dim, bias=False)
         self.ngram_scale = nn.Parameter(torch.full((ple_dim,), 0.15))
         self.state_gate = nn.Linear(d_model, ple_dim, bias=False)
@@ -70,11 +87,7 @@ class PerLayerEmbedding(nn.Module):
         self.output_norm = RMSNorm(d_model, eps=rms_norm_eps)
         self.gate_scale = nn.Parameter(torch.full((d_model,), 0.1))
 
-        nn.init.normal_(self.token_embedding.weight, mean=0.0, std=0.02)
         nn.init.constant_(self.ngram_conv.weight, 0.25)
-        if 0 <= pad_id < vocab_size:
-            with torch.no_grad():
-                self.token_embedding.weight[pad_id].zero_()
 
     def embed(
         self,
@@ -96,7 +109,14 @@ class PerLayerEmbedding(nn.Module):
         )
         if token_ids is not None:
             safe_ids = token_ids.clamp(0, self.vocab_size - 1)
-            lookup = self.token_embedding(safe_ids) * math.sqrt(self.ple_dim)
+            if self.factorized_vocab and self.bucket_embedding is not None:
+                fine = self.token_embedding(safe_ids.remainder(512))
+                coarse = self.bucket_embedding(
+                    torch.div(safe_ids, 64, rounding_mode="floor").remainder(256)
+                )
+                lookup = (fine + coarse) * math.sqrt(0.5 * self.ple_dim)
+            else:
+                lookup = self.token_embedding(safe_ids) * math.sqrt(self.ple_dim)
             lookup = lookup.masked_fill(~active.unsqueeze(-1), 0)
             if lookup.shape[1] >= 1:
                 padded = F.pad(lookup.transpose(1, 2), (3, 0))

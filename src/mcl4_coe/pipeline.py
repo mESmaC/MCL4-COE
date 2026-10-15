@@ -35,7 +35,7 @@ from .curation import (
     normalize_prose_unwrapping,
     sanitize_trace_markers,
 )
-from .data import TRACE_MARKERS, ByteTokenizer
+from .data import TRACE_MARKERS, ByteTokenizer, get_tokenizer
 
 EXCLUDED_CORPORA: frozenset[str] = frozenset({"tinystories"})
 
@@ -993,6 +993,7 @@ class BlockAlignedShardWriter:
         split: str = "train",
         seq_len: int = 2048,
         max_blocks_per_shard: int = 32_768,
+        vocab_size: int = 260,
     ) -> None:
         if seq_len < 16:
             raise ValueError("seq_len must be >= 16")
@@ -1004,7 +1005,8 @@ class BlockAlignedShardWriter:
         self.split = split
         self.seq_len = seq_len
         self.max_blocks_per_shard = max_blocks_per_shard
-        self.tokenizer = ByteTokenizer()
+        self.vocab_size = vocab_size
+        self.tokenizer = get_tokenizer(vocab_size)
 
         self.index_path = self.output_dir / "index_receipt.json"
         if self.index_path.exists():
@@ -1284,6 +1286,7 @@ def build_corpus_shards(
     max_files_per_corpus: int | None = None,
     max_records_per_file: int | None = None,
     sieve_config: ByteSieveConfig = ByteSieveConfig(),
+    vocab_size: int = 260,
 ) -> dict[str, IndexReceipt]:
     """Stream corpora from `corpora_root` into per-track `.bin` shards and `index_receipt.json` files."""
     specs = discover_corpora(corpora_root)
@@ -1319,6 +1322,7 @@ def build_corpus_shards(
                 split="train",
                 seq_len=seq_len,
                 max_blocks_per_shard=max_blocks_per_shard,
+                vocab_size=vocab_size,
             )
             writers[spec.track] = writer
 
@@ -1623,12 +1627,14 @@ class TypedDecisionShardStreamer:
         max_options: int = 8,
         cache_path: str | Path | None = None,
         max_cached_examples: int = 512,
+        vocab_size: int = 260,
     ) -> None:
         self.corpora_root = Path(corpora_root).expanduser().resolve()
         self.max_seq_len = max_seq_len
         self.max_options = max_options
         self.max_cached_examples = max_cached_examples
-        self.tokenizer = ByteTokenizer()
+        self.vocab_size = vocab_size
+        self.tokenizer = get_tokenizer(vocab_size)
 
         ts_dir = self.corpora_root / "text" / "tasksource-jev-typed-decisions"
         self.files = (
@@ -1714,7 +1720,7 @@ class TypedDecisionShardStreamer:
             except Exception:
                 pass
         pool = []
-        if self.corpus_dir.is_dir():
+        if self.files:
             for ex in self._scan_raw_examples():
                 pool.append(ex)
                 if len(pool) >= self.max_cached_examples:
@@ -1751,7 +1757,7 @@ class TypedDecisionShardStreamer:
         n = len(pool)
         examples = [pool[(self._cursor + i) % n] for i in range(batch_size)]
         self._cursor = (self._cursor + batch_size) % n
-        return collate_decisions(examples, self.max_seq_len, device=device)
+        return collate_decisions(examples, self.max_seq_len, device=device, tokenizer=self.tokenizer)
 
 
 def _build_portable_decision_examples(max_seq_len: int = 512) -> list[Any]:
@@ -1826,13 +1832,9 @@ def ensure_sharded_tracks_ready(
     *,
     corpora_root: str | Path | None = None,
     seq_len: int = 512,
+    vocab_size: int = 260,
 ) -> dict[str, Path]:
-    """Ensure `pretrain_lm`, `uta_trace`, and `typed_decision` have valid `.bin` shards + `index_receipt.json`.
-
-    Because `*.bin` files are git-ignored, a fresh `git clone` on a laptop or Google Colab
-    contains `index_receipt.json` metadata without the `.bin` binaries. This helper verifies
-    that every referenced `.bin` exists and automatically builds portable `.bin` shards when missing.
-    """
+    """Ensure `pretrain_lm`, `uta_trace`, and `typed_decision` have valid `.bin` shards + `index_receipt.json`."""
     root = Path(shards_root).expanduser().resolve()
     track_names = ("pretrain_lm", "uta_trace", "typed_decision")
     existing: dict[str, Path] = {}
@@ -1856,6 +1858,7 @@ def ensure_sharded_tracks_ready(
                 max_blocks_per_shard=64,
                 max_files_per_corpus=1,
                 max_records_per_file=200,
+                vocab_size=vocab_size,
             )
             for t_name in track_names:
                 idx = root / t_name / "index_receipt.json"
@@ -1866,7 +1869,10 @@ def ensure_sharded_tracks_ready(
 
     # Portable bootstrap for Laptop / Google Colab when X:\corpora is not mounted
     repo_root = Path(__file__).resolve().parents[2]
-    target_root = (root / "_portable") if root == (repo_root / "data_shards").resolve() else root
+    if root == (repo_root / "data_shards").resolve():
+        target_root = (root / "_portable_morph16k") if vocab_size > 1024 else (root / "_portable")
+    else:
+        target_root = root
     dec_examples = _build_portable_decision_examples(max_seq_len=max(256, seq_len))
     main_dec_cache = root / "typed_decision" / "decision_examples_cache.pt"
     if not main_dec_cache.is_file():
@@ -1890,6 +1896,7 @@ def ensure_sharded_tracks_ready(
             split="train",
             seq_len=seq_len,
             max_blocks_per_shard=16,
+            vocab_size=vocab_size,
         )
         if t_name == "pretrain_lm":
             docs: list[str] = []
@@ -1979,6 +1986,120 @@ def ensure_sharded_tracks_ready(
         existing[t_name] = idx
 
     return existing
+
+
+def transcode_byte_shards_to_morphcode(
+    src_shards_root: str | Path,
+    dst_shards_root: str | Path,
+    *,
+    seq_len: int | None = None,
+    max_shards_per_track: int | None = None,
+) -> dict[str, IndexReceipt]:
+    """Losslessly transcode Stage-0 curated `ByteTokenizer` (`vocab_size=260`) shards into `MorphCode-16K` (`vocab_size=16,384`) shards.
+
+    Reconstructs every `<bos> ... <eos>` pretrain document and every `0x8000`-masked `#U$# -> #T$# -> #A$#`
+    episode from the existing `.bin` shards (`train` and `val` splits) and packs them into `MorphCode-16K`
+    block-aligned shards without requiring `X:\\corpora` to be mounted.
+    """
+    import shutil
+
+    src_root = Path(src_shards_root).expanduser().resolve(strict=True)
+    dst_root = Path(dst_shards_root).expanduser().resolve()
+    dst_root.mkdir(parents=True, exist_ok=True)
+    byte_tok = ByteTokenizer()
+
+    inv_file = src_root / "corpus_inventory_receipt.json"
+    if inv_file.is_file():
+        shutil.copy2(inv_file, dst_root / "corpus_inventory_receipt.json")
+
+    receipts: dict[str, IndexReceipt] = {}
+    for track_name in ("pretrain_lm", "uta_trace", "typed_decision"):
+        src_track_dir = src_root / track_name
+        src_idx_path = src_track_dir / "index_receipt.json"
+        if not src_idx_path.is_file():
+            continue
+
+        src_receipt = IndexReceipt.from_file(src_idx_path)
+        target_seq_len = seq_len or src_receipt.seq_len
+        dst_track_dir = dst_root / track_name
+        dst_track_dir.mkdir(parents=True, exist_ok=True)
+
+        # Copy decision example caches (`decision_examples_cache.pt`, `decision_examples_val_cache.pt`)
+        for pt_file in src_track_dir.glob("*.pt"):
+            shutil.copy2(pt_file, dst_track_dir / pt_file.name)
+
+        # Group shards by split ("train", "val")
+        splits: dict[str, list[dict[str, Any]]] = {}
+        for s in src_receipt.shards:
+            bin_p = src_track_dir / s["bin_file"]
+            if bin_p.is_file():
+                sp = str(s.get("split", "train"))
+                splits.setdefault(sp, []).append(s)
+
+        for sp, shard_list in splits.items():
+            if max_shards_per_track is not None and sp == "train":
+                shard_list = shard_list[:max_shards_per_track]
+            writer = BlockAlignedShardWriter(
+                dst_track_dir,
+                track=track_name,
+                split=sp,
+                seq_len=target_seq_len,
+                max_blocks_per_shard=16_384,
+                vocab_size=16_384,
+            )
+            for s_meta in shard_list:
+                bin_p = src_track_dir / s_meta["bin_file"]
+                raw_u16 = np.fromfile(bin_p, dtype="<u2")
+                clean_ids = raw_u16 & 0x7FFF
+                # Locate episode boundaries: bos_id (257) to eos_id (258)
+                bos_positions = np.nonzero(clean_ids == byte_tok.bos_id)[0]
+                eos_positions = np.nonzero(clean_ids == byte_tok.eos_id)[0]
+                if bos_positions.size == 0 or eos_positions.size == 0:
+                    continue
+
+                eos_cursor = 0
+                n_eos = eos_positions.size
+                accepted = 0
+                for b_pos in bos_positions:
+                    while eos_cursor < n_eos and eos_positions[eos_cursor] <= b_pos:
+                        eos_cursor += 1
+                    if eos_cursor >= n_eos:
+                        break
+                    e_pos = eos_positions[eos_cursor]
+                    span_u16 = raw_u16[b_pos + 1 : e_pos]
+                    span_clean = span_u16 & 0x7FFF
+                    valid_bytes = span_clean[span_clean < 256].astype(np.uint8).tobytes()
+                    if not valid_bytes:
+                        continue
+                    text = valid_bytes.decode("utf-8", errors="replace")
+                    if track_name == "pretrain_lm":
+                        writer.add_pretrain_document(text)
+                        accepted += 1
+                    else:
+                        # Reconstruct (prompt, thought, answer) from `#U$# ... \n#T$# ... \n#A$# ...`
+                        if "#T$#" in text and "#A$#" in text:
+                            u_part, rest = text.split("#T$#", 1)
+                            t_part, a_part = rest.split("#A$#", 1)
+                            u_clean = u_part.replace("#U$#", "", 1).strip()
+                            t_clean = t_part.strip()
+                            a_clean = a_part.strip()
+                            if u_clean and t_clean and a_clean:
+                                if writer.add_uta_episode(u_clean, t_clean, a_clean):
+                                    accepted += 1
+
+                writer.record_provenance(
+                    corpus=f"transcoded_morph16k:{track_name}:{sp}",
+                    source_file=s_meta["bin_file"],
+                    row_start=1,
+                    row_end=accepted,
+                    episodes_accepted=accepted,
+                    episodes_rejected_stage0=0,
+                )
+            writer.flush_shard()
+            receipts[track_name] = writer.index_receipt
+
+    return receipts
+
 
 
 

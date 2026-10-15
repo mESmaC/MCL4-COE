@@ -28,7 +28,7 @@ import torch
 import torch.nn.functional as F
 
 from .backbone import MCL4CEDBackbone, MCL4CEDConfig
-from .data import ByteTokenizer
+from .data import ByteTokenizer, get_tokenizer
 from .ensemble import CognitiveSchedule, MultiPassController, compute_joint_coe_loss
 from .nvfp4 import convert_linear_to_nvfp4, get_gemm_counts, reset_gemm_counts
 from .operators import COEConfig, CognitiveOperatorEnsemble
@@ -114,6 +114,7 @@ class TrainingRunConfig:
         self.corpora_root = str(resolve_corpora_root(self.corpora_root))
 
     # Model architecture
+    vocab_size: int = 260
     d_model: int = 128
     n_heads: int = 4
     n_encoder_layers: int = 2
@@ -318,7 +319,6 @@ class MCL4COETrainer:
         self.stop_event = stop_event or threading.Event()
         self.on_step_callback = on_step_callback
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.tokenizer = ByteTokenizer()
 
         self.run_dir = Path(config.runs_root).expanduser().resolve() / config.run_id
         self.ckpt_dir = self.run_dir / "checkpoints"
@@ -332,6 +332,8 @@ class MCL4COETrainer:
         self._resume_payload: dict[str, Any] | None = None
         if config.resume_checkpoint:
             self._prepare_resume_geometry(config.resume_checkpoint)
+
+        self.tokenizer = get_tokenizer(self.config.vocab_size)
 
         torch.manual_seed(config.seed)
         self._build_dataset_and_samplers()
@@ -360,6 +362,7 @@ class MCL4COETrainer:
         self._resume_payload = payload
         b_cfg = payload.get("backbone_config", {})
         for key in (
+            "vocab_size",
             "d_model",
             "n_heads",
             "n_encoder_layers",
@@ -387,6 +390,7 @@ class MCL4COETrainer:
             shards_root,
             corpora_root=self.config.corpora_root,
             seq_len=min(2048, self.config.max_seq_len),
+            vocab_size=self.config.vocab_size,
         )
         if not track_receipts:
             raise FileNotFoundError(
@@ -432,6 +436,7 @@ class MCL4COETrainer:
                 max_options=8,
                 cache_path=dec_cache,
                 max_cached_examples=8192,
+                vocab_size=self.config.vocab_size,
             )
             self._decision_pool = list(self.decision_streamer.iter_decision_examples())
             self._rebuild_decision_batches()
@@ -458,15 +463,20 @@ class MCL4COETrainer:
                     ex
                     for ex in val_raw
                     if len(ex.descriptions) == 4
-                    and len(ex.context.encode("utf-8")) + 2 <= dec_seq_len
-                    and all(len(d.encode("utf-8")) + 2 <= dec_seq_len for d in ex.descriptions)
+                    and len(self.tokenizer.encode(ex.context)) <= dec_seq_len
+                    and all(len(self.tokenizer.encode(d)) <= dec_seq_len for d in ex.descriptions)
                 ][:512]
                 bsz_val = max(4, self.config.decision_batch_size * 2)
                 for i in range(0, len(val_filtered), bsz_val):
                     chunk = val_filtered[i : i + bsz_val]
                     if chunk:
                         self.val_decision_batches.append(
-                            collate_decisions(chunk, dec_seq_len, device="cpu")
+                            collate_decisions(
+                                chunk,
+                                dec_seq_len,
+                                device="cpu",
+                                vocab_size=self.config.vocab_size,
+                            )
                         )
                         self.val_decision_count += len(chunk)
             except Exception:
@@ -485,7 +495,12 @@ class MCL4COETrainer:
             rng.shuffle(pool)
         bsz = max(1, self.config.decision_batch_size)
         for i in range(0, len(pool) - bsz + 1, bsz):
-            collated = collate_decisions(pool[i : i + bsz], self._decision_seq_len, device="cpu")
+            collated = collate_decisions(
+                pool[i : i + bsz],
+                self._decision_seq_len,
+                device="cpu",
+                vocab_size=self.config.vocab_size,
+            )
             if self.device.type == "cuda":
                 collated = {k: v.pin_memory() for k, v in collated.items()}
             self.decision_batches.append(collated)
@@ -516,6 +531,7 @@ class MCL4COETrainer:
         try:
             total_val_nll = 0.0
             total_val_toks = 0
+            total_val_bytes = 0
             mb_sz = max(1, min(self.config.micro_batch_size, self.config.batch_size))
             max_batches = max(1, self.config.val_max_batches_per_track)
 
@@ -523,14 +539,17 @@ class MCL4COETrainer:
                 n_blocks = min(len(v_ds), mb_sz * max_batches)
                 t_nll = 0.0
                 t_toks = 0
+                t_bytes = 0
                 for start_i in range(0, n_blocks, mb_sz):
                     idxs = list(range(start_i, min(n_blocks, start_i + mb_sz)))
                     sub = v_ds.batch(idxs, pin_memory=False)
                     inp = sub["input_ids"].to(self.device, non_blocking=True)
-                    lbl = sub["labels"].to(self.device, non_blocking=True)
-                    tok_cnt = int((lbl != -100).sum().item())
+                    lbl_cpu = sub["labels"]
+                    lbl = lbl_cpu.to(self.device, non_blocking=True)
+                    tok_cnt = int((lbl_cpu != -100).sum().item())
                     if tok_cnt <= 0:
                         continue
+                    byte_cnt = self.tokenizer.count_utf8_bytes(lbl_cpu)
                     with torch.autocast(
                         device_type=self.device.type,
                         dtype=torch.bfloat16,
@@ -541,19 +560,24 @@ class MCL4COETrainer:
                         ce_val = float(lm_out.ce_loss.detach().float().item())
                     t_nll += ce_val * tok_cnt
                     t_toks += tok_cnt
+                    t_bytes += max(tok_cnt, byte_cnt)
 
                 if t_toks > 0:
                     mean_ce = t_nll / t_toks
                     val_metrics[f"val_loss_{t_name}"] = round(mean_ce, 5)
-                    val_metrics[f"val_bpb_{t_name}"] = round(mean_ce / ln2, 5)
+                    val_metrics[f"val_bpt_{t_name}"] = round(mean_ce / ln2, 5)
+                    val_metrics[f"val_bpb_{t_name}"] = round((t_nll / ln2) / max(1, t_bytes), 5)
                     total_val_nll += t_nll
                     total_val_toks += t_toks
+                    total_val_bytes += t_bytes
 
             if total_val_toks > 0:
                 overall_val_ce = total_val_nll / total_val_toks
                 val_metrics["val_lm_loss"] = round(overall_val_ce, 5)
-                val_metrics["val_bpb"] = round(overall_val_ce / ln2, 5)
+                val_metrics["val_bpt"] = round(overall_val_ce / ln2, 5)
+                val_metrics["val_bpb"] = round((total_val_nll / ln2) / max(1, total_val_bytes), 5)
                 val_metrics["val_tokens_evaluated"] = total_val_toks
+                val_metrics["val_bytes_evaluated"] = total_val_bytes
 
             if self.val_decision_batches:
                 correct = 0
@@ -585,6 +609,7 @@ class MCL4COETrainer:
 
     def _build_model_and_optimizer(self) -> None:
         self.backbone_cfg = MCL4CEDConfig(
+            vocab_size=self.config.vocab_size,
             d_model=self.config.d_model,
             n_heads=self.config.n_heads,
             n_encoder_layers=self.config.n_encoder_layers,

@@ -1208,7 +1208,11 @@ class OrnithSelfImprover:
         max_seq_len: int | None = None,
     ) -> OrnithStepOutput:
         """Run one end-to-end Ornith-1.0 / 1.5 self-improvement step on `coe`."""
-        from .data import DecisionExample, collate_decisions
+        from .data import DecisionExample, collate_decisions, get_tokenizer
+
+        vocab_size = int(getattr(coe.backbone.config, "vocab_size", 260))
+        if getattr(self.tokenizer, "vocab_size", 260) != vocab_size:
+            self.tokenizer = get_tokenizer(vocab_size)
 
         eff_seq_len = max_seq_len or self.max_seq_len
         model_dev = next(coe.parameters()).device
@@ -1261,7 +1265,12 @@ class OrnithSelfImprover:
             )
             for t in tasks
         ]
-        batch = collate_decisions(examples, max_dec_len, device=self.device)
+        batch = collate_decisions(
+            examples,
+            max_dec_len,
+            device=self.device,
+            tokenizer=self.tokenizer,
+        )
         ctx_ids = batch["context_ids"]
         ctx_lens = batch["context_lengths"]
         opt_ids = batch["option_ids"]
@@ -1402,13 +1411,20 @@ class OrnithSelfImprover:
         ftpo_rej_ids: list[int] = []
         ftpo_cho_ids: list[list[int]] = []
         with torch.no_grad():
-            pred_ids = lm_distill_out.logits[:, :, :256].argmax(dim=-1)
+            if vocab_size > 1024:
+                masked_l = lm_distill_out.logits.detach().clone()
+                masked_l[:, :, :10] = -torch.inf
+                masked_l[:, :, 11:32] = -torch.inf
+                masked_l[:, :, 127:260] = -torch.inf
+                pred_ids = masked_l.argmax(dim=-1)
+            else:
+                pred_ids = lm_distill_out.logits[:, :, :256].argmax(dim=-1)
         for b_i in range(inp_tensor.size(0)):
             valid_pos = (lbl_tensor[b_i] != -100).nonzero(as_tuple=False).squeeze(-1)
-            if valid_pos.numel() < 8:
+            if valid_pos.numel() < 4:
                 continue
             seq_preds = pred_ids[b_i, valid_pos].tolist()
-            loop_hit = detect_doom_loop(seq_preds, min_period=4, max_period=48, min_repeats=2, min_total_repeated=8)
+            loop_hit = detect_doom_loop(seq_preds, min_period=3, max_period=48, min_repeats=2, min_total_repeated=6)
             if loop_hit is not None:
                 trig_local, rej_tok, _ = loop_hit
                 pos_idx = int(valid_pos[min(trig_local, valid_pos.numel() - 1)].item())
@@ -1422,10 +1438,17 @@ class OrnithSelfImprover:
             gold_tok = int(lbl_tensor[b_i, pos_idx].item())
             if rej_tok == gold_tok:
                 continue
-            row_ascii = lm_distill_out.logits[b_i, pos_idx, 32:127].detach().clone()
-            if 32 <= rej_tok < 127:
-                row_ascii[rej_tok - 32] = -torch.inf
-            top_alts = (row_ascii.topk(4).indices + 32).tolist()
+            if vocab_size > 1024:
+                row_cand = lm_distill_out.logits[b_i, pos_idx].detach().clone()
+                row_cand[:32] = -torch.inf
+                row_cand[127:260] = -torch.inf
+                row_cand[rej_tok] = -torch.inf
+                top_alts = row_cand.topk(4).indices.tolist()
+            else:
+                row_ascii = lm_distill_out.logits[b_i, pos_idx, 32:127].detach().clone()
+                if 32 <= rej_tok < 127:
+                    row_ascii[rej_tok - 32] = -torch.inf
+                top_alts = (row_ascii.topk(4).indices + 32).tolist()
             chosen_row = [gold_tok] + [t_id for t_id in top_alts if t_id != gold_tok][:3]
             while len(chosen_row) < 4:
                 chosen_row.append(gold_tok)

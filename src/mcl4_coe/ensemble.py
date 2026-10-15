@@ -223,10 +223,12 @@ class MultiPassController(nn.Module):
         coe: CognitiveOperatorEnsemble,
         schedule: CognitiveSchedule | None = None,
     ) -> None:
+        from .data import get_tokenizer
+
         super().__init__()
         self.coe = coe
         self.schedule = CognitiveSchedule() if schedule is None else schedule
-        self.tokenizer = ByteTokenizer()
+        self.tokenizer = get_tokenizer(int(getattr(coe.backbone.config, "vocab_size", 260)))
 
     def forward(
         self,
@@ -347,28 +349,68 @@ class MultiPassController(nn.Module):
             hard_max_steps = max_new_tokens + grace_tokens
             use_amp = device.type == "cuda"
 
+            vocab_size = int(getattr(self.coe.backbone.config, "vocab_size", 260))
+            is_morph = vocab_size > 1024
+            sent_end_ids = getattr(
+                self.tokenizer,
+                "_sentence_end_ids",
+                frozenset({ord("."), ord("!"), ord("?"), 10}),
+            )
+            clause_end_ids = getattr(
+                self.tokenizer,
+                "_clause_end_ids",
+                frozenset({32, 10, ord("."), ord("!"), ord("?"), ord(","), ord(";"), ord(":")}),
+            )
+            newline_ids = getattr(self.tokenizer, "_newline_ids", frozenset({10}))
+            hash_start_ids = getattr(self.tokenizer, "_hash_start_ids", frozenset({ord("#")}))
+            xml_open_ids = getattr(self.tokenizer, "_xml_open_ids", frozenset({ord("<")}))
+            str_to_id = getattr(self.tokenizer, "_str_to_id", {})
+            forbidden_marker_ids = [
+                str_to_id[m]
+                for m in (
+                    "#U$#",
+                    "#Q$#",
+                    "#S$#",
+                    "#H$#",
+                    "\n#U$#",
+                    "\n#Q$#",
+                    "\n#S$#",
+                    "\n#H$#",
+                    "#U$# ",
+                    "#Q$# ",
+                    "#T$#",
+                    "\n#T$#",
+                    "#T$# ",
+                )
+                if m in str_to_id
+            ]
+            a_marker_ids = [
+                str_to_id[m] for m in ("#A$#", "\n#A$#", "#A$# ") if m in str_to_id
+            ]
+
             step = 0
             while step < hard_max_steps and len(tokens) < max_seq:
                 if not has_emitted_a and step >= thought_budget:
                     if max_new_tokens >= 128:
                         at_sentence = (
-                            tokens[-1] in (ord("."), ord("!"), ord("?"), 10)
+                            tokens[-1] in sent_end_ids
                             or (
                                 len(tokens) >= 2
-                                and tokens[-2] in (ord("."), ord("!"), ord("?"))
+                                and tokens[-2] in sent_end_ids
                                 and tokens[-1] in (32, 10)
                             )
                         )
                         at_clause_word = (
-                            step >= thought_budget + 28
-                            and tokens[-1] in (32, ord(","), ord(";"), ord(":"))
+                            step >= thought_budget + (10 if is_morph else 28)
+                            and tokens[-1] in clause_end_ids
                         )
                         force_transition = step >= min(
-                            thought_budget + 44, max_new_tokens - 64
+                            thought_budget + (18 if is_morph else 44),
+                            max_new_tokens - (24 if is_morph else 64),
                         )
                         at_boundary = at_sentence or at_clause_word
                     else:
-                        at_boundary = tokens[-1] in (32, 10, ord("."), ord(","), ord(";"), ord(":"))
+                        at_boundary = tokens[-1] in clause_end_ids
                         force_transition = step >= min(
                             max(thought_budget, max_new_tokens - 12), thought_budget + 12
                         )
@@ -376,8 +418,10 @@ class MultiPassController(nn.Module):
                         if len(tokens) + len(a_tag_tokens) + 1 < max_seq:
                             if tokens[-1] in (32, ord(","), ord(";")) and max_new_tokens >= 128:
                                 tokens.pop()
-                                if tokens[-1] not in (ord("."), ord("!"), ord("?"), 10):
+                                if tokens[-1] not in sent_end_ids:
                                     tokens.append(ord("."))
+                            elif is_morph and tokens[-1] not in sent_end_ids and max_new_tokens >= 128:
+                                tokens.append(ord("."))
                             tokens.extend(a_tag_tokens)
                             has_emitted_a = True
                             a_start_token_idx = len(tokens)
@@ -386,20 +430,29 @@ class MultiPassController(nn.Module):
 
                 # Once past max_new_tokens (in grace window), stop cleanly as soon as #A$# hits a sentence boundary
                 if has_emitted_a and step >= max_new_tokens:
-                    if tokens[-1] in (ord("."), ord("!"), ord("?"), 10):
+                    if tokens[-1] in sent_end_ids:
                         break
 
                 inp = torch.tensor([tokens], dtype=torch.long, device=device)
                 with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
                     out = self.coe.forward_inference(inp, recurrence_steps=recurrence_steps)
-                next_logits = out.logits[0, -1, :259].float()
+                logit_bound = vocab_size if is_morph else 259
+                next_logits = out.logits[0, -1, :logit_bound].float()
 
-                # Mask control bytes (<32 except newline=10), DEL..0xFF (127..255), pad_id (256), bos_id (257)
+                # Mask control bytes (<32 except newline=10), DEL..0xFF (127..255), pad_id (256), bos_id (257), unk_id (259)
                 next_logits[:10] = -torch.inf
                 next_logits[11:32] = -torch.inf
                 next_logits[127:256] = -torch.inf
                 next_logits[self.tokenizer.pad_id] = -torch.inf
                 next_logits[self.tokenizer.bos_id] = -torch.inf
+                if is_morph:
+                    next_logits[self.tokenizer.unk_id] = -torch.inf
+                    for fid in forbidden_marker_ids:
+                        next_logits[fid] = -torch.inf
+                    if has_emitted_a or step < min(8, thought_budget // 2):
+                        for aid in a_marker_ids:
+                            next_logits[aid] = -torch.inf
+
                 if not has_emitted_a or (
                     a_start_token_idx > 0 and len(tokens) - a_start_token_idx < 4
                 ):
@@ -407,7 +460,7 @@ class MultiPassController(nn.Module):
                     next_logits[self.tokenizer.eos_id] = -torch.inf
 
                 # Prevent premature tag transition before minimum thought budget
-                if not has_emitted_a and tokens[-1] == 10 and step < min(48, thought_budget):
+                if not has_emitted_a and tokens[-1] in newline_ids and step < min(48, thought_budget):
                     next_logits[ord("#")] = -torch.inf
 
                 # Permit paragraph breaks (\n\n) in multi-step reasoning traces while preventing >=3 consecutive newlines,
@@ -415,7 +468,6 @@ class MultiPassController(nn.Module):
                 if len(tokens) >= 2 and tokens[-1] == 10 and tokens[-2] == 10:
                     next_logits[10] = -torch.inf
                 elif tokens[-1] == 32:
-                    # Check if we are in a leading-indentation run right after a newline
                     indent_run = 0
                     idx_back = len(tokens) - 1
                     while idx_back >= 0 and tokens[idx_back] == 32:
@@ -426,23 +478,22 @@ class MultiPassController(nn.Module):
                         next_logits[32] = -torch.inf
                     next_logits[10] = -torch.inf
                 elif (
-                    len(tokens) >= 2
+                    not is_morph
+                    and len(tokens) >= 2
                     and tokens[-2] in (32, 10)
                     and tokens[-1] not in (ord("a"), ord("A"), ord("I"))
                 ):
                     next_logits[32] -= 2.5
                     next_logits[10] -= 2.5
 
-                # Antidoom span-loop guard: never penalize individual English letters inside words;
-                # instead, detect and suppress only the exact trigger byte that restarts a repeated
-                # 4-byte or 6-byte span in the generated window.
+                # Antidoom span-loop guard: detect and suppress only the exact trigger token that restarts a repeated span
                 gen_window = tokens[max(prompt_len, len(tokens) - 128) :]
                 if len(gen_window) >= 6:
                     ctx5 = gen_window[-5:]
                     for i in range(len(gen_window) - 5):
                         if gen_window[i : i + 5] == ctx5:
                             trig_b = gen_window[i + 5]
-                            if 32 <= trig_b < 127:
+                            if (32 <= trig_b < 127) or trig_b >= 260:
                                 next_logits[trig_b] -= 6.0
                 if len(gen_window) >= 4:
                     ctx3 = gen_window[-3:]
@@ -452,16 +503,26 @@ class MultiPassController(nn.Module):
                             trig_b = gen_window[i + 3]
                             hits_3[trig_b] = hits_3.get(trig_b, 0) + 1
                     for trig_b, cnt in hits_3.items():
-                        if cnt >= 2 and 32 <= trig_b < 127:
+                        if cnt >= 2 and ((32 <= trig_b < 127) or trig_b >= 260):
                             next_logits[trig_b] -= 3.5 * cnt
+                if is_morph and len(gen_window) >= 3:
+                    ctx2 = gen_window[-2:]
+                    for i in range(len(gen_window) - 2):
+                        if gen_window[i : i + 2] == ctx2:
+                            trig_b = gen_window[i + 2]
+                            if trig_b >= 260:
+                                next_logits[trig_b] -= 4.0
 
-                # Prevent XML/HTML tag openers ('<') at start of #T$# or #A$#, 3x identical character repeats, or 2x punctuation
+                # Prevent XML/HTML tag openers ('<') at start of #T$# or #A$#, 3x identical token repeats, or 2x punctuation
                 if step == 0 or (len(tokens) >= len(a_tag_tokens) and tokens[-len(a_tag_tokens) :] == a_tag_tokens):
-                    next_logits[ord("<")] = -torch.inf
+                    for xid in xml_open_ids:
+                        if xid < logit_bound:
+                            next_logits[xid] = -torch.inf
                 if len(tokens) >= 3 and tokens[-1] == tokens[-2] == tokens[-3]:
                     next_logits[tokens[-1]] = -torch.inf
-                elif len(tokens) >= 2 and tokens[-1] == tokens[-2] and not chr(min(126, max(32, tokens[-1]))).isalnum():
-                    next_logits[tokens[-1]] = -torch.inf
+                elif len(tokens) >= 2 and tokens[-1] == tokens[-2]:
+                    if tokens[-1] >= 260 or not chr(min(126, max(32, tokens[-1]))).isalnum():
+                        next_logits[tokens[-1]] = -torch.inf
 
                 if temperature <= 0.0:
                     next_id = int(next_logits.argmax(dim=-1).item())
@@ -473,9 +534,9 @@ class MultiPassController(nn.Module):
                 if (
                     has_emitted_a
                     and a_start_token_idx > 0
-                    and len(tokens) - a_start_token_idx >= 8
-                    and tokens[-1] == 10
-                    and next_id in (ord("#"), ord("<"))
+                    and len(tokens) - a_start_token_idx >= (4 if is_morph else 8)
+                    and tokens[-1] in newline_ids
+                    and (next_id in hash_start_ids or next_id in xml_open_ids)
                 ):
                     break
 
@@ -484,16 +545,21 @@ class MultiPassController(nn.Module):
                     has_emitted_a
                     and a_start_token_idx > 0
                     and step >= int(max_new_tokens * 0.82)
-                    and tokens[-1] in (ord("."), ord("!"), ord("?"))
-                    and next_id == 10
+                    and tokens[-1] in sent_end_ids
+                    and next_id in newline_ids
                 ):
                     break
 
                 tokens.append(next_id)
                 step += 1
 
-                if not has_emitted_a and len(tokens) >= len(a_tag_tokens):
-                    if tokens[-len(a_tag_tokens) :] == a_tag_tokens:
+                if not has_emitted_a:
+                    if is_morph and next_id in a_marker_ids:
+                        if self.tokenizer.decode([next_id]).endswith("#A$#"):
+                            tokens.append(32)
+                        has_emitted_a = True
+                        a_start_token_idx = len(tokens)
+                    elif len(tokens) >= len(a_tag_tokens) and tokens[-len(a_tag_tokens) :] == a_tag_tokens:
                         has_emitted_a = True
                         a_start_token_idx = len(tokens)
                 if next_id == self.tokenizer.eos_id:
@@ -575,7 +641,7 @@ class MultiPassController(nn.Module):
                 values=tuple(f"cand_{i}" for i in range(len(cand_bodies))),
                 target=0,
             )
-            batch = collate_decisions([ex], max_seq, device=device)
+            batch = collate_decisions([ex], max_seq, device=device, tokenizer=self.tokenizer)
             ctx_ids = batch["context_ids"]
             ctx_lens = batch["context_lengths"]
             opt_ids = batch["option_ids"]

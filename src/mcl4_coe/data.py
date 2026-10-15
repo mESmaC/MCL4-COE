@@ -111,6 +111,19 @@ class ByteTokenizer:
                 raw_bytes.append(clean)
         return raw_bytes.decode("utf-8", errors="replace")
 
+    def count_utf8_bytes(self, token_ids: torch.Tensor) -> int:
+        valid_mask = (token_ids >= 0) & ((token_ids & 0x7FFF) < 256)
+        return int(valid_mask.sum().item())
+
+
+def get_tokenizer(vocab_size: int = 260) -> Any:
+    """Return `MorphCodeTokenizer` (`vocab_size = 16,384`) when `vocab_size > 1024`, else `ByteTokenizer` (`260`)."""
+    if vocab_size > 1024:
+        from .morph_tokenizer import MorphCodeTokenizer
+
+        return MorphCodeTokenizer()
+    return ByteTokenizer()
+
 
 class TokenBlockDataset(Dataset):
     """Memory-mapped uint16 block dataset with 0x8000 high-bit prompt masking."""
@@ -392,10 +405,13 @@ def collate_decisions(
     max_length: int,
     *,
     device: str | torch.device = "cpu",
+    tokenizer: Any | None = None,
+    vocab_size: int = 260,
 ) -> dict[str, torch.Tensor]:
     if not examples:
         raise ValueError("At least one decision is required")
-    tokenizer = ByteTokenizer()
+    if tokenizer is None:
+        tokenizer = get_tokenizer(vocab_size)
     contexts = [tokenizer.encode(item.context) for item in examples]
     candidates = [
         [tokenizer.encode(description) for description in item.descriptions] for item in examples

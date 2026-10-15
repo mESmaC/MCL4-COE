@@ -916,8 +916,10 @@ class COEAddressRouter:
                 reverse=True,
             )[:k]
             cand_recs = [all_recs[i] for i in ranked_idx]
+            cand_sketch = [sketch_scores[i] for i in ranked_idx]
         else:
             cand_recs = all_recs
+            cand_sketch = [0.0 for _ in cand_recs]
 
         max_len = min(self.max_seq_len, int(coe.backbone.config.max_seq_len))
         raw_ctx = f"#U$# {query_text}\n#Q$# Select the exact A.TXY record matching the request."
@@ -946,7 +948,14 @@ class COEAddressRouter:
             batch["option_ids"],
             batch["option_lengths"],
         )
-        probs = dec_out.probabilities[0]
+        dec_logits = dec_out.logits[0].float()
+        if any(s > 0.0 for s in cand_sketch):
+            sk_t = torch.tensor(cand_sketch, dtype=torch.float32, device=device)
+            sk_norm = (sk_t - sk_t.mean()) / sk_t.std(unbiased=False).clamp_min(1e-5)
+            joint_logits = dec_logits + 0.35 * sk_norm
+            probs = joint_logits.softmax(dim=-1)
+        else:
+            probs = dec_out.probabilities[0]
         best_idx = int(probs.argmax(dim=-1).item())
         chosen_rec = cand_recs[best_idx]
         return {
@@ -1043,6 +1052,8 @@ def index_python_repo_to_atxy(
                     for alias in node.names:
                         imports.append(alias.name)
 
+            # Prioritize public classes and functions before private underscore helpers
+            syms.sort(key=lambda item: item[0].startswith("_"))
             syms = syms[:ATXY_BASE]
             parsed_files[rel] = (syms, imports)
             for y_idx, (s_name, _kind, _sum, _nd) in enumerate(syms):
@@ -1502,11 +1513,13 @@ class CodebaseWarmupEngine:
             )
             mod_short = Path(rel_path).name
 
-            # Rank hard-negative distractors by shared module / lexical overlap
+            # Rank hard-negative distractors within selected_indices so every explored symbol
+            # appears both as a positive target and as a negative distractor (zero prior bias)
             scored_neg = []
-            for j, other in enumerate(sym_recs):
+            for j in selected_indices:
                 if j == idx:
                     continue
+                other = sym_recs[j]
                 same_mod = 1.5 if other.up == rec.up else 0.0
                 ov = len(sym_toks[idx] & sym_toks[j]) / max(1, len(sym_toks[idx]))
                 scored_neg.append((same_mod + ov, j))
@@ -1839,6 +1852,17 @@ class CodebaseWarmupEngine:
                     s_pos = state_grid[b_rows, t_idx]
                     c_pos = opt_grid[b_rows, t_idx]
 
+                    d_p = state_proj.shape[-1]
+                    mask_3d_p = valid_options.unsqueeze(-1).expand(bsz, num_opts, d_p)
+                    s_proj_grid = state_proj.new_zeros((bsz, num_opts, d_p)).masked_scatter(
+                        mask_3d_p, state_proj
+                    )
+                    c_proj_grid = cand_proj.new_zeros((bsz, num_opts, d_p)).masked_scatter(
+                        mask_3d_p, cand_proj
+                    )
+                    s_pos_proj = s_proj_grid[b_rows, t_idx]
+                    c_pos_proj = c_proj_grid[b_rows, t_idx]
+
                     distractor_mask = valid_options.clone()
                     distractor_mask[b_rows, t_idx] = False
                     neg_scores = similarities.float().masked_fill(~distractor_mask, -torch.inf)
@@ -1854,6 +1878,20 @@ class CodebaseWarmupEngine:
                         scale = coe._scale()
                         logits = (similarities.float() * scale).masked_fill(~valid_options, -torch.inf)
                         dec_loss = F.cross_entropy(logits, t_idx)
+
+                        # Symmetric in-batch InfoNCE prevents unconditional candidate prior bias
+                        if bsz > 1:
+                            cross_sims = pearson_similarity(
+                                s_pos_proj.float().unsqueeze(1),
+                                c_pos_proj.float().unsqueeze(0),
+                                eps=coe.config.eps,
+                            ) * scale
+                            infonce_loss = 0.5 * (
+                                F.cross_entropy(cross_sims, b_rows)
+                                + F.cross_entropy(cross_sims.transpose(0, 1), b_rows)
+                            )
+                        else:
+                            infonce_loss = dec_loss.new_zeros(())
 
                         ded_sims = pearson_similarity(
                             ded_joint.unsqueeze(1),
@@ -1876,7 +1914,9 @@ class CodebaseWarmupEngine:
                             eval_logits, target_grid[valid_options]
                         )
 
-                        batch_loss = (dec_loss + 0.30 * ded_loss + 0.20 * eval_loss) / n_cb
+                        batch_loss = (
+                            dec_loss + 0.35 * infonce_loss + 0.30 * ded_loss + 0.20 * eval_loss
+                        ) / n_cb
 
                     batch_loss.backward()
                     epoch_loss_val += float(batch_loss.item())

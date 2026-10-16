@@ -2220,6 +2220,39 @@ def ensure_sharded_tracks_ready(
     return existing
 
 
+def _is_clean_uta_episode(
+    u_clean: str,
+    t_clean: str,
+    a_clean: str,
+    *,
+    track_name: str = "uta_trace",
+    seq_len: int = 1024,
+) -> bool:
+    """Return True if `(u_clean, t_clean, a_clean)` is a genuine, non-stub reasoning trace."""
+    if not u_clean or not t_clean or not a_clean:
+        return False
+    if track_name != "uta_trace" or seq_len < 256:
+        return True
+    if "Score Candidate " in u_clean or "Reply only with a JSON array" in u_clean:
+        return False
+    if t_clean.startswith("Evaluate step-by-step:") or (
+        t_clean.startswith("[") and len(t_clean) <= 6
+    ):
+        return False
+    if (
+        u_clean.startswith("{'")
+        or u_clean.startswith('{"')
+        or a_clean.startswith("{'")
+        or a_clean.startswith('{"')
+    ):
+        return False
+    if len(t_clean) < 12 or len(a_clean) < 2:
+        return False
+    if len(u_clean) >= 32 and u_clean[:60] == a_clean[:60]:
+        return False
+    return True
+
+
 def transcode_byte_shards_to_morphcode(
     src_shards_root: str | Path,
     dst_shards_root: str | Path,
@@ -2230,8 +2263,9 @@ def transcode_byte_shards_to_morphcode(
     """Losslessly transcode Stage-0 curated `ByteTokenizer` (`vocab_size=260`) shards into `MorphCode-16K` (`vocab_size=16,384`) shards.
 
     Reconstructs every `<bos> ... <eos>` pretrain document and every `0x8000`-masked `#U$# -> #T$# -> #A$#`
-    episode from the existing `.bin` shards (`train` and `val` splits) and packs them into `MorphCode-16K`
-    block-aligned shards without requiring `X:\\corpora` to be mounted.
+    episode from the existing `.bin` shards (`train` and `val` splits), deduplicates episodes across
+    legacy `local_*` and standard shards, filters out synthetic rubric/dict stubs in `uta_trace`, and
+    packs them into `MorphCode-16K` block-aligned shards without requiring `X:\\corpora` to be mounted.
     """
     import shutil
 
@@ -2256,13 +2290,22 @@ def transcode_byte_shards_to_morphcode(
         dst_track_dir = dst_root / track_name
         dst_track_dir.mkdir(parents=True, exist_ok=True)
 
+        # Clean any stale .bin / .receipt.json / index_receipt.json in destination track dir before transcoding
+        for old_file in dst_track_dir.glob("*"):
+            if old_file.is_file() and not old_file.name.endswith(".pt"):
+                old_file.unlink(missing_ok=True)
+
         # Copy decision example caches (`decision_examples_cache.pt`, `decision_examples_val_cache.pt`)
         for pt_file in src_track_dir.glob("*.pt"):
             shutil.copy2(pt_file, dst_track_dir / pt_file.name)
 
-        # Group shards by split ("train", "val")
+        # Group shards by split ("train", "val"), preferring canonical non-`local_` shards first
         splits: dict[str, list[dict[str, Any]]] = {}
-        for s in src_receipt.shards:
+        ordered_shards = sorted(
+            src_receipt.shards,
+            key=lambda s: (1 if str(s.get("bin_file", "")).startswith("local_") else 0, str(s.get("bin_file", ""))),
+        )
+        for s in ordered_shards:
             bin_p = src_track_dir / s["bin_file"]
             if bin_p.is_file():
                 sp = str(s.get("split", "train"))
@@ -2279,6 +2322,7 @@ def transcode_byte_shards_to_morphcode(
                 max_blocks_per_shard=16_384,
                 vocab_size=16_384,
             )
+            seen_hashes: set[bytes] = set()
             for s_meta in shard_list:
                 bin_p = src_track_dir / s_meta["bin_file"]
                 raw_u16 = np.fromfile(bin_p, dtype="<u2")
@@ -2292,6 +2336,7 @@ def transcode_byte_shards_to_morphcode(
                 eos_cursor = 0
                 n_eos = eos_positions.size
                 accepted = 0
+                rejected = 0
                 for b_pos in bos_positions:
                     while eos_cursor < n_eos and eos_positions[eos_cursor] <= b_pos:
                         eos_cursor += 1
@@ -2303,8 +2348,13 @@ def transcode_byte_shards_to_morphcode(
                     valid_bytes = span_clean[span_clean < 256].astype(np.uint8).tobytes()
                     if not valid_bytes:
                         continue
+                    digest = hashlib.blake2b(valid_bytes, digest_size=12).digest()
+                    if digest in seen_hashes:
+                        rejected += 1
+                        continue
                     text = valid_bytes.decode("utf-8", errors="replace")
                     if track_name == "pretrain_lm":
+                        seen_hashes.add(digest)
                         writer.add_pretrain_document(text)
                         accepted += 1
                     else:
@@ -2315,22 +2365,172 @@ def transcode_byte_shards_to_morphcode(
                             u_clean = u_part.replace("#U$#", "", 1).strip()
                             t_clean = t_part.strip()
                             a_clean = a_part.strip()
-                            if u_clean and t_clean and a_clean:
+                            if _is_clean_uta_episode(
+                                u_clean,
+                                t_clean,
+                                a_clean,
+                                track_name=track_name,
+                                seq_len=target_seq_len,
+                            ):
+                                seen_hashes.add(digest)
                                 if writer.add_uta_episode(u_clean, t_clean, a_clean):
                                     accepted += 1
+                                else:
+                                    rejected += 1
+                            else:
+                                rejected += 1
 
                 writer.record_provenance(
                     corpus=f"transcoded_morph16k:{track_name}:{sp}",
                     source_file=s_meta["bin_file"],
                     row_start=1,
-                    row_end=accepted,
+                    row_end=accepted + rejected,
                     episodes_accepted=accepted,
-                    episodes_rejected_stage0=0,
+                    episodes_rejected_stage0=rejected,
                 )
             writer.flush_shard()
             receipts[track_name] = writer.index_receipt
 
     return receipts
+
+
+def sanitize_morphcode_shards(
+    shards_root: str | Path,
+    *,
+    tracks: Iterable[str] = ("pretrain_lm", "uta_trace", "typed_decision"),
+    vocab_size: int = 16_384,
+) -> dict[str, dict[str, int]]:
+    """Deduplicate episodes and strip corrupted rubric/dict stubs in-place across `shards_root`."""
+    import shutil
+
+    root = Path(shards_root).expanduser().resolve(strict=True)
+    tok = get_tokenizer(vocab_size)
+    summary: dict[str, dict[str, int]] = {}
+
+    for track_name in tracks:
+        track_dir = root / track_name
+        idx_path = track_dir / "index_receipt.json"
+        if not idx_path.is_file():
+            continue
+        src_receipt = IndexReceipt.from_file(idx_path)
+        target_seq_len = src_receipt.seq_len
+        tmp_dir = root / f".tmp_sanitize_{track_name}"
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+
+        for pt_file in track_dir.glob("*.pt"):
+            shutil.copy2(pt_file, tmp_dir / pt_file.name)
+
+        splits: dict[str, list[dict[str, Any]]] = {}
+        ordered_shards = sorted(
+            src_receipt.shards,
+            key=lambda s: (1 if str(s.get("bin_file", "")).startswith("local_") else 0, str(s.get("bin_file", ""))),
+        )
+        for s in ordered_shards:
+            bin_p = track_dir / s["bin_file"]
+            if bin_p.is_file():
+                sp = str(s.get("split", "train"))
+                splits.setdefault(sp, []).append(s)
+
+        kept_total = 0
+        dropped_total = 0
+        for sp, shard_list in splits.items():
+            writer = BlockAlignedShardWriter(
+                tmp_dir,
+                track=track_name,
+                split=sp,
+                seq_len=target_seq_len,
+                max_blocks_per_shard=16_384,
+                vocab_size=vocab_size,
+            )
+            seen_hashes: set[bytes] = set()
+            for s_meta in shard_list:
+                bin_p = track_dir / s_meta["bin_file"]
+                raw_u16 = np.fromfile(bin_p, dtype="<u2")
+                clean_ids = raw_u16 & 0x7FFF
+                bos_positions = np.nonzero(clean_ids == tok.bos_id)[0]
+                eos_positions = np.nonzero(clean_ids == tok.eos_id)[0]
+                if bos_positions.size == 0 or eos_positions.size == 0:
+                    continue
+
+                eos_cursor = 0
+                n_eos = eos_positions.size
+                accepted = 0
+                rejected = 0
+                for b_pos in bos_positions:
+                    while eos_cursor < n_eos and eos_positions[eos_cursor] <= b_pos:
+                        eos_cursor += 1
+                    if eos_cursor >= n_eos:
+                        break
+                    e_pos = eos_positions[eos_cursor]
+                    span_clean = clean_ids[b_pos + 1 : e_pos]
+                    if span_clean.size == 0:
+                        continue
+                    text = tok.decode(span_clean.tolist())
+                    if not text.strip():
+                        continue
+                    digest = hashlib.blake2b(text.encode("utf-8", errors="replace"), digest_size=12).digest()
+                    if digest in seen_hashes:
+                        rejected += 1
+                        dropped_total += 1
+                        continue
+                    if track_name == "pretrain_lm":
+                        seen_hashes.add(digest)
+                        writer.add_pretrain_document(text)
+                        accepted += 1
+                        kept_total += 1
+                    else:
+                        if "#T$#" in text and "#A$#" in text:
+                            u_part, rest = text.split("#T$#", 1)
+                            t_part, a_part = rest.split("#A$#", 1)
+                            u_clean = u_part.replace("#U$#", "", 1).strip()
+                            t_clean = t_part.strip()
+                            a_clean = a_part.strip()
+                            if _is_clean_uta_episode(
+                                u_clean,
+                                t_clean,
+                                a_clean,
+                                track_name=track_name,
+                                seq_len=target_seq_len,
+                            ):
+                                seen_hashes.add(digest)
+                                if writer.add_uta_episode(u_clean, t_clean, a_clean):
+                                    accepted += 1
+                                    kept_total += 1
+                                else:
+                                    rejected += 1
+                                    dropped_total += 1
+                            else:
+                                rejected += 1
+                                dropped_total += 1
+                        else:
+                            rejected += 1
+                            dropped_total += 1
+
+                writer.record_provenance(
+                    corpus=f"sanitized_morph16k:{track_name}:{sp}",
+                    source_file=s_meta["bin_file"],
+                    row_start=1,
+                    row_end=accepted + rejected,
+                    episodes_accepted=accepted,
+                    episodes_rejected_stage0=rejected,
+                )
+            writer.flush_shard()
+
+        shutil.rmtree(track_dir)
+        tmp_dir.rename(track_dir)
+        new_idx = IndexReceipt.from_file(track_dir / "index_receipt.json")
+        summary[track_name] = {
+            "kept_episodes": kept_total,
+            "dropped_episodes": dropped_total,
+            "num_blocks": int(new_idx.totals.get("num_blocks", 0)),
+            "train_blocks": int(new_idx.totals.get("train_blocks", 0)),
+            "val_blocks": int(new_idx.totals.get("val_blocks", 0)),
+        }
+
+    return summary
+
 
 
 

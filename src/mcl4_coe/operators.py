@@ -106,6 +106,7 @@ class COEConfig:
     initial_scale: float = 15.0
     eps: float = 1e-6
     recurrence_steps: int = 1
+    recurrent_kv: bool = False
     depth_ponder: bool = False
     margin_halt_threshold: float | None = None
     gist_tokens_per_chunk: int = 6
@@ -1433,7 +1434,7 @@ class CognitiveOperatorEnsemble(nn.Module):
         recurrence_steps: int | None = None,
         latent_prior: Tensor | None = None,
         latent_prior_scale: float = 0.0,
-        recurrent_kv: bool = False,
+        recurrent_kv: bool | None = None,
         depth_ponder: bool | None = None,
         gist_state: EncodedState | None = None,
         prior_start_pos: int = 0,
@@ -1442,6 +1443,7 @@ class CognitiveOperatorEnsemble(nn.Module):
     ):
         """Operator 9 (`Inference`): Autoregressive `U$ -> T$ -> A$` synthesis on the shared backbone."""
         use_ponder = self.config.depth_ponder if depth_ponder is None else depth_ponder
+        use_rec_kv = self.config.recurrent_kv if recurrent_kv is None else recurrent_kv
         if recurrence_steps is None:
             steps = (
                 max(2, self.config.recurrence_steps)
@@ -1456,7 +1458,17 @@ class CognitiveOperatorEnsemble(nn.Module):
         eff_scale = latent_prior_scale
         eff_start = prior_start_pos
         if condition_on_prefix_gist and input_ids.shape[1] >= 12 and eff_gist is None:
-            pref_len = max(4, min(input_ids.shape[1] // 3, int(self.config.gist_chunk_size)))
+            first_ep_mask = (input_ids == self.backbone.config.eos_id).cumsum(dim=1) == 0
+            min_ep_len = int(first_ep_mask.sum(dim=1).min().item())
+            pref_len = max(
+                4,
+                min(
+                    max(12, min_ep_len) // 3,
+                    48,
+                    input_ids.shape[1] // 3,
+                    int(self.config.gist_chunk_size),
+                ),
+            )
             pref_ids = input_ids[:, :pref_len]
             pref_valid = pref_ids != self.backbone.config.pad_id
             if not pref_valid.any(dim=-1).all():
@@ -1483,7 +1495,7 @@ class CognitiveOperatorEnsemble(nn.Module):
                     ),
                 )
                 if eff_scale == 0.0:
-                    eff_scale = 0.18
+                    eff_scale = 0.12
             eff_start = pref_len
 
         return self.backbone.forward(
@@ -1492,7 +1504,7 @@ class CognitiveOperatorEnsemble(nn.Module):
             recurrence_steps=steps,
             latent_prior=eff_prior,
             latent_prior_scale=eff_scale,
-            recurrent_kv=recurrent_kv,
+            recurrent_kv=use_rec_kv,
             depth_ponder=use_ponder,
             gist_state=eff_gist,
             prior_start_pos=eff_start,

@@ -392,7 +392,7 @@ class MultiPassController(nn.Module):
         thought_prefix: str | None = None,
         lock_thought: bool = False,
         answer_prefix: str | None = None,
-        recurrent_kv: bool = False,
+        recurrent_kv: bool | None = None,
         depth_ponder: bool | None = None,
         adaptive_recurrent_depth: bool = False,
         max_recurrence_steps: int = 3,

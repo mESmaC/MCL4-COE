@@ -81,6 +81,10 @@ class MCL4CEDConfig:
         if self.attention_type not in ("markov_local4", "standard"):
             raise ValueError("attention_type must be 'markov_local4' or 'standard'")
 
+    @property
+    def eos_id(self) -> int:
+        return int(self.pad_id) + 2
+
 
 @dataclass
 class EncodedState:
@@ -443,7 +447,12 @@ class CEDDecoderLayer(nn.Module):
         even, odd = x[..., 0::2], x[..., 1::2]
         return torch.stack((even * cos - odd * sin, even * sin + odd * cos), dim=-1).flatten(-2)
 
-    def project_global_kv(self, encoded_state: Tensor) -> tuple[Tensor, Tensor]:
+    def project_global_kv(
+        self,
+        encoded_state: Tensor,
+        *,
+        n_prefix: int = 0,
+    ) -> tuple[Tensor, Tensor]:
         """Project state `[B_state, T_state, d_model]` into `(K_global, V_global)` once with RoPE."""
         b_state, t_state, _ = encoded_state.shape
         kv = self.global_kv_proj(encoded_state).view(
@@ -451,7 +460,10 @@ class CEDDecoderLayer(nn.Module):
         )
         k_global, v_global = (part.transpose(1, 2).contiguous() for part in kv.unbind(dim=2))
         k_normed = self.global_k_norm(k_global)
-        positions = torch.arange(t_state, device=encoded_state.device, dtype=torch.float32)
+        positions = (
+            torch.arange(t_state, device=encoded_state.device, dtype=torch.float32)
+            - float(max(0, int(n_prefix)))
+        ).clamp_min(0.0)
         angles = positions[:, None] * self.inv_freq.float()[None, :]
         cos, sin = angles.cos().to(k_normed.dtype), angles.sin().to(k_normed.dtype)
         return self._apply_rope(k_normed, cos, sin), v_global
@@ -684,9 +696,15 @@ class MCL4CEDBackbone(nn.Module):
                 candidate_ids, candidate_valid, causal=causal_local
             )
         anchor = candidate_encoded.hidden
+        n_prefix_kv = (
+            max(0, int(encoded_state.hidden.shape[1] - candidate_ids.shape[1]))
+            if (causal_cross and owner_rows is None)
+            else 0
+        )
         # Precompute K_global, V_global per decoder layer once for the unique state rows.
         global_kv_cache = [
-            layer.project_global_kv(encoded_state.hidden) for layer in self.decoder_layers
+            layer.project_global_kv(encoded_state.hidden, n_prefix=n_prefix_kv)
+            for layer in self.decoder_layers
         ]
 
         state = anchor
@@ -719,7 +737,8 @@ class MCL4CEDBackbone(nn.Module):
                         (encoded_state.hidden[:, :n_prefix], seq_part), dim=1
                     ).masked_fill(~encoded_state.valid.unsqueeze(-1), 0)
                 step_kv_cache = [
-                    layer.project_global_kv(kv_state) for layer in self.decoder_layers
+                    layer.project_global_kv(kv_state, n_prefix=n_prefix_kv)
+                    for layer in self.decoder_layers
                 ]
             for layer, (k_global, v_global) in zip(self.decoder_layers, step_kv_cache):
                 x, aux, z, load = layer(
@@ -763,14 +782,12 @@ class MCL4CEDBackbone(nn.Module):
                     l1 = self.lm_head(s1).float()
                     p1 = F.softmax(l1, dim=-1)
                     ent1 = -(p1 * p1.clamp_min(1e-9).log()).sum(dim=-1, keepdim=True)
-                    gate_ent = (0.40 * torch.sigmoid((ent1 - 1.8) / 0.6)).to(s1.dtype)
-                state = (s1 + gate_ent * (s_deep - s1)).masked_fill(
-                    ~candidate_valid.unsqueeze(-1), 0
-                )
+                    gate_ent = (0.50 + 0.35 * torch.sigmoid((ent1 - 1.5) / 0.6)).to(s1.dtype)
+                blended = self.final_norm(s1 + gate_ent * (s_deep - s1))
+                state = blended.masked_fill(~candidate_valid.unsqueeze(-1), 0)
             else:
-                state = (0.75 * s1 + 0.25 * s_deep).masked_fill(
-                    ~candidate_valid.unsqueeze(-1), 0
-                )
+                blended = self.final_norm(0.40 * s1 + 0.60 * s_deep)
+                state = blended.masked_fill(~candidate_valid.unsqueeze(-1), 0)
 
         return BackboneOutput(
             hidden=state,
@@ -802,6 +819,7 @@ class MCL4CEDBackbone(nn.Module):
             valid[:, 0] = True
         encoded = self.encode_state(input_ids, valid, causal=True)
         state_for_kv = encoded
+        first_episode_mask = (input_ids == self.config.eos_id).cumsum(dim=1) == 0
         if latent_prior is not None and latent_prior_scale != 0.0:
             prior = latent_prior.to(device=encoded.hidden.device, dtype=encoded.hidden.dtype)
             if prior.ndim == 1:
@@ -811,9 +829,12 @@ class MCL4CEDBackbone(nn.Module):
             prior_normed = self.encoder_norm(prior)
             if prior_start_pos > 0 and prior_start_pos < encoded.hidden.shape[1]:
                 pos_mask = (
-                    torch.arange(encoded.hidden.shape[1], device=encoded.hidden.device)
-                    >= int(prior_start_pos)
-                ).view(1, -1, 1)
+                    (
+                        torch.arange(encoded.hidden.shape[1], device=encoded.hidden.device).unsqueeze(0)
+                        >= int(prior_start_pos)
+                    )
+                    & first_episode_mask
+                ).unsqueeze(-1)
                 steered_raw = torch.where(
                     pos_mask,
                     encoded.hidden + float(latent_prior_scale) * prior_normed,
@@ -844,14 +865,20 @@ class MCL4CEDBackbone(nn.Module):
             g_normed = self.encoder_norm(g_hid).masked_fill(~g_val.unsqueeze(-1), 0)
             n_gist = g_normed.shape[1]
             eff_prefix_len = max(0, int(prior_start_pos or gist_state.gist_prefix_len))
-            q_positions = torch.arange(t_cand, device=input_ids.device)[:, None]
-            gist_allowed = (q_positions >= eff_prefix_len).expand(t_cand, n_gist)
-            seq_allowed = torch.ones(
-                t_cand, t_cand, dtype=torch.bool, device=input_ids.device
-            ).tril()
-            causal_cross_mask = torch.cat((gist_allowed, seq_allowed), dim=-1).view(
-                1, 1, t_cand, n_gist + t_cand
+            q_positions = torch.arange(t_cand, device=input_ids.device).unsqueeze(0)
+            if eff_prefix_len > 0:
+                gist_allowed = (
+                    (q_positions >= eff_prefix_len) & first_episode_mask
+                ).unsqueeze(-1).expand(bsz, t_cand, n_gist)
+            else:
+                gist_allowed = (q_positions >= 0).unsqueeze(-1).expand(bsz, t_cand, n_gist)
+            seq_allowed = (
+                torch.ones(t_cand, t_cand, dtype=torch.bool, device=input_ids.device)
+                .tril()
+                .unsqueeze(0)
+                .expand(bsz, t_cand, t_cand)
             )
+            causal_cross_mask = torch.cat((gist_allowed, seq_allowed), dim=-1).unsqueeze(1)
             state_for_kv = EncodedState(
                 hidden=torch.cat((g_normed, state_for_kv.hidden), dim=1),
                 valid=torch.cat((g_val, state_for_kv.valid), dim=1),

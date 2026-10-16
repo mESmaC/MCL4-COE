@@ -1822,6 +1822,22 @@ def test_pre_scaling_housekeeping_gist_conditioning_and_repo_uta_traces(tmp_path
     assert noisy_rej is True
     assert extract_uta_episodes(noisy_row, max_seq_len=2048) == []
 
+    # 6. Verify RoPE n_prefix alignment in project_global_kv and <eos> boundary isolation in packed blocks
+    from mcl4_coe.pipeline import _is_clean_uta_episode
+
+    dec_layer = coe.backbone.decoder_layers[0]
+    dummy_seq = torch.randn(2, 16, b_cfg.d_model)
+    dummy_prefix = torch.randn(2, 6, b_cfg.d_model)
+    k_seq, _ = dec_layer.project_global_kv(dummy_seq, n_prefix=0)
+    k_prefixed, _ = dec_layer.project_global_kv(
+        torch.cat([dummy_prefix, dummy_seq], dim=1), n_prefix=6
+    )
+    assert torch.allclose(k_seq, k_prefixed[:, :, 6:, :], atol=1e-6)
+    assert _is_clean_uta_episode("Explain X.", "Step 1: check X.", "X is valid.") is True
+    assert _is_clean_uta_episode("Score Candidate 1 now.", "Evaluate step-by-step: [0]", "[0]") is False
+    assert _is_clean_uta_episode("{'messages': []}", "TRUE", "{'messages': []}") is False
+
+
 
 
 

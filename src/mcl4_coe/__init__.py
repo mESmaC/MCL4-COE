@@ -177,6 +177,7 @@ from .pipeline import (
     iter_source_records,
     normalize_github_code_record,
     parse_mcqa_decision_fields,
+    sanitize_morphcode_shards,
     transcode_byte_shards_to_morphcode,
 )
 from .ple import PerLayerEmbedding, RMSNorm
@@ -333,6 +334,7 @@ __all__ = [
     "resolve_corpora_root",
     "resolve_runs_root",
     "resolve_shards_root",
+    "sanitize_morphcode_shards",
     "sanitize_trace_markers",
     "staleness_weight",
     "start_web_ui_server",

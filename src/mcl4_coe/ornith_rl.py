@@ -1374,7 +1374,7 @@ class OrnithSelfImprover:
         inp_rows: list[list[int]] = []
         lbl_rows: list[list[int]] = []
         for t in tasks:
-            u_clean = t.prompt_q.replace("#U$#", "").strip()
+            u_clean = t.prompt_q.split("\n#Q$#")[0].replace("#U$#", "").strip()
             raw_turn = self.tokenizer.encode_masked_turn(u_clean, t.gold_thought, t.gold_answer)
             if len(raw_turn) > max_lm_len + 1:
                 raw_turn = raw_turn[: max_lm_len + 1]
@@ -1401,7 +1401,7 @@ class OrnithSelfImprover:
         )
         lm_distill_out = coe.forward_inference(inp_tensor, targets=lbl_tensor)
         assert lm_distill_out.loss is not None
-        self_distill_loss = 0.80 * decision_distill_loss + 0.20 * lm_distill_out.loss
+        self_distill_loss = 0.95 * decision_distill_loss + 0.05 * lm_distill_out.loss
 
         # LiquidAI Antidoom FTPO + Compiler-in-the-Loop Token Targeting:
         # Strictly target either (a) an inner repetition trigger (`loop_hit is not None`), or

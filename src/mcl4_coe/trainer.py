@@ -563,7 +563,12 @@ class MCL4COETrainer:
                         dtype=torch.bfloat16,
                         enabled=use_amp,
                     ):
-                        lm_out = self.model.forward_inference(inp, targets=lbl)
+                        lm_out = self.model.forward_inference(
+                            inp,
+                            targets=lbl,
+                            recurrent_kv=self.config.recurrent_kv,
+                            depth_ponder=self.config.depth_ponder,
+                        )
                         assert lm_out.ce_loss is not None
                         ce_val = float(lm_out.ce_loss.detach().float().item())
                     t_nll += ce_val * tok_cnt
@@ -632,6 +637,7 @@ class MCL4COETrainer:
             projection_dim=self.config.projection_dim,
             initial_scale=5.0,
             recurrence_steps=self.config.recurrence_steps,
+            recurrent_kv=self.config.recurrent_kv,
             depth_ponder=self.config.depth_ponder,
         )
         self.model = CognitiveOperatorEnsemble(

@@ -322,15 +322,72 @@
       "split": "train",
       "track": "uta_trace",
       "unmasked_target_tokens": 22082192
+    },
+    {
+      "bin_file": "uta_trace_train_shard_00003.bin",
+      "byte_order": "little",
+      "created_at_unix": 1792112955.0269246,
+      "dtype": "uint16",
+      "num_blocks": 2252,
+      "num_bytes": 9224194,
+      "num_episodes": 2301,
+      "num_tokens": 4612097,
+      "provenance": [
+        {
+          "corpus": "text/Nemotron-Math-Proofs-v2",
+          "episodes_accepted": 2000,
+          "episodes_rejected_stage0": 0,
+          "row_end": 2000,
+          "row_start": 1,
+          "source_file": "X:\\corpora\\text\\Nemotron-Math-Proofs-v2\\data\\train.jsonl"
+        },
+        {
+          "corpus": "local_ast_codebase_uta",
+          "episodes_accepted": 445,
+          "episodes_rejected_stage0": 9,
+          "row_end": 454,
+          "row_start": 1,
+          "source_file": "X:\\MCL4-COE\\src\\mcl4_coe"
+        }
+      ],
+      "receipt_file": "uta_trace_train_shard_00003.receipt.json",
+      "seq_len": 2048,
+      "sha256": "a9e05044257975f6997764ad085fd74763ddb9ab989f0b97b78aa66429f41578",
+      "shard_id": "uta_trace_train_shard_00003",
+      "split": "train",
+      "track": "uta_trace",
+      "unmasked_target_tokens": 2814625
+    },
+    {
+      "bin_file": "uta_trace_val_shard_00000.bin",
+      "byte_order": "little",
+      "created_at_unix": 1792112955.058119,
+      "dtype": "uint16",
+      "num_blocks": 136,
+      "num_bytes": 557058,
+      "num_episodes": 144,
+      "num_tokens": 278529,
+      "provenance": [],
+      "receipt_file": "uta_trace_val_shard_00000.receipt.json",
+      "seq_len": 2048,
+      "sha256": "26831ad2937372a5463835f7f79bca5eb0875f92a8a454ec6904278fd3ec0f9e",
+      "shard_id": "uta_trace_val_shard_00000",
+      "split": "val",
+      "track": "uta_trace",
+      "unmasked_target_tokens": 174518
     }
   ],
   "totals": {
-    "num_blocks": 24154,
-    "num_episodes": 62706,
-    "num_shards": 3,
-    "num_tokens": 49467395,
-    "rejected_stage0": 53345,
-    "unmasked_target_tokens": 30659475
+    "num_blocks": 26542,
+    "num_episodes": 65151,
+    "num_shards": 5,
+    "num_tokens": 54358021,
+    "rejected_stage0": 53354,
+    "train_blocks": 2252,
+    "train_tokens": 4612097,
+    "unmasked_target_tokens": 33648618,
+    "val_blocks": 136,
+    "val_tokens": 278529
   },
   "trace_markers": {
     "answer": "#A$#",

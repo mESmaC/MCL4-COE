@@ -1671,4 +1671,110 @@ def test_recurrent_depth_trajectory_pondering_and_adaptive_halting() -> None:
     assert "#U$#" in trace_adapt and "#T$#" in trace_adapt and "#A$#" in trace_adapt
 
 
+def test_pre_scaling_housekeeping_gist_conditioning_and_repo_uta_traces(tmp_path: Path) -> None:
+    from mcl4_coe import TrainingRunConfig, synthesize_repository_uta_traces
+
+    torch.manual_seed(1234)
+    # 1. Verify projection_dim auto-scaling in TrainingRunConfig
+    assert TrainingRunConfig(d_model=128).projection_dim == 32
+    assert TrainingRunConfig(d_model=384).projection_dim == 96
+    assert TrainingRunConfig(d_model=768).projection_dim == 192
+    assert TrainingRunConfig(d_model=768, projection_dim=128).projection_dim == 128
+
+    # 2. Verify end-to-end gradient flow into gist_queries, gist_norm, and abstraction_proj
+    #    plus deep recurrent trajectory supervision
+    b_cfg = MCL4CEDConfig(
+        vocab_size=260,
+        d_model=64,
+        n_heads=4,
+        n_encoder_layers=2,
+        n_decoder_layers=2,
+        ple_dim=16,
+        expert_hidden_dim=128,
+        num_experts=4,
+        top_k=2,
+        max_seq_len=128,
+        dropout=0.0,
+    )
+    c_cfg = COEConfig(projection_dim=16, gist_tokens_per_chunk=4, gist_chunk_size=16)
+    coe = CognitiveOperatorEnsemble(MCL4CEDBackbone(b_cfg), c_cfg)
+
+    # Verify legacy state_dict without gist_queries / gist_norm loads cleanly under strict=True
+    legacy_sd = {
+        k: v for k, v in coe.state_dict().items() if not (k == "gist_queries" or k.startswith("gist_norm."))
+    }
+    coe.load_state_dict(legacy_sd, strict=True)
+
+    coe.train()
+    coe.zero_grad(set_to_none=True)
+    x = torch.randint(4, 240, (2, 48), dtype=torch.long)
+    loss_dict = compute_joint_coe_loss(
+        coe,
+        lm_batch=(x, x.clone()),
+        recurrence_steps=2,
+        recurrent_kv=True,
+        depth_ponder=True,
+        deep_supervision_weight=0.25,
+        condition_on_prefix_gist=True,
+        latent_prior_scale=0.35,
+    )
+    total_loss = loss_dict.total_loss
+    assert torch.isfinite(total_loss)
+    total_loss.backward()
+
+    assert coe.gist_queries.grad is not None
+    assert float(coe.gist_queries.grad.abs().sum().item()) > 0.0
+    assert coe.gist_norm.weight.grad is not None
+    assert float(coe.gist_norm.weight.grad.abs().sum().item()) > 0.0
+    assert coe.abstraction_proj.weight.grad is not None
+    assert float(coe.abstraction_proj.weight.grad.abs().sum().item()) > 0.0
+
+    # 3. Verify strict prefix causality: mutating token (prefix_len - 1) must NOT leak backward
+    #    into prefix positions 0 .. prefix_len - 2 even when condition_on_prefix_gist=True
+    coe.eval()
+    prefix_len = max(8, min(48 // 3, 48 - 8))  # 16
+    x_a = x[:1].clone()
+    x_b = x[:1].clone()
+    x_b[0, prefix_len - 1] = (x_b[0, prefix_len - 1] + 17) % 200 + 10
+    with torch.no_grad():
+        out_a = coe.forward_inference(
+            x_a,
+            recurrence_steps=2,
+            recurrent_kv=True,
+            depth_ponder=True,
+            condition_on_prefix_gist=True,
+        )
+        out_b = coe.forward_inference(
+            x_b,
+            recurrence_steps=2,
+            recurrent_kv=True,
+            depth_ponder=True,
+            condition_on_prefix_gist=True,
+        )
+    # Prefix tokens 0 .. prefix_len - 2 must have 0-diff logits (zero lookahead leakage)
+    max_prefix_leak = float((out_a.logits[:, : prefix_len - 1] - out_b.logits[:, : prefix_len - 1]).abs().max().item())
+    assert max_prefix_leak < 1e-5, f"Lookahead leakage detected inside prefix: {max_prefix_leak}"
+    # Continuation tokens >= prefix_len must differ because gist_state and latent_prior encode prefix_len - 1
+    cont_diff = float((out_a.logits[:, prefix_len:] - out_b.logits[:, prefix_len:]).abs().max().item())
+    assert cont_diff > 1e-4
+
+    # 4. Verify AST-grounded repository UTA trace synthesis
+    sample_repo = tmp_path / "repo"
+    sample_repo.mkdir(parents=True, exist_ok=True)
+    (sample_repo / "module_a.py").write_text(
+        'class SampleRouter:\n'
+        '    """Routes tokens across local context pages."""\n'
+        '    def route_pages(self, query_vec: list[float], top_k: int = 2) -> list[int]:\n'
+        '        """Return top-k page indices."""\n'
+        '        if top_k <= 0:\n'
+        '            return []\n'
+        '        return list(range(min(len(query_vec), top_k)))\n',
+        encoding="utf-8",
+    )
+    traces = synthesize_repository_uta_traces(sample_repo, max_episodes=16)
+    assert len(traces) >= 2
+    assert any("SampleRouter" in u or "route_pages" in u for u, _, _ in traces)
+
+
+
 

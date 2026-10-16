@@ -108,6 +108,8 @@ class COEConfig:
     recurrence_steps: int = 1
     depth_ponder: bool = False
     margin_halt_threshold: float | None = None
+    gist_tokens_per_chunk: int = 6
+    gist_chunk_size: int = 192
     strip_boundary_tokens_in_pool: bool = True
     bos_id: int = 257
     eos_id: int = 258
@@ -127,6 +129,8 @@ class COEConfig:
         _positive_finite(self.eps, "eps")
         if isinstance(self.recurrence_steps, bool) or self.recurrence_steps < 1:
             raise ValueError("recurrence_steps must be >= 1")
+        if isinstance(self.gist_tokens_per_chunk, bool) or self.gist_tokens_per_chunk < 1:
+            raise ValueError("gist_tokens_per_chunk must be >= 1")
 
 
 @dataclass
@@ -506,6 +510,45 @@ class CognitiveOperatorEnsemble(nn.Module):
         nn.init.normal_(self.deduction_query_proj.weight, std=proj_std)
         nn.init.normal_(self.meta_query_proj.weight, std=proj_std)
         nn.init.normal_(self.abstraction_proj.weight, std=proj_std)
+
+        # Persistent ContextLMCompressor soft gist queries & LayerNorm trained end-to-end
+        self.gist_norm = nn.LayerNorm(d_model)
+        self.gist_queries = nn.Parameter(
+            torch.empty(self.config.gist_tokens_per_chunk, d_model)
+        )
+        nn.init.normal_(self.gist_queries, std=0.02)
+
+    def _load_from_state_dict(
+        self,
+        state_dict: dict,
+        prefix: str,
+        local_metadata: dict,
+        strict: bool,
+        missing_keys: list[str],
+        unexpected_keys: list[str],
+        error_msgs: list[str],
+    ) -> None:
+        for opt_key, param in (
+            ("gist_queries", self.gist_queries),
+            ("gist_norm.weight", self.gist_norm.weight),
+            ("gist_norm.bias", self.gist_norm.bias),
+        ):
+            full_key = prefix + opt_key
+            if full_key not in state_dict:
+                state_dict[full_key] = param.detach().clone()
+            elif state_dict[full_key].shape != param.shape and opt_key == "gist_queries":
+                self.gist_queries = nn.Parameter(
+                    torch.empty_like(state_dict[full_key], device=param.device, dtype=param.dtype)
+                )
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
+        )
 
     def _similarity(self, left: Tensor, right: Tensor) -> Tensor:
         if self.config.metric == "pearson":
@@ -1288,6 +1331,88 @@ class CognitiveOperatorEnsemble(nn.Module):
             targets=targets,
         )
 
+    def compress_gist_context(
+        self,
+        token_ids: Tensor,
+        valid_mask: Tensor | None = None,
+        *,
+        chunk_size: int | None = None,
+        gist_prefix_len: int = 0,
+    ) -> EncodedState:
+        """Fold a context sequence `[B, L]` into recurrent soft gist tokens `[B, N_gist, d_model]`."""
+        batch_size, total_len = token_ids.shape
+        if valid_mask is None:
+            valid_mask = token_ids != self.backbone.config.pad_id
+        c_sz = max(4, int(chunk_size or self.config.gist_chunk_size))
+        d_model = self.backbone.config.d_model
+        n_gist_per_chunk = self.gist_queries.shape[0]
+
+        gist_chunks: list[Tensor] = []
+        gist_valids: list[Tensor] = []
+        running_gist: Tensor | None = None
+        total_aux = token_ids.new_zeros((), dtype=torch.float32)
+        total_z = token_ids.new_zeros((), dtype=torch.float32)
+        loads: list[Tensor] = []
+
+        for start in range(0, total_len, c_sz):
+            end = min(total_len, start + c_sz)
+            c_ids = token_ids[:, start:end]
+            c_val = valid_mask[:, start:end]
+            if not c_val.any():
+                continue
+
+            row_has_valid = c_val.any(dim=-1)
+            c_val_safe = c_val.clone()
+            c_val_safe[~row_has_valid, 0] = True
+
+            enc = self.backbone.encode_state(c_ids, c_val_safe, causal=False)
+            total_aux = total_aux + enc.aux_loss
+            total_z = total_z + enc.router_z_loss
+            loads.append(enc.expert_load)
+
+            q = self.gist_queries.unsqueeze(0).expand(batch_size, -1, -1).to(enc.hidden.dtype)
+            scores = torch.matmul(q.float(), enc.hidden.float().transpose(-1, -2)) / math.sqrt(
+                d_model
+            )
+            scores = scores.masked_fill(~c_val_safe.unsqueeze(1), -1e9)
+            attn = F.softmax(scores, dim=-1).to(enc.hidden.dtype)
+            pooled = torch.matmul(attn, enc.hidden).float()
+            chunk_gist = (
+                0.85 * pooled + 0.15 * self.gist_norm(pooled.to(self.gist_norm.weight.dtype)).float()
+            ).to(enc.hidden.dtype)
+
+            chunk_has_valid = row_has_valid.unsqueeze(-1).expand(batch_size, n_gist_per_chunk)
+            chunk_gist = chunk_gist.masked_fill(~chunk_has_valid.unsqueeze(-1), 0)
+            if running_gist is not None:
+                safe_valid = chunk_has_valid.clone()
+                safe_valid[~row_has_valid, 0] = True
+                updated_gist = self.backbone.feedback(chunk_gist, running_gist, valid=safe_valid)
+                chunk_gist = torch.where(
+                    chunk_has_valid.unsqueeze(-1),
+                    0.75 * chunk_gist + 0.25 * updated_gist,
+                    running_gist,
+                )
+            running_gist = chunk_gist
+            gist_chunks.append(chunk_gist)
+            gist_valids.append(chunk_has_valid)
+
+        if not gist_chunks:
+            fallback_valid = valid_mask[:, :1].clone()
+            fallback_valid[:, 0] = True
+            return self.backbone.encode_state(token_ids[:, :1], fallback_valid, causal=False)
+
+        compressed_hidden = torch.cat(gist_chunks, dim=1)
+        compressed_valid = torch.cat(gist_valids, dim=1)
+        avg_load = torch.stack(loads, dim=0).mean(dim=0)
+        return EncodedState(
+            hidden=compressed_hidden,
+            valid=compressed_valid,
+            aux_loss=total_aux / max(1, len(loads)),
+            router_z_loss=total_z / max(1, len(loads)),
+            expert_load=avg_load,
+            gist_prefix_len=int(gist_prefix_len),
+        )
+
     def forward_inference(
         self,
         input_ids: Tensor,
@@ -1298,6 +1423,10 @@ class CognitiveOperatorEnsemble(nn.Module):
         latent_prior_scale: float = 0.0,
         recurrent_kv: bool = False,
         depth_ponder: bool | None = None,
+        gist_state: EncodedState | None = None,
+        prior_start_pos: int = 0,
+        deep_supervision_weight: float = 0.0,
+        condition_on_prefix_gist: bool = False,
     ):
         """Operator 9 (`Inference`): Autoregressive `U$ -> T$ -> A$` synthesis on the shared backbone."""
         use_ponder = self.config.depth_ponder if depth_ponder is None else depth_ponder
@@ -1309,13 +1438,41 @@ class CognitiveOperatorEnsemble(nn.Module):
             )
         else:
             steps = recurrence_steps
+
+        eff_gist = gist_state
+        eff_prior = latent_prior
+        eff_scale = latent_prior_scale
+        eff_start = prior_start_pos
+        if condition_on_prefix_gist and input_ids.shape[1] >= 12 and eff_gist is None:
+            pref_len = max(4, min(input_ids.shape[1] // 3, int(self.config.gist_chunk_size)))
+            pref_ids = input_ids[:, :pref_len]
+            pref_valid = pref_ids != self.backbone.config.pad_id
+            if not pref_valid.any(dim=-1).all():
+                pref_valid = pref_valid.clone()
+                pref_valid[:, 0] = True
+            eff_gist = self.compress_gist_context(
+                pref_ids,
+                pref_valid,
+                chunk_size=max(4, pref_len // 2),
+                gist_prefix_len=pref_len,
+            )
+            if eff_prior is None:
+                pref_lengths = pref_valid.sum(dim=-1).clamp_min(1)
+                eff_prior = self.compress_abstraction(pref_ids, pref_lengths, level="detailed")
+                if eff_scale == 0.0:
+                    eff_scale = 0.18
+            eff_start = pref_len
+
         return self.backbone.forward(
             input_ids,
             targets=targets,
             recurrence_steps=steps,
-            latent_prior=latent_prior,
-            latent_prior_scale=latent_prior_scale,
+            latent_prior=eff_prior,
+            latent_prior_scale=eff_scale,
             recurrent_kv=recurrent_kv,
             depth_ponder=use_ponder,
+            gist_state=eff_gist,
+            prior_start_pos=eff_start,
+            deep_supervision_weight=deep_supervision_weight,
         )
 

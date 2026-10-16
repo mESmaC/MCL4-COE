@@ -1530,11 +1530,17 @@ class CodebaseWarmupEngine:
         file_addresses: dict[str, str] = {}
 
         d_model = int(coe.backbone.config.d_model)
+        n_gist_per_chunk = int(getattr(coe.config, "gist_tokens_per_chunk", 6))
         context_compressor = ContextLMCompressor(
             d_model=d_model,
             chunk_size=max_len,
-            gist_tokens_per_chunk=6,
+            gist_tokens_per_chunk=n_gist_per_chunk,
         ).to(device=device)
+        if hasattr(coe, "gist_queries") and coe.gist_queries.shape == context_compressor.gist_queries.shape:
+            with torch.no_grad():
+                context_compressor.gist_queries.copy_(coe.gist_queries.detach().to(device=device))
+                context_compressor.gist_norm.weight.copy_(coe.gist_norm.weight.detach().to(device=device))
+                context_compressor.gist_norm.bias.copy_(coe.gist_norm.bias.detach().to(device=device))
         base_compressor_state = {
             name: param.detach().cpu().clone()
             for name, param in context_compressor.named_parameters()
@@ -2925,5 +2931,115 @@ class CodebaseWarmupEngine:
             micro_warmup_loss=round(micro_loss_val, 4),
             elapsed_ms=round(elapsed_ms, 2),
         )
+
+
+def synthesize_repository_uta_traces(
+    repo_root: str | Path,
+    *,
+    subsystems: Sequence[str] = ("src",),
+    max_symbol_lines: int = 16,
+    max_episodes: int = 512,
+) -> list[tuple[str, str, str]]:
+    """Synthesize AST-grounded `(prompt, thought, answer)` codebase episodes from `repo_root`.
+
+    Generates both:
+    1. **Architecture & Call-Graph Localization traces**: `#U$#` asks to locate and explain a module/symbol;
+       `#T$#` traces the `A.TXY` address, call-graph edges, and focal invariant; `#A$#` provides the
+       grounded symbol explanation and source implementation.
+    2. **Bug Discrimination & Invariant Repair traces**: `#U$#` presents a candidate mutated line;
+       `#T$#` identifies the violated focal invariant against the AST ground truth; `#A$#` provides
+       the verified repair.
+    """
+    root = Path(repo_root).expanduser().resolve()
+    if not root.is_dir():
+        return []
+    store = index_python_repo_to_atxy(root, subsystems=subsystems)
+    file_recs = [r for r in store.records() if r.parsed_address.A == 2]
+    if not file_recs and tuple(subsystems) == ("src",):
+        store = index_python_repo_to_atxy(root, subsystems=(".",))
+        file_recs = [r for r in store.records() if r.parsed_address.A == 2]
+    episodes: list[tuple[str, str, str]] = []
+
+    for frec in file_recs:
+        fpath = root / frec.payload
+        if not fpath.is_file():
+            continue
+        src_text = fpath.read_text(encoding="utf-8", errors="replace")
+        src_lines = src_text.splitlines()
+        try:
+            tree = ast.parse(src_text)
+            ast_map = {
+                node.name: node
+                for node in tree.body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            }
+        except SyntaxError:
+            ast_map = {}
+
+        for s_addr in frec.down:
+            srec = store.lookup(s_addr)
+            if srec is None:
+                continue
+            sym_name = srec.payload.split(":")[-1]
+            node = ast_map.get(sym_name)
+            if node is not None:
+                start_ln = max(0, int(getattr(node, "lineno", 1)) - 1)
+                end_ln = min(
+                    len(src_lines),
+                    int(getattr(node, "end_lineno", start_ln + max_symbol_lines)),
+                    start_ln + max_symbol_lines,
+                )
+                snippet = "\n".join(src_lines[start_ln:end_ln]).strip()
+            else:
+                snippet = f"def {sym_name}(): # {srec.summary}"
+
+            _, focal_stmt = _extract_focal_line_and_context(snippet)
+            focal_inv = _summarize_code_invariants(focal_stmt)
+            callee_addrs = srec.rels.get("CALLS", ())
+            callee_names = [
+                store.lookup(ca).payload.split(":")[-1]
+                for ca in callee_addrs[:4]
+                if store.lookup(ca) is not None
+            ]
+            callee_str = (
+                f" Downstream callees: {', '.join(callee_names)}."
+                if callee_names
+                else ""
+            )
+
+            # 1. Architecture & Call-Graph Localization Episode
+            u_arch = f"Locate `{sym_name}` in `{frec.payload}` and explain its implementation invariant."
+            t_arch = (
+                f"Target `{frec.payload}:{sym_name}` at A.TXY `{srec.address}` ({srec.summary}). "
+                f"Focal statement: `{focal_stmt}`. Invariant: {focal_inv}.{callee_str}"
+            )
+            a_arch = (
+                f"`{sym_name}` in `{frec.payload}` ({srec.summary}) enforces {focal_inv} via `{focal_stmt}`:\n"
+                f"{snippet}"
+            )
+            episodes.append((u_arch, t_arch, a_arch))
+            if len(episodes) >= max_episodes:
+                return episodes
+
+            # 2. Bug Verification & Repair Episode
+            muts = _mutate_focal_line(focal_stmt, mode="train")
+            if muts:
+                bug_line = muts[0]
+                u_bug = (
+                    f"In `{frec.payload}:{sym_name}`, verify whether `{bug_line}` preserves the symbol's invariant."
+                )
+                t_bug = (
+                    f"Checking `{frec.payload}:{sym_name}` (`{srec.address}`): required invariant is {focal_inv}. "
+                    f"Candidate `{bug_line}` corrupts the authentic focal statement `{focal_stmt}`."
+                )
+                a_bug = (
+                    f"`{bug_line}` violates the invariant of `{sym_name}` ({focal_inv}). "
+                    f"Restore `{focal_stmt}` in `{frec.payload}`:\n{snippet}"
+                )
+                episodes.append((u_bug, t_bug, a_bug))
+                if len(episodes) >= max_episodes:
+                    return episodes
+
+    return episodes
 
 

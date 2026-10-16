@@ -55,6 +55,7 @@ from mcl4_coe import (
     list_checkpoints,
     parse_mcqa_decision_fields,
     prepare_model,
+    synthesize_repository_uta_traces,
 )
 from mcl4_coe.curation import sanitize_trace_markers
 
@@ -421,6 +422,25 @@ def build_cloud_shards(
                 track_accepted += accepted
                 track_rejected += rejected
                 print(f"  -> accepted={accepted:,}, rejected_stage0={rejected:,}")
+
+        if track == "uta_trace":
+            repo_eps = synthesize_repository_uta_traces(REPO_ROOT, max_episodes=256)
+            repo_acc = 0
+            for idx_ep, (u_p, t_r, a_r) in enumerate(repo_eps):
+                target_w = val_writer if (idx_ep % 10 == 0) else train_writer
+                if target_w.add_uta_episode(u_p, t_r, a_r):
+                    repo_acc += 1
+            if repo_acc > 0:
+                train_writer.record_provenance(
+                    corpus="local_ast_codebase_uta",
+                    source_file=str(REPO_ROOT / "src" / "mcl4_coe"),
+                    row_start=1,
+                    row_end=len(repo_eps),
+                    episodes_accepted=repo_acc,
+                    episodes_rejected_stage0=len(repo_eps) - repo_acc,
+                )
+                track_accepted += repo_acc
+                print(f"  [local_ast_codebase_uta] -> accepted={repo_acc:,} AST-grounded repository episodes")
 
         train_writer.flush_shard()
         val_writer.flush_shard()
@@ -954,7 +974,13 @@ def evaluate_trained_checkpoint(
     b_cfg = MCL4CEDConfig(**payload["backbone_config"])
     c_cfg = COEConfig(**payload["coe_config"])
     model = CognitiveOperatorEnsemble(MCL4CEDBackbone(b_cfg), c_cfg)
-    model.load_state_dict(payload["model_state"])
+    model.load_state_dict(payload["model_state"], strict=False)
+    saved_pairs = payload.get("mitotic_pairs")
+    if isinstance(saved_pairs, list) and saved_pairs:
+        parsed_pairs = [(int(p[0]), int(p[1])) for p in saved_pairs if len(p) == 2]
+        for layer in list(model.backbone.encoder_layers) + list(model.backbone.decoder_layers):
+            if not layer.moe.mitotic_pairs:
+                layer.moe.mitotic_pairs = list(parsed_pairs)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device).eval()
 
@@ -1122,6 +1148,12 @@ def main() -> None:
     p_train.add_argument("--mitosis-every", type=int, default=300)
     p_train.add_argument("--mitosis-step-size", type=int, default=2)
     p_train.add_argument("--recurrence-steps", type=int, default=1)
+    p_train.add_argument("--recurrent-kv", action="store_true")
+    p_train.add_argument("--depth-ponder", action="store_true")
+    p_train.add_argument("--deep-supervision-weight", type=float, default=0.20)
+    p_train.add_argument("--projection-dim", type=int, default=0)
+    p_train.add_argument("--enable-gist-conditioning", action="store_true")
+    p_train.add_argument("--gist-conditioning-prob", type=float, default=0.50)
     p_train.add_argument("--batch-size", type=int, default=8)
     p_train.add_argument("--micro-batch-size", type=int, default=4)
     p_train.add_argument("--ornith-warmup-ratio", type=float, default=0.80)
@@ -1173,6 +1205,7 @@ def main() -> None:
         )
         print(json.dumps({k: str(v) for k, v in receipts.items()}, indent=2))
     elif args.cmd == "train":
+        proj_dim = args.projection_dim if args.projection_dim > 0 else max(32, args.d_model // 4)
         cfg = TrainingRunConfig(
             run_id=args.run_id,
             shards_root=args.shards_root,
@@ -1197,6 +1230,12 @@ def main() -> None:
             mitosis_every=args.mitosis_every,
             mitosis_step_size=args.mitosis_step_size,
             recurrence_steps=args.recurrence_steps,
+            recurrent_kv=bool(args.recurrent_kv),
+            depth_ponder=bool(args.depth_ponder),
+            deep_supervision_weight=args.deep_supervision_weight,
+            projection_dim=proj_dim,
+            enable_gist_conditioning=bool(args.enable_gist_conditioning or args.d_model >= 256),
+            gist_conditioning_prob=args.gist_conditioning_prob,
             use_nvfp4=bool(args.use_nvfp4),
             batch_size=args.batch_size,
             micro_batch_size=args.micro_batch_size,

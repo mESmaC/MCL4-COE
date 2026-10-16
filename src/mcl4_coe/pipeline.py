@@ -1932,6 +1932,19 @@ def ensure_sharded_tracks_ready(
             )
         elif t_name == "uta_trace":
             accepted = 0
+            if seq_len >= 256:
+                try:
+                    from .context_memory import synthesize_repository_uta_traces
+
+                    repo_eps = synthesize_repository_uta_traces(
+                        Path(__file__).resolve().parents[2],
+                        max_episodes=64,
+                    )
+                    for u_r, t_r, a_r in repo_eps:
+                        if writer.add_uta_episode(u_r, t_r, a_r):
+                            accepted += 1
+                except Exception:
+                    pass
             for i in range(1, 96):
                 a = 3 + (i * 7) % 23
                 b = 2 + (i * 11) % 17

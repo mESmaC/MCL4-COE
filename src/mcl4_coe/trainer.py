@@ -112,6 +112,8 @@ class TrainingRunConfig:
         self.runs_root = str(resolve_runs_root(self.runs_root))
         self.shards_root = str(resolve_shards_root(self.shards_root))
         self.corpora_root = str(resolve_corpora_root(self.corpora_root))
+        if self.projection_dim == 32 and self.d_model > 128 and not self.resume_checkpoint:
+            self.projection_dim = max(32, self.d_model // 4)
 
     # Model architecture
     vocab_size: int = 260
@@ -130,6 +132,12 @@ class TrainingRunConfig:
     max_seq_len: int = 2048
     projection_dim: int = 32
     recurrence_steps: int = 1
+    recurrent_kv: bool = False
+    depth_ponder: bool = False
+    deep_supervision_weight: float = 0.20
+    enable_gist_conditioning: bool = False
+    gist_conditioning_prob: float = 0.50
+    latent_prior_scale: float = 0.18
     use_nvfp4: bool = False
     nvfp4_sparsity_mode: str = "2to4_transposable"
     nvfp4_sr_ste_decay: float = 1e-4
@@ -624,6 +632,7 @@ class MCL4COETrainer:
             projection_dim=self.config.projection_dim,
             initial_scale=5.0,
             recurrence_steps=self.config.recurrence_steps,
+            depth_ponder=self.config.depth_ponder,
         )
         self.model = CognitiveOperatorEnsemble(
             MCL4CEDBackbone(self.backbone_cfg),
@@ -1300,19 +1309,35 @@ class MCL4COETrainer:
                     sum(self.tokenizer.count_utf8_bytes(mb["labels"]) for mb in micro_batches),
                 )
 
-                for mb, mb_toks in zip(micro_batches, mb_token_counts):
+                for mb_idx, (mb, mb_toks) in enumerate(zip(micro_batches, mb_token_counts)):
                     inp = mb["input_ids"].to(self.device, non_blocking=True)
                     lbl = mb["labels"].to(self.device, non_blocking=True)
                     t_ids = mb["track_ids"].to(self.device, non_blocking=True)
                     step_tokens_gpu = step_tokens_gpu + mb_toks
                     mb_frac = float(mb_toks) / float(total_mb_tokens)
+                    use_gist_mb = bool(
+                        self.config.enable_gist_conditioning
+                        and self.config.gist_conditioning_prob > 0.0
+                        and (((step + mb_idx) * 2654435761) % 1000)
+                        < int(self.config.gist_conditioning_prob * 1000)
+                    )
 
                     with torch.autocast(
                         device_type=self.device.type,
                         dtype=torch.bfloat16,
                         enabled=use_amp,
                     ):
-                        lm_out = self.model.forward_inference(inp, targets=lbl)
+                        lm_out = self.model.forward_inference(
+                            inp,
+                            targets=lbl,
+                            recurrent_kv=self.config.recurrent_kv,
+                            depth_ponder=self.config.depth_ponder,
+                            deep_supervision_weight=self.config.deep_supervision_weight,
+                            condition_on_prefix_gist=use_gist_mb,
+                            latent_prior_scale=(
+                                self.config.latent_prior_scale if use_gist_mb else 0.0
+                            ),
+                        )
                         assert lm_out.loss is not None and lm_out.ce_loss is not None
                         lm_scale = mb_frac
                         scaled_lm_loss = lm_out.loss * lm_scale
@@ -1687,6 +1712,10 @@ def evaluate_checkpoint_prompt(
     c_cfg = COEConfig(**payload["coe_config"])
     model = CognitiveOperatorEnsemble(MCL4CEDBackbone(b_cfg), c_cfg)
     model.load_state_dict(payload["model_state"], strict=False)
+    mp_list = [tuple(pair) for pair in payload.get("mitotic_pairs", [])]
+    if mp_list and model.backbone.encoder_layers and not model.backbone.encoder_layers[0].moe.mitotic_pairs:
+        for layer in list(model.backbone.encoder_layers) + list(model.backbone.decoder_layers):
+            layer.moe.mitotic_pairs = list(mp_list)
     model.to(device).eval()
 
     controller = MultiPassController(model)

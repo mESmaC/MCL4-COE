@@ -91,6 +91,7 @@ class EncodedState:
     aux_loss: Tensor
     router_z_loss: Tensor
     expert_load: Tensor
+    gist_prefix_len: int = 0
 
 
 @dataclass
@@ -221,16 +222,26 @@ class SparseMoE(nn.Module):
             probabilities = F.softmax(router_logits, dim=-1)
             routed_probs = probabilities
             if self.mitotic_pairs:
-                routed_probs = probabilities.clone()
-                for p_idx, c_idx in self.mitotic_pairs:
-                    if 0 <= p_idx < self.num_experts and 0 <= c_idx < self.num_experts and p_idx != c_idx:
-                        p_wins = router_logits[:, p_idx] >= router_logits[:, c_idx]
-                        routed_probs[:, c_idx] = torch.where(
-                            p_wins, torch.zeros_like(routed_probs[:, c_idx]), probabilities[:, c_idx]
-                        )
-                        routed_probs[:, p_idx] = torch.where(
-                            p_wins, probabilities[:, p_idx], torch.zeros_like(routed_probs[:, p_idx])
-                        )
+                valid_pairs = [
+                    (p_idx, c_idx)
+                    for p_idx, c_idx in self.mitotic_pairs
+                    if 0 <= p_idx < self.num_experts and 0 <= c_idx < self.num_experts and p_idx != c_idx
+                ]
+                if valid_pairs:
+                    routed_probs = probabilities.clone()
+                    p_t = torch.tensor([p for p, _ in valid_pairs], dtype=torch.long, device=x.device)
+                    c_t = torch.tensor([c for _, c in valid_pairs], dtype=torch.long, device=x.device)
+                    p_wins = router_logits.index_select(1, p_t) >= router_logits.index_select(1, c_t)
+                    routed_probs[:, c_t] = torch.where(
+                        p_wins,
+                        torch.zeros_like(p_wins, dtype=routed_probs.dtype),
+                        probabilities.index_select(1, c_t),
+                    )
+                    routed_probs[:, p_t] = torch.where(
+                        p_wins,
+                        probabilities.index_select(1, p_t),
+                        torch.zeros_like(p_wins, dtype=routed_probs.dtype),
+                    )
             weights, selected = routed_probs.topk(self.top_k, dim=-1)
             weights = weights / weights.sum(dim=-1, keepdim=True)
             one_hot_sel = F.one_hot(selected, num_classes=self.num_experts)
@@ -483,9 +494,10 @@ class CEDDecoderLayer(nn.Module):
         else:
             allowed = s_valid[:, None, None, :].expand(r, 1, t_cand, t_state)
             if causal_cross and causal_cross_mask is None:
+                diag = max(0, t_state - t_cand)
                 causal_cross_mask = torch.ones(
                     1, 1, t_cand, t_state, dtype=torch.bool, device=q_norm.device
-                ).tril()
+                ).tril(diagonal=diag)
             if causal_cross_mask is not None:
                 allowed = allowed & causal_cross_mask
             # Prevent all-False rows if a state row were ever completely masked.
@@ -689,11 +701,23 @@ class MCL4CEDBackbone(nn.Module):
                 recurrent_kv
                 and step > 0
                 and owner_rows is None
-                and x.shape == encoded_state.hidden.shape
+                and encoded_state.hidden.shape[0] == x.shape[0]
+                and encoded_state.hidden.shape[1] >= x.shape[1]
             ):
-                kv_state = self.encoder_norm(0.70 * encoded_state.hidden + 0.30 * x).masked_fill(
-                    ~encoded_state.valid.unsqueeze(-1), 0
-                )
+                t_seq = x.shape[1]
+                t_tot = encoded_state.hidden.shape[1]
+                if t_tot == t_seq:
+                    kv_state = self.encoder_norm(0.70 * encoded_state.hidden + 0.30 * x).masked_fill(
+                        ~encoded_state.valid.unsqueeze(-1), 0
+                    )
+                else:
+                    n_prefix = t_tot - t_seq
+                    seq_part = self.encoder_norm(
+                        0.70 * encoded_state.hidden[:, n_prefix:] + 0.30 * x
+                    )
+                    kv_state = torch.cat(
+                        (encoded_state.hidden[:, :n_prefix], seq_part), dim=1
+                    ).masked_fill(~encoded_state.valid.unsqueeze(-1), 0)
                 step_kv_cache = [
                     layer.project_global_kv(kv_state) for layer in self.decoder_layers
                 ]
@@ -767,6 +791,8 @@ class MCL4CEDBackbone(nn.Module):
         latent_prior_scale: float = 0.0,
         recurrent_kv: bool = False,
         depth_ponder: bool = False,
+        gist_state: EncodedState | None = None,
+        prior_start_pos: int = 0,
     ) -> BackboneOutput:
         """Causal full-sequence pass through lower encoder and upper CED decoder."""
         valid = input_ids != self.config.pad_id
@@ -783,22 +809,70 @@ class MCL4CEDBackbone(nn.Module):
             if prior.ndim == 2:
                 prior = prior.unsqueeze(1)
             prior_normed = self.encoder_norm(prior)
-            steered_hidden = self.encoder_norm(
-                encoded.hidden + float(latent_prior_scale) * prior_normed
-            ).masked_fill(~valid.unsqueeze(-1), 0)
+            if prior_start_pos > 0 and prior_start_pos < encoded.hidden.shape[1]:
+                pos_mask = (
+                    torch.arange(encoded.hidden.shape[1], device=encoded.hidden.device)
+                    >= int(prior_start_pos)
+                ).view(1, -1, 1)
+                steered_raw = torch.where(
+                    pos_mask,
+                    encoded.hidden + float(latent_prior_scale) * prior_normed,
+                    encoded.hidden,
+                )
+            else:
+                steered_raw = encoded.hidden + float(latent_prior_scale) * prior_normed
+            steered_hidden = self.encoder_norm(steered_raw).masked_fill(~valid.unsqueeze(-1), 0)
             state_for_kv = EncodedState(
                 hidden=steered_hidden,
                 valid=encoded.valid,
                 aux_loss=encoded.aux_loss,
                 router_z_loss=encoded.router_z_loss,
                 expert_load=encoded.expert_load,
+                gist_prefix_len=int(prior_start_pos),
             )
+
+        causal_cross_mask: Tensor | None = None
+        if gist_state is not None and gist_state.hidden.shape[1] > 0:
+            bsz, t_cand, _ = state_for_kv.hidden.shape
+            g_hid = gist_state.hidden.to(
+                device=state_for_kv.hidden.device, dtype=state_for_kv.hidden.dtype
+            )
+            g_val = gist_state.valid.to(device=state_for_kv.valid.device, dtype=torch.bool)
+            if g_hid.shape[0] == 1 and bsz > 1:
+                g_hid = g_hid.expand(bsz, -1, -1)
+                g_val = g_val.expand(bsz, -1)
+            g_normed = self.encoder_norm(g_hid).masked_fill(~g_val.unsqueeze(-1), 0)
+            n_gist = g_normed.shape[1]
+            eff_prefix_len = max(0, int(prior_start_pos or gist_state.gist_prefix_len))
+            q_positions = torch.arange(t_cand, device=input_ids.device)[:, None]
+            gist_allowed = (q_positions >= eff_prefix_len).expand(t_cand, n_gist)
+            seq_allowed = torch.ones(
+                t_cand, t_cand, dtype=torch.bool, device=input_ids.device
+            ).tril()
+            causal_cross_mask = torch.cat((gist_allowed, seq_allowed), dim=-1).view(
+                1, 1, t_cand, n_gist + t_cand
+            )
+            state_for_kv = EncodedState(
+                hidden=torch.cat((g_normed, state_for_kv.hidden), dim=1),
+                valid=torch.cat((g_val, state_for_kv.valid), dim=1),
+                aux_loss=0.5 * (
+                    state_for_kv.aux_loss + gist_state.aux_loss.to(state_for_kv.aux_loss.device)
+                ),
+                router_z_loss=0.5 * (
+                    state_for_kv.router_z_loss
+                    + gist_state.router_z_loss.to(state_for_kv.router_z_loss.device)
+                ),
+                expert_load=state_for_kv.expert_load,
+                gist_prefix_len=eff_prefix_len,
+            )
+
         decoded = self.decode_candidates(
             state_for_kv,
             input_ids,
             valid,
             recurrence_steps=recurrence_steps,
             causal_local=True,
+            causal_cross_mask=causal_cross_mask,
             causal_cross=True,
             candidate_encoded=encoded,
             recurrent_kv=recurrent_kv,
@@ -824,6 +898,9 @@ class MCL4CEDBackbone(nn.Module):
         latent_prior_scale: float = 0.0,
         recurrent_kv: bool = False,
         depth_ponder: bool = False,
+        gist_state: EncodedState | None = None,
+        prior_start_pos: int = 0,
+        deep_supervision_weight: float = 0.0,
     ) -> CausalLMOutput:
         """Autoregressive `U$ -> T$ -> A$` language modeling pass."""
         if targets is not None and targets.shape != input_ids.shape:
@@ -835,22 +912,37 @@ class MCL4CEDBackbone(nn.Module):
             latent_prior_scale=latent_prior_scale,
             recurrent_kv=recurrent_kv,
             depth_ponder=depth_ponder,
+            gist_state=gist_state,
+            prior_start_pos=prior_start_pos,
         )
         logits = self.lm_head(encoded.hidden)
         ce_loss, loss = None, None
         if targets is not None:
+            valid_tok_count = targets.ne(-100).sum().clamp_min(1)
             ce_sum = F.cross_entropy(
                 logits.float().reshape(-1, self.config.vocab_size),
                 targets.reshape(-1),
                 ignore_index=-100,
                 reduction="sum",
             )
-            ce_loss = ce_sum / targets.ne(-100).sum().clamp_min(1)
+            ce_loss = ce_sum / valid_tok_count
             loss = (
                 ce_loss
                 + self.config.aux_loss_coef * encoded.aux_loss
                 + self.config.router_z_loss_coef * encoded.router_z_loss
             )
+            if deep_supervision_weight > 0.0 and len(encoded.step_states) > 1:
+                step_ces: list[Tensor] = []
+                for s_r in encoded.step_states:
+                    l_r = self.lm_head(s_r)
+                    s_sum = F.cross_entropy(
+                        l_r.float().reshape(-1, self.config.vocab_size),
+                        targets.reshape(-1),
+                        ignore_index=-100,
+                        reduction="sum",
+                    )
+                    step_ces.append(s_sum / valid_tok_count)
+                loss = loss + float(deep_supervision_weight) * torch.stack(step_ces).mean()
         return CausalLMOutput(
             logits=logits,
             loss=loss,

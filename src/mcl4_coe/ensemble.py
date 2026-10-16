@@ -397,6 +397,7 @@ class MultiPassController(nn.Module):
         adaptive_recurrent_depth: bool = False,
         max_recurrence_steps: int = 3,
         recurrent_entropy_threshold: float = 1.5,
+        gist_state: Any | None = None,
     ) -> str:
         """Synthesize a `#U$# -> #T$# -> #A$#` trace, guaranteeing complete `#T$#` and `#A$#` segments."""
         was_training = self.coe.training
@@ -569,6 +570,7 @@ class MultiPassController(nn.Module):
                             latent_prior_scale=latent_prior_scale,
                             recurrent_kv=False,
                             depth_ponder=False,
+                            gist_state=gist_state,
                         )
                         p1 = torch.softmax(out.logits[0, -1, :logit_bound].float(), dim=-1)
                         ent1 = float((-(p1 * p1.clamp_min(1e-9).log()).sum()).item())
@@ -580,6 +582,7 @@ class MultiPassController(nn.Module):
                                 latent_prior_scale=latent_prior_scale,
                                 recurrent_kv=recurrent_kv,
                                 depth_ponder=True if depth_ponder is None else depth_ponder,
+                                gist_state=gist_state,
                             )
                     else:
                         out = self.coe.forward_inference(
@@ -589,6 +592,7 @@ class MultiPassController(nn.Module):
                             latent_prior_scale=latent_prior_scale,
                             recurrent_kv=recurrent_kv,
                             depth_ponder=depth_ponder,
+                            gist_state=gist_state,
                         )
                 next_logits = out.logits[0, -1, :logit_bound].float()
 
@@ -1755,6 +1759,12 @@ def compute_joint_coe_loss(
     evaluation_batch: dict[str, Tensor] | None = None,
     metacognition_batch: dict[str, Tensor] | None = None,
     weights: dict[str, float] | None = None,
+    condition_on_prefix_gist: bool = False,
+    latent_prior_scale: float = 0.0,
+    recurrence_steps: int | None = None,
+    recurrent_kv: bool = False,
+    depth_ponder: bool | None = None,
+    deep_supervision_weight: float = 0.0,
 ) -> JointCOELossOutput:
     """Compute Stage-2 joint multi-task loss across `U$ -> T$ -> A$` LM and COE operators."""
     w = {
@@ -1776,13 +1786,22 @@ def compute_joint_coe_loss(
 
     if lm_batch is not None:
         inp, tgt = lm_batch
-        lm_out = coe.forward_inference(inp, targets=tgt)
+        lm_out = coe.forward_inference(
+            inp,
+            targets=tgt,
+            condition_on_prefix_gist=condition_on_prefix_gist,
+            latent_prior_scale=latent_prior_scale,
+            recurrence_steps=recurrence_steps,
+            recurrent_kv=recurrent_kv,
+            depth_ponder=depth_ponder,
+            deep_supervision_weight=deep_supervision_weight,
+        )
         assert lm_out.loss is not None
         lm_loss = lm_out.loss
         total = _accum(total, lm_loss, w["lm"])
 
     if decision_batch is not None:
-        dec_out = coe.forward_decision(**decision_batch)
+        dec_out = coe.forward_decision(**decision_batch, depth_ponder=depth_ponder)
         assert dec_out.loss is not None
         decision_loss = dec_out.loss
         total = _accum(total, decision_loss, w["decision"])

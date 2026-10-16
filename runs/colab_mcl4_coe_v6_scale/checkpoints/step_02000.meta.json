@@ -1,0 +1,205 @@
+{
+  "checkpoint_id": "colab_mcl4_coe_v6_scale/step_02000",
+  "config": {
+    "batch_size": 16,
+    "checkpoint_every": 250,
+    "corpora_root": "/content/MCL4-COE/corpora",
+    "cpu_offload_optimizer": false,
+    "curriculum_mode": "cosine",
+    "d_model": 768,
+    "decision_batch_size": 4,
+    "deep_supervision_weight": 0.2,
+    "depth_ponder": true,
+    "dream_every": 10,
+    "dream_max_calls": 4,
+    "dream_max_rounds": 3,
+    "dream_revisions": 3,
+    "dream_workers": 2,
+    "enable_dream_rsi": true,
+    "enable_gist_conditioning": true,
+    "enable_mitosis": true,
+    "enable_ornith_rl": true,
+    "end_weights": {
+      "pretrain_lm": 0.25,
+      "typed_decision": 0.2,
+      "uta_trace": 0.55
+    },
+    "eval_every": 200,
+    "expert_hidden_dim": 1536,
+    "gist_conditioning_prob": 0.35,
+    "grad_clip": 1.0,
+    "latent_prior_scale": 0.35,
+    "lr": 0.0008,
+    "max_experts": 12,
+    "max_seq_len": 1024,
+    "micro_batch_size": 8,
+    "min_lr_ratio": 0.1,
+    "mitosis_every": 1000,
+    "mitosis_step_size": 2,
+    "n_decoder_layers": 8,
+    "n_encoder_layers": 8,
+    "n_heads": 12,
+    "num_experts": 12,
+    "nvfp4_sparsity_mode": "2to4_transposable",
+    "nvfp4_sr_ste_decay": 0.0001,
+    "ornith_every": 8,
+    "ornith_warmup_ratio": 0.65,
+    "ornith_weight": 0.2,
+    "ple_dim": 256,
+    "projection_dim": 192,
+    "recurrence_steps": 2,
+    "recurrent_kv": true,
+    "resume_checkpoint": "/content/runs/colab_mcl4_coe_v6_scale/checkpoints/step_01000.pt",
+    "run_id": "colab_mcl4_coe_v6_scale",
+    "runs_root": "/content/runs",
+    "sample_every": 200,
+    "sample_prompt": "Locate MCL4CEDBackbone in src/mcl4_coe/backbone.py and explain how recurrent depth pondering refines latent representations.",
+    "seed": 42,
+    "shards_root": "/content/data_shards_morph16k",
+    "start_weights": {
+      "pretrain_lm": 0.5,
+      "typed_decision": 0.15,
+      "uta_trace": 0.35
+    },
+    "top_k": 2,
+    "total_steps": 6000,
+    "use_nvfp4": false,
+    "val_max_batches_per_track": 8,
+    "vocab_size": 16384,
+    "warmup_ratio": 0.06,
+    "weight_decay": 0.01
+  },
+  "meta_file": "/content/runs/colab_mcl4_coe_v6_scale/checkpoints/step_02000.meta.json",
+  "metrics": {
+    "abstraction_loss": 0.01163,
+    "cumulative_tokens": 24247862,
+    "decision_loss": 1.45505,
+    "deduction_loss": 1.05405,
+    "evaluation_loss": 0.53177,
+    "expert_load": [
+      0.1111,
+      0.0938,
+      0.1143,
+      0.0571,
+      0.064,
+      0.0726,
+      0.1149,
+      0.0589,
+      0.072,
+      0.0869,
+      0.0769,
+      0.0776
+    ],
+    "lm_loss": 2.14887,
+    "loss_pretrain_lm": 2.25487,
+    "loss_typed_decision": 2.94478,
+    "loss_uta_trace": 1.75262,
+    "lr": 0.000135,
+    "metacognition_loss": 0.62387,
+    "mitosis_event": {
+      "action": "expand",
+      "added_pairs": [
+        [
+          3,
+          10
+        ],
+        [
+          7,
+          11
+        ]
+      ],
+      "mitotic_pairs": [
+        [
+          5,
+          8
+        ],
+        [
+          4,
+          9
+        ],
+        [
+          3,
+          10
+        ],
+        [
+          7,
+          11
+        ]
+      ],
+      "new_experts": 12,
+      "old_experts": 10,
+      "parameter_count": 776553611,
+      "step": 2000
+    },
+    "mitotic_pairs": [
+      [
+        5,
+        8
+      ],
+      [
+        4,
+        9
+      ],
+      [
+        3,
+        10
+      ],
+      [
+        7,
+        11
+      ]
+    ],
+    "num_experts": 12,
+    "nvfp4_gemms": 0,
+    "nvfp4_sparse_2to4_gemms": 0,
+    "progress": 0.3333,
+    "quotas": {
+      "pretrain_lm": 7,
+      "typed_decision": 3,
+      "uta_trace": 6
+    },
+    "step": 2000,
+    "step_time_s": 8.068,
+    "step_tokens": 11367,
+    "tok_per_s": 1408.9,
+    "total_loss": 2.93293,
+    "total_steps": 6000,
+    "train_bpb": 1.67672,
+    "train_bpt": 3.10016,
+    "val_bpb": 1.43788,
+    "val_bpb_pretrain_lm": 1.37116,
+    "val_bpb_typed_decision": 1.26042,
+    "val_bpb_uta_trace": 1.75905,
+    "val_bpt": 4.40103,
+    "val_bpt_pretrain_lm": 4.21877,
+    "val_bpt_typed_decision": 4.62935,
+    "val_bpt_uta_trace": 4.57989,
+    "val_bytes_evaluated": 384133,
+    "val_lm_loss": 3.05056,
+    "val_loss_pretrain_lm": 2.92423,
+    "val_loss_typed_decision": 3.20882,
+    "val_loss_uta_trace": 3.17454,
+    "val_mcqa_acc": 0.3633,
+    "val_mcqa_ce_loss": 1.33434,
+    "val_mcqa_n": 512,
+    "val_tokens_evaluated": 125502,
+    "vram_allocated_mb": 11870.6,
+    "vram_reserved_mb": 67746.0,
+    "wall_time_s": 4976.87,
+    "weights": {
+      "pretrain_lm": 0.4375,
+      "typed_decision": 0.1625,
+      "uta_trace": 0.4
+    }
+  },
+  "num_experts": 12,
+  "parameter_count": 776553611,
+  "pt_file": "/content/runs/colab_mcl4_coe_v6_scale/checkpoints/step_02000.pt",
+  "run_id": "colab_mcl4_coe_v6_scale",
+  "sample_prompt": "Locate MCL4CEDBackbone in src/mcl4_coe/backbone.py and explain how recurrent depth pondering refines latent representations.",
+  "sample_uta": "#U$# Locate MCL4CEDBackbone in src/mcl4_coe/backbone.py and explain how recurrent depth pondering refines latent representations.\n#T$# Okay, so I need to find the value of the equation (1/4)/4. Hmm, let's start by recalling what I know. The problem says that the sum of the two-digit number is 1/4. Hmm. Let me start by recalling some basic properties.\n\nFirst, I remember that the sum of the triangle is 1/4, and the sum of 1/2 is 14.\n#A$# The sum of the first 1/2 is given by the total number of ways. The first 1/3 is 14/4. The total number of ways is 1.444/44. The total number is 1.4/44.\n\n1. **Determine the total number of students:**\n   - The total number of 1444 is 1/4.\n   - The total of 1/34 is 124.",
+  "step": 2000,
+  "timestamp": 1792120527.8291001,
+  "total_steps": 6000,
+  "use_nvfp4": false
+}

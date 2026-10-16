@@ -687,6 +687,9 @@ def extract_uta_episodes(
             elif role in ("user", "human", "prompter") and content and content != "-" and len(content) >= 4:
                 current_user.append(content)
                 has_real_user = True
+            elif role in ("tool", "observation", "function", "environment") and content:
+                current_user.append(f"[Observation]\n{content}")
+                has_real_user = True
             elif role in ("assistant", "gpt", "model", "bot") and (content or reasoning) and has_real_user:
                 prompt_str = "\n\n".join(current_user)
                 t_clean, a_clean = _split_thought_and_answer(content, explicit_thought=reasoning)
@@ -791,6 +794,17 @@ def extract_uta_episodes(
                         f"Key declarations: {'; '.join(decl_lines) if decl_lines else Path(code_path).name}."
                     )
                     return [_pack(u_code, t_code, clean_code)]
+
+    # Case 9: `camel-ai/physics` & `camel-ai/math` (`message_1`, `message_2`, `topic;`, `sub_topic`)
+    if isinstance(record.get("message_1"), str) and isinstance(record.get("message_2"), str):
+        m1 = record["message_1"].strip()
+        m2 = record["message_2"].strip()
+        if m1 and m2:
+            topic = str(record.get("topic;") or record.get("topic") or "").strip()
+            sub_topic = str(record.get("sub_topic") or "").strip()
+            header = f"[{topic}: {sub_topic}]\n" if topic and sub_topic else (f"[{topic}]\n" if topic else "")
+            t_clean, a_clean = _split_thought_and_answer(m2)
+            return [_pack(f"{header}{m1}", t_clean, a_clean)]
 
     return []
 
@@ -1155,6 +1169,15 @@ def extract_pretrain_text(
         or record.get("report_text")
         or record.get("content")
     )
+    if (
+        (not isinstance(raw, str) or not raw.strip())
+        and isinstance(record.get("message_1"), str)
+        and isinstance(record.get("message_2"), str)
+    ):
+        topic = str(record.get("topic;") or record.get("topic") or "").strip()
+        sub_topic = str(record.get("sub_topic") or "").strip()
+        header = f"Topic: {topic} — {sub_topic}\n\n" if topic and sub_topic else ""
+        raw = f"{header}Problem:\n{record['message_1'].strip()}\n\nDerivation:\n{record['message_2'].strip()}"
     if (not isinstance(raw, str) or not raw.strip()) and isinstance(record.get("tokens"), list) and record["tokens"]:
         raw = _decode_gpt2_tokens(record["tokens"])
     if not isinstance(raw, str) or not raw.strip():

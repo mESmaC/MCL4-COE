@@ -61,12 +61,14 @@ from mcl4_coe import (
 )
 from mcl4_coe.curation import sanitize_trace_markers
 
-# Default "Nemotron-Core" + "GitHub-Code" + "ArXiv-C++" 3-Track Hugging Face streaming recipe (`gated: false`)
+# Default "Nemotron-Core" + "GitHub-Code" + "ArXiv-C++" + "Physics/Quantum/Math" + "Tool-Use" 3-Track HF recipe
 DEFAULT_HF_TRACK_SOURCES: dict[str, list[dict[str, Any]]] = {
     "pretrain_lm": [
         {"path": "nvidia/Nemotron-ClimbMix", "name": None, "split": "train"},
         {"path": "codeparrot/github-code", "name": "C+Rust+C+++Python-all", "split": "train"},
         {"path": "AlgorithmicResearchGroup/arxiv_cplusplus_research_code", "name": "default", "split": "train"},
+        {"path": "camel-ai/physics", "name": None, "split": "train"},
+        {"path": "camel-ai/math", "name": None, "split": "train"},
         {
             "path": "nvidia/Nemotron-Pretraining-Specialized-v1.1",
             "name": "Nemotron-Pretraining-Code-Concepts",
@@ -105,6 +107,9 @@ DEFAULT_HF_TRACK_SOURCES: dict[str, list[dict[str, Any]]] = {
         {"path": "nvidia/Nemotron-Pretraining-Dataset-sample", "name": "Nemotron-SFT-Code", "split": "train"},
         {"path": "codeparrot/github-code", "name": "C+Rust+C+++Python-all", "split": "train"},
         {"path": "AlgorithmicResearchGroup/arxiv_cplusplus_research_code", "name": "default", "split": "train"},
+        {"path": "camel-ai/physics", "name": None, "split": "train"},
+        {"path": "camel-ai/math", "name": None, "split": "train"},
+        {"path": "NousResearch/hermes-function-calling-v1", "name": None, "split": "train"},
     ],
     "typed_decision": [
         {"path": "nvidia/Nemotron-RL-knowledge-mcqa", "name": "default", "split": "train"},
@@ -256,16 +261,17 @@ def _iter_hf_source_rows(
     yielded = 0
     if load_dataset_fn is not None and ds_path in ("codeparrot/github-code", "codeparrot/github-code-clean"):
         try:
-            num_shards = min(1126, max(4, (max_rows // 1500) + 4))
-            parquet_urls = [
-                f"hf://datasets/codeparrot/github-code/data/train-{i:05d}-of-01126.parquet"
-                for i in range(num_shards)
-            ]
             allowed_langs: set[str] | None = None
             if ds_name and ds_name != "all-all":
                 lang_part = ds_name.split("-")[0]
                 if lang_part and lang_part != "all":
                     allowed_langs = {l.strip() for l in lang_part.split("+") if l.strip()}
+            rows_per_shard_est = 250 if allowed_langs is not None else 1500
+            num_shards = min(1126, max(8, (max_rows // rows_per_shard_est) + 6))
+            parquet_urls = [
+                f"hf://datasets/codeparrot/github-code/data/train-{i:05d}-of-01126.parquet"
+                for i in range(num_shards)
+            ]
             stream = load_dataset_fn(
                 "parquet",
                 data_files=parquet_urls,
@@ -346,12 +352,13 @@ def _iter_hf_source_rows(
 def append_github_code_and_repo_shards(
     shards_root: str | Path,
     *,
-    records_to_stream: int = 4000,
+    records_to_stream: int = 2000,
     seq_len: int | None = None,
     val_ratio: float = 0.05,
     hf_token: str | None = None,
+    include_repo_ast: bool = True,
 ) -> dict[str, Any]:
-    """Stream `codeparrot/github-code` + AST-grounded repo traces and append shards into an existing `shards_root`."""
+    """Stream multi-domain expansion corpora (`ArXiv-C++`, `C+Rust`, `Physics/Quantum`, `Math`, `Tool-Use`) into `shards_root`."""
     token = resolve_hf_token(hf_token)
     _configure_hf_transfer()
     out_root = Path(shards_root).expanduser().resolve()
@@ -363,7 +370,23 @@ def append_github_code_and_repo_shards(
     val_mod = max(5, int(round(1.0 / max(0.01, min(0.25, val_ratio))))) if val_ratio > 0 else 0
     report: dict[str, Any] = {"shards_root": str(out_root), "tracks_updated": {}}
 
-    for track in ("pretrain_lm", "uta_trace"):
+    expansion_sources: dict[str, list[tuple[str, str | None, str]]] = {
+        "pretrain_lm": [
+            ("AlgorithmicResearchGroup/arxiv_cplusplus_research_code", "default", "train"),
+            ("codeparrot/github-code", "C+Rust-all", "train"),
+            ("camel-ai/physics", None, "train"),
+            ("camel-ai/math", None, "train"),
+        ],
+        "uta_trace": [
+            ("AlgorithmicResearchGroup/arxiv_cplusplus_research_code", "default", "train"),
+            ("codeparrot/github-code", "C+Rust-all", "train"),
+            ("camel-ai/physics", None, "train"),
+            ("camel-ai/math", None, "train"),
+            ("NousResearch/hermes-function-calling-v1", None, "train"),
+        ],
+    }
+
+    for track, src_list in expansion_sources.items():
         t_dir = out_root / track
         t_dir.mkdir(parents=True, exist_ok=True)
         idx_path = t_dir / "index_receipt.json"
@@ -392,46 +415,61 @@ def append_github_code_and_repo_shards(
             vocab_size=existing_vocab,
         )
 
-        accepted = 0
-        rejected = 0
-        row_idx = 0
-        for row in _iter_hf_source_rows(
-            "codeparrot/github-code",
-            "all-all",
-            "train",
-            records_to_stream,
-            token,
-            load_dataset,
-        ):
-            row_idx += 1
-            is_val = bool(val_mod > 0 and ((accepted + 1) % val_mod == 0))
-            active_w = val_writer if is_val else train_writer
-            if track == "pretrain_lm":
-                text, rej = extract_pretrain_text(row)
-                if rej or not text:
-                    rejected += 1
+        by_source: dict[str, dict[str, int]] = {}
+        total_acc = 0
+        total_rej = 0
+        for ds_path, ds_name, ds_split in src_list:
+            accepted = 0
+            rejected = 0
+            row_idx = 0
+            src_key = f"{ds_path}:{ds_name or 'default'}"
+            for row in _iter_hf_source_rows(
+                ds_path,
+                ds_name,
+                ds_split,
+                records_to_stream,
+                token,
+                load_dataset,
+            ):
+                row_idx += 1
+                is_val = bool(val_mod > 0 and ((total_acc + accepted + 1) % val_mod == 0))
+                active_w = val_writer if is_val else train_writer
+                if track == "pretrain_lm":
+                    text, rej = extract_pretrain_text(row)
+                    if rej or not text:
+                        rejected += 1
+                    else:
+                        active_w.add_pretrain_document(text)
+                        accepted += 1
                 else:
-                    active_w.add_pretrain_document(text)
-                    accepted += 1
-            else:
-                eps = extract_uta_episodes(row, max_seq_len=target_seq_len)
-                if eps and active_w.add_uta_episode(*eps[0]):
-                    accepted += 1
-                else:
-                    rejected += 1
+                    eps = extract_uta_episodes(row, max_seq_len=target_seq_len)
+                    if not eps:
+                        rejected += 1
+                    else:
+                        added_any = False
+                        for u_s, t_s, a_s in eps:
+                            if active_w.add_uta_episode(u_s, t_s, a_s):
+                                added_any = True
+                        if added_any:
+                            accepted += 1
+                        else:
+                            rejected += 1
 
-        if accepted > 0 or rejected > 0:
-            train_writer.record_provenance(
-                corpus="codeparrot/github-code",
-                source_file="hf://codeparrot/github-code/data/train-00000-of-01126.parquet",
-                row_start=1,
-                row_end=row_idx,
-                episodes_accepted=accepted,
-                episodes_rejected_stage0=rejected,
-            )
+            by_source[src_key] = {"accepted": accepted, "rejected_stage0": rejected}
+            total_acc += accepted
+            total_rej += rejected
+            if accepted > 0 or rejected > 0:
+                train_writer.record_provenance(
+                    corpus=ds_path,
+                    source_file=f"hf://{ds_path}/{ds_name or ds_split}",
+                    row_start=1,
+                    row_end=row_idx,
+                    episodes_accepted=accepted,
+                    episodes_rejected_stage0=rejected,
+                )
 
         repo_acc = 0
-        if track == "uta_trace":
+        if track == "uta_trace" and include_repo_ast:
             repo_eps = synthesize_repository_uta_traces(REPO_ROOT, max_episodes=512)
             for idx_ep, (u_p, t_r, a_r) in enumerate(repo_eps):
                 target_w = val_writer if (idx_ep % 10 == 0) else train_writer
@@ -451,8 +489,9 @@ def append_github_code_and_repo_shards(
         val_writer.flush_shard()
         final_idx = json.loads((t_dir / "index_receipt.json").read_text(encoding="utf-8"))
         report["tracks_updated"][track] = {
-            "github_code_accepted": accepted,
-            "github_code_rejected_stage0": rejected,
+            "total_accepted": total_acc,
+            "total_rejected_stage0": total_rej,
+            "by_source": by_source,
             "repo_ast_uta_accepted": repo_acc,
             "totals": final_idx.get("totals", {}),
         }

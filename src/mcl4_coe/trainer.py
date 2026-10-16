@@ -1138,6 +1138,9 @@ class MCL4COETrainer:
         self.cumulative_wall_s = float(payload.get("cumulative_wall_s", 0.0))
         self.cumulative_tokens = int(payload.get("cumulative_tokens", 0))
         self.latest_metrics = dict(payload.get("latest_metrics", {}))
+        self._resume_lr = float(
+            self.latest_metrics.get("lr", self.config.lr * self.config.min_lr_ratio)
+        )
         init_loads = list(self.latest_metrics.get("expert_load", []))
         if init_loads and len(init_loads) == ckpt_experts and self.config.num_experts > ckpt_experts:
             init_loads = init_loads + [0.0] * (self.config.num_experts - ckpt_experts)
@@ -1192,13 +1195,34 @@ class MCL4COETrainer:
         base_step = getattr(self, "initial_step", 0)
         stage_steps = max(1, self.config.total_steps - base_step)
         local_step = max(1, step - base_step)
-        # When continuing from a converged checkpoint with warm AdamW moments restored,
-        # avoid an 8x spike back to cold-init peak LR; instead ramp gently from min_lr to
-        # at most 1.75x min_lr and cosine-decay down to 0.65x min_lr.
         if getattr(self, "_optimizer_restored", False) and base_step > 0:
             start_lr = float(
-                self.latest_metrics.get("lr", self.config.lr * self.config.min_lr_ratio)
+                getattr(
+                    self,
+                    "_resume_lr",
+                    self.latest_metrics.get("lr", self.config.lr * self.config.min_lr_ratio),
+                )
             )
+            # In-place continuation of an interrupted run: smoothly rejoin the global cosine curve
+            if getattr(self, "_parent_total_steps", 0) == self.config.total_steps:
+                g_warmup = max(1, int(round(self.config.total_steps * self.config.warmup_ratio)))
+                if step <= g_warmup:
+                    global_lr = self.config.lr * (step / g_warmup)
+                else:
+                    g_span = max(1, self.config.total_steps - g_warmup)
+                    g_prog = min(1.0, max(0.0, (step - g_warmup) / g_span))
+                    g_cos = 0.5 * (1.0 + math.cos(math.pi * g_prog))
+                    global_lr = self.config.lr * (
+                        self.config.min_lr_ratio + (1.0 - self.config.min_lr_ratio) * g_cos
+                    )
+                rejoin_steps = min(100, max(1, int(round(stage_steps * 0.05))))
+                if local_step < rejoin_steps:
+                    alpha = local_step / rejoin_steps
+                    return start_lr + (global_lr - start_lr) * alpha
+                return global_lr
+
+            # Stage-2 continuation from a completed parent checkpoint: ramp gently from start_lr
+            # to at most 1.75x min_lr and cosine-decay down to 0.65x min_lr.
             min_lr = self.config.lr * self.config.min_lr_ratio
             start_lr = max(min_lr * 0.5, min(self.config.lr, start_lr))
             peak_lr = min(self.config.lr, max(start_lr, min_lr * 1.75))

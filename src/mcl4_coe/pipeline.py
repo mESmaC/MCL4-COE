@@ -727,7 +727,159 @@ def extract_uta_episodes(
             t_clean, a_clean = _split_thought_and_answer(parts[1].strip())
             return [_pack(parts[0].strip(), t_clean, a_clean)]
 
+    # Case 8: `codeparrot/github-code` (`repo_name`, `path`, `code`/`content`, `language`)
+    if "repo_name" in record and "path" in record and ("code" in record or "content" in record):
+        norm_rec = normalize_github_code_record(record)
+        code_path = str(norm_rec.get("path") or "").strip()
+        repo_name = str(norm_rec.get("repo_name") or "").strip()
+        lang = str(norm_rec.get("language") or "Code").strip()
+        code_str = str(norm_rec.get("code") or "").strip()
+        if code_path and code_str and not _is_noisy_code_path(code_path):
+            sieve = evaluate_byte_sieve(code_str)
+            if sieve.keep and sieve.sanitized_text:
+                clean_code = sieve.sanitized_text.replace("\r\n", "\n").replace("\r", "\n").strip()
+                decl_lines: list[str] = []
+                import_lines: list[str] = []
+                for ln in clean_code.splitlines():
+                    s_ln = ln.strip()
+                    if not s_ln or s_ln.startswith(("#", "//", "/*", "*")):
+                        continue
+                    if s_ln.startswith(("import ", "from ", "#include", "using ", "require(", "package ", "use ")):
+                        if len(import_lines) < 3:
+                            import_lines.append(s_ln[:80])
+                    elif any(
+                        s_ln.startswith(p)
+                        for p in (
+                            "def ",
+                            "async def ",
+                            "class ",
+                            "function ",
+                            "export ",
+                            "const ",
+                            "pub fn ",
+                            "fn ",
+                            "func ",
+                            "struct ",
+                            "interface ",
+                            "type ",
+                            "public ",
+                            "private ",
+                        )
+                    ):
+                        if len(decl_lines) < 4:
+                            decl_lines.append(s_ln.rstrip("{:").strip()[:90])
+                if decl_lines or len(clean_code.splitlines()) >= 6:
+                    sym_desc = ", ".join(f"`{d}`" for d in decl_lines[:2]) if decl_lines else f"`{Path(code_path).name}`"
+                    imp_desc = f" Dependencies: {', '.join(f'`{i}`' for i in import_lines)}." if import_lines else ""
+                    u_code = f"In `{repo_name}` (`{code_path}`, {lang}), implement {sym_desc}."
+                    t_code = (
+                        f"Target module `{code_path}` ({lang}) in `{repo_name}`.{imp_desc} "
+                        f"Key declarations: {'; '.join(decl_lines) if decl_lines else Path(code_path).name}."
+                    )
+                    return [_pack(u_code, t_code, clean_code)]
+
     return []
+
+
+_GITHUB_CODE_LANG_TO_EXT: dict[str, tuple[str, ...]] = {
+    "Assembly": (".asm",),
+    "Batchfile": (".bat", ".cmd"),
+    "C": (".c", ".h"),
+    "C#": (".cs",),
+    "C++": (".cpp", ".hpp", ".c++", ".h++", ".cc", ".hh", ".C", ".H"),
+    "CMake": (".cmake",),
+    "CSS": (".css",),
+    "Dockerfile": (".dockerfile", "Dockerfile"),
+    "FORTRAN": (".f90", ".f", ".f03", ".f08", ".f77", ".f95", ".for", ".fpp"),
+    "GO": (".go",),
+    "Haskell": (".hs",),
+    "HTML": (".html",),
+    "Java": (".java",),
+    "JavaScript": (".js",),
+    "Julia": (".jl",),
+    "Lua": (".lua",),
+    "Makefile": ("Makefile",),
+    "Markdown": (".md", ".markdown"),
+    "PHP": (".php", ".php3", ".php4", ".php5", ".phps", ".phpt"),
+    "Perl": (".pl", ".pm", ".pod", ".perl"),
+    "PowerShell": (".ps1", ".psd1", ".psm1"),
+    "Python": (".py",),
+    "Ruby": (".rb",),
+    "Rust": (".rs",),
+    "SQL": (".sql",),
+    "Scala": (".scala",),
+    "Shell": (".sh", ".bash", ".command", ".zsh"),
+    "TypeScript": (".ts", ".tsx"),
+    "TeX": (".tex",),
+    "Visual Basic": (".vb",),
+}
+
+_GITHUB_CODE_EXT_TO_LANG: dict[str, str] = {
+    ext: lang for lang, exts in _GITHUB_CODE_LANG_TO_EXT.items() for ext in exts
+}
+
+_NOISY_CODE_PATH_SUBSTRINGS: tuple[str, ...] = (
+    "node_modules/",
+    "bower_components/",
+    "vendor/",
+    "third_party/",
+    "third-party/",
+    "/dist/",
+    "/build/",
+    ".min.js",
+    ".min.css",
+    ".bundle.js",
+    "package-lock.json",
+    "yarn.lock",
+    "cargo.lock",
+    "__pycache__/",
+    "_pb2.py",
+    ".pb.go",
+    ".pb.cc",
+    ".pb.h",
+)
+
+
+def infer_github_code_language(path: str) -> str:
+    """Infer programming language from file path using the `codeparrot/github-code` extension table."""
+    clean = str(path or "").strip()
+    for ext, lang in _GITHUB_CODE_EXT_TO_LANG.items():
+        if clean.endswith(ext):
+            return lang
+    return "Unknown"
+
+
+def _is_noisy_code_path(path: str) -> bool:
+    """Return True if `path` belongs to vendored dependencies, minified bundles, or generated lockfiles."""
+    norm = f"/{str(path or '').replace(chr(92), '/').lower().lstrip('/')}"
+    return any(tok in norm for tok in _NOISY_CODE_PATH_SUBSTRINGS)
+
+
+def normalize_github_code_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Normalize raw Parquet or dataset rows from `codeparrot/github-code` into canonical schema.
+
+    Canonical fields: `code`, `repo_name`, `path`, `language`, `license`, `size`.
+    """
+    code_val = record.get("code")
+    if not isinstance(code_val, str) or not code_val:
+        code_val = record.get("content") or ""
+    path_val = str(record.get("path") or "")
+    lang_val = str(record.get("language") or "").strip()
+    if not lang_val:
+        lang_val = infer_github_code_language(path_val)
+    size_raw = record.get("size")
+    try:
+        size_val = int(size_raw) if size_raw is not None else len(str(code_val))
+    except (TypeError, ValueError):
+        size_val = len(str(code_val))
+    return {
+        "code": str(code_val),
+        "repo_name": str(record.get("repo_name") or ""),
+        "path": path_val,
+        "language": lang_val,
+        "license": str(record.get("license") or ""),
+        "size": size_val,
+    }
 
 
 _MCQA_OPTION_LINE_RE = re.compile(r"^([A-Z])[\.\:]\s+(.+)$")
@@ -949,13 +1101,38 @@ def extract_pretrain_text(
     *,
     sieve_config: ByteSieveConfig = ByteSieveConfig(),
 ) -> tuple[str | None, bool]:
-    """Extract and Stage-0 filter an expository pretraining document (`(text, rejected_stage0)`)."""
+    """Extract and Stage-0 filter an expository or source-code pretraining document (`(text, rejected_stage0)`)."""
     if not isinstance(record, dict):
         return None, True
+
+    is_code_record = bool(
+        isinstance(record.get("code"), str)
+        or ("repo_name" in record and "path" in record and ("code" in record or "content" in record))
+    )
+    if is_code_record:
+        norm_rec = normalize_github_code_record(record)
+        code_path = str(norm_rec.get("path") or "").strip()
+        if code_path and _is_noisy_code_path(code_path):
+            return None, True
+        raw_code = str(norm_rec.get("code") or "")
+        if not raw_code.strip():
+            return None, True
+        decision = evaluate_byte_sieve(raw_code, sieve_config)
+        if not decision.keep or decision.sanitized_text is None:
+            return None, True
+        clean_code = decision.sanitized_text.replace("\r\n", "\n").replace("\r", "\n").strip()
+        repo_name = str(norm_rec.get("repo_name") or "").strip()
+        lang = str(norm_rec.get("language") or "").strip()
+        if repo_name and code_path:
+            header = f"# Repo: {repo_name} | Path: {code_path}"
+            if lang and lang != "Unknown":
+                header += f" | Language: {lang}"
+            return f"{header}\n{clean_code}", False
+        return clean_code, False
+
     raw = (
         record.get("text")
         or record.get("Text")
-        or record.get("code")
         or record.get("report_text")
         or record.get("content")
     )

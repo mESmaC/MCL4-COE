@@ -1775,6 +1775,54 @@ def test_pre_scaling_housekeeping_gist_conditioning_and_repo_uta_traces(tmp_path
     assert len(traces) >= 2
     assert any("SampleRouter" in u or "route_pages" in u for u, _, _ in traces)
 
+    # 5. Verify `codeparrot/github-code` streaming normalization, path sieve, and pretrain/UTA extraction
+    from mcl4_coe import (
+        extract_pretrain_text,
+        extract_uta_episodes,
+        infer_github_code_language,
+        normalize_github_code_record,
+    )
+
+    assert infer_github_code_language("app/mods/mod190.js") == "JavaScript"
+    assert infer_github_code_language("src/mcl4_coe/backbone.py") == "Python"
+    raw_parquet_row = {
+        "content": (
+            "import mod189 from './mod189';\n"
+            "export function computeNextValue(seed) {\n"
+            "  const value = mod189 + seed + 1;\n"
+            "  if (value <= 0) {\n"
+            "    return 0;\n"
+            "  }\n"
+            "  return value;\n"
+            "}\n"
+            "export default computeNextValue;\n"
+        ),
+        "repo_name": "MirekSz/webpack-es6-ts",
+        "path": "app/mods/mod190.js",
+        "license": "isc",
+        "size": "214",
+    }
+    norm_row = normalize_github_code_record(raw_parquet_row)
+    assert norm_row["language"] == "JavaScript"
+    assert norm_row["size"] == 214
+    pretrain_txt, rej = extract_pretrain_text(norm_row)
+    assert not rej and pretrain_txt is not None
+    assert "# Repo: MirekSz/webpack-es6-ts | Path: app/mods/mod190.js | Language: JavaScript" in pretrain_txt
+    # Ensure code newlines are never collapsed by prose unwrapping
+    assert "import mod189 from './mod189';\nexport function computeNextValue" in pretrain_txt
+
+    uta_eps = extract_uta_episodes(norm_row, max_seq_len=2048)
+    assert len(uta_eps) == 1
+    assert "MirekSz/webpack-es6-ts" in uta_eps[0][0]
+    assert "computeNextValue" in uta_eps[0][2]
+
+    # Vendored node_modules path should be rejected at Stage 0
+    noisy_row = dict(norm_row, path="wp-content/node_modules/es6-set/polyfill.js")
+    _, noisy_rej = extract_pretrain_text(noisy_row)
+    assert noisy_rej is True
+    assert extract_uta_episodes(noisy_row, max_seq_len=2048) == []
+
+
 
 
 

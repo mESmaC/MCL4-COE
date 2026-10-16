@@ -1215,16 +1215,24 @@ class CognitiveOperatorEnsemble(nn.Module):
         item_lengths: Tensor,
         *,
         level: str = "standard",
+        encoded_hidden: Tensor | None = None,
     ) -> Tensor:
         """Multi-scale latent abstraction (`brief`, `standard`, `detailed`) for recurrent injection."""
         if level not in self.abstraction_gates:
             raise ValueError("level must be 'brief', 'standard', or 'detailed'")
-        width = int(item_lengths.max().item())
-        trimmed = item_ids[:, :width].long()
-        valid = torch.arange(width, device=item_ids.device)[None, :] < item_lengths[:, None]
-        encoded = self.backbone.encode_state(trimmed, valid, causal=True)
+        if encoded_hidden is not None:
+            width = int(encoded_hidden.shape[1])
+            trimmed = item_ids[:, :width].long()
+            valid = torch.arange(width, device=item_ids.device)[None, :] < item_lengths[:, None]
+            hid = encoded_hidden
+        else:
+            width = int(item_lengths.max().item())
+            trimmed = item_ids[:, :width].long()
+            valid = torch.arange(width, device=item_ids.device)[None, :] < item_lengths[:, None]
+            encoded = self.backbone.encode_state(trimmed, valid, causal=True)
+            hid = encoded.hidden
         pooled = self.pooler.pool_sequence(
-            encoded.hidden,
+            hid,
             trimmed,
             valid,
             strip_boundary=self.config.strip_boundary_tokens_in_pool,
@@ -1349,6 +1357,7 @@ class CognitiveOperatorEnsemble(nn.Module):
 
         gist_chunks: list[Tensor] = []
         gist_valids: list[Tensor] = []
+        enc_chunks: list[Tensor] = []
         running_gist: Tensor | None = None
         total_aux = token_ids.new_zeros((), dtype=torch.float32)
         total_z = token_ids.new_zeros((), dtype=torch.float32)
@@ -1366,6 +1375,7 @@ class CognitiveOperatorEnsemble(nn.Module):
             c_val_safe[~row_has_valid, 0] = True
 
             enc = self.backbone.encode_state(c_ids, c_val_safe, causal=False)
+            enc_chunks.append(enc.hidden)
             total_aux = total_aux + enc.aux_loss
             total_z = total_z + enc.router_z_loss
             loads.append(enc.expert_load)
@@ -1397,10 +1407,12 @@ class CognitiveOperatorEnsemble(nn.Module):
             gist_valids.append(chunk_has_valid)
 
         if not gist_chunks:
+            self._last_gist_encoded_hidden = None
             fallback_valid = valid_mask[:, :1].clone()
             fallback_valid[:, 0] = True
             return self.backbone.encode_state(token_ids[:, :1], fallback_valid, causal=False)
 
+        self._last_gist_encoded_hidden = torch.cat(enc_chunks, dim=1) if enc_chunks else None
         compressed_hidden = torch.cat(gist_chunks, dim=1)
         compressed_valid = torch.cat(gist_valids, dim=1)
         avg_load = torch.stack(loads, dim=0).mean(dim=0)
@@ -1450,15 +1462,26 @@ class CognitiveOperatorEnsemble(nn.Module):
             if not pref_valid.any(dim=-1).all():
                 pref_valid = pref_valid.clone()
                 pref_valid[:, 0] = True
+            eff_chunk_sz = pref_len if pref_len >= 64 else max(4, pref_len // 2)
             eff_gist = self.compress_gist_context(
                 pref_ids,
                 pref_valid,
-                chunk_size=max(4, pref_len // 2),
+                chunk_size=eff_chunk_sz,
                 gist_prefix_len=pref_len,
             )
             if eff_prior is None:
                 pref_lengths = pref_valid.sum(dim=-1).clamp_min(1)
-                eff_prior = self.compress_abstraction(pref_ids, pref_lengths, level="detailed")
+                cached_enc = getattr(self, "_last_gist_encoded_hidden", None)
+                eff_prior = self.compress_abstraction(
+                    pref_ids,
+                    pref_lengths,
+                    level="detailed",
+                    encoded_hidden=(
+                        cached_enc
+                        if (cached_enc is not None and cached_enc.shape[1] == pref_len)
+                        else None
+                    ),
+                )
                 if eff_scale == 0.0:
                     eff_scale = 0.18
             eff_start = pref_len

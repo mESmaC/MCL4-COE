@@ -745,12 +745,16 @@ class MCL4COETrainer:
     ) -> None:
         """Accumulate unmasked token cross-entropy per track on GPU without host sync."""
         b, seq_len, vocab = logits.shape
-        token_losses = F.cross_entropy(
-            logits.float().view(-1, vocab),
-            labels.view(-1),
-            ignore_index=-100,
-            reduction="none",
-        ).view(b, seq_len)
+        token_losses = (
+            F.cross_entropy(
+                logits.view(-1, vocab),
+                labels.view(-1),
+                ignore_index=-100,
+                reduction="none",
+            )
+            .float()
+            .view(b, seq_len)
+        )
         valid_mask = (labels != -100).float()
         for t_idx, t_name in enumerate(self.dataset.track_names):
             row_mask = (track_ids == t_idx).unsqueeze(-1).float() * valid_mask
@@ -1561,6 +1565,17 @@ class MCL4COETrainer:
                 self._write_manifest("running")
                 if self.on_step_callback is not None:
                     self.on_step_callback(record)
+
+                stop_file = self.run_dir / ".stop_requested"
+                if stop_file.exists():
+                    try:
+                        stop_file.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    self.stop_event.set()
+                if self.stop_event.is_set():
+                    status = "stopped"
+                    break
 
             if status == "stopped":
                 self.save_checkpoint(tag=f"step_{self.current_step:05d}_stopped")

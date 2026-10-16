@@ -421,11 +421,25 @@ class MultiPassController(nn.Module):
             max_seq = self.coe.backbone.config.max_seq_len
             has_emitted_a = False
             a_start_token_idx = -1
-            thought_budget = (
-                min(140, max(56, int(max_new_tokens * 0.35)))
-                if max_new_tokens >= 128
-                else max(12, max_new_tokens // 2)
-            )
+            if is_morph:
+                if answer_prefix is not None and answer_prefix.strip():
+                    thought_budget = (
+                        min(96, max(36, int(max_new_tokens * 0.38)))
+                        if max_new_tokens >= 128
+                        else max(12, max_new_tokens // 2)
+                    )
+                else:
+                    thought_budget = (
+                        min(220, max(96, int(max_new_tokens * 0.62)))
+                        if max_new_tokens >= 128
+                        else max(16, int(max_new_tokens * 0.55))
+                    )
+            else:
+                thought_budget = (
+                    min(140, max(56, int(max_new_tokens * 0.35)))
+                    if max_new_tokens >= 128
+                    else max(12, max_new_tokens // 2)
+                )
             grace_tokens = 32 if max_new_tokens >= 128 else 0
             hard_max_steps = max_new_tokens + grace_tokens
             use_amp = device.type == "cuda"
@@ -483,6 +497,10 @@ class MultiPassController(nn.Module):
             hash_start_ids = getattr(self.tokenizer, "_hash_start_ids", frozenset({ord("#")}))
             xml_open_ids = getattr(self.tokenizer, "_xml_open_ids", frozenset({ord("<")}))
             str_to_id = getattr(self.tokenizer, "_str_to_id", {})
+            pure_newline_ids = frozenset(
+                {10} | {str_to_id[m] for m in ("\n", "\n\n") if m in str_to_id}
+            )
+            punct_sent_end_ids = sent_end_ids - newline_ids
             forbidden_marker_ids = [
                 str_to_id[m]
                 for m in (
@@ -510,20 +528,28 @@ class MultiPassController(nn.Module):
             while step < hard_max_steps and len(tokens) < max_seq:
                 if not has_emitted_a and step >= thought_budget:
                     if max_new_tokens >= 128:
-                        at_sentence = (
-                            tokens[-1] in sent_end_ids
-                            or (
-                                len(tokens) >= 2
-                                and tokens[-2] in sent_end_ids
-                                and tokens[-1] in (32, 10)
-                            )
-                        )
                         if is_morph:
+                            at_sentence = (
+                                tokens[-1] in punct_sent_end_ids
+                                or (
+                                    len(tokens) >= 2
+                                    and tokens[-2] in punct_sent_end_ids
+                                    and tokens[-1] in pure_newline_ids
+                                )
+                            )
                             at_boundary = at_sentence
                             force_transition = step >= max(
-                                thought_budget + 36, max_new_tokens - 36
+                                thought_budget + 36, max_new_tokens - 48
                             )
                         else:
+                            at_sentence = (
+                                tokens[-1] in sent_end_ids
+                                or (
+                                    len(tokens) >= 2
+                                    and tokens[-2] in sent_end_ids
+                                    and tokens[-1] in (32, 10)
+                                )
+                            )
                             at_clause_word = (
                                 step >= thought_budget + 28
                                 and tokens[-1] in clause_end_ids
@@ -534,7 +560,7 @@ class MultiPassController(nn.Module):
                             )
                             at_boundary = at_sentence or at_clause_word
                     else:
-                        at_boundary = tokens[-1] in (sent_end_ids if is_morph else clause_end_ids)
+                        at_boundary = tokens[-1] in (punct_sent_end_ids if is_morph else clause_end_ids)
                         force_transition = step >= min(
                             max(thought_budget, max_new_tokens - 12), thought_budget + 12
                         )
@@ -556,7 +582,7 @@ class MultiPassController(nn.Module):
 
                 # Once past max_new_tokens (in grace window), stop cleanly as soon as #A$# hits a sentence boundary
                 if has_emitted_a and step >= max_new_tokens:
-                    if tokens[-1] in sent_end_ids:
+                    if tokens[-1] in (punct_sent_end_ids if is_morph else sent_end_ids):
                         break
 
                 inp = torch.tensor([tokens], dtype=torch.long, device=device)
@@ -617,12 +643,17 @@ class MultiPassController(nn.Module):
                     next_logits[self.tokenizer.eos_id] = -torch.inf
 
                 # Prevent premature tag transition before minimum thought budget
-                if not has_emitted_a and tokens[-1] in newline_ids and step < min(48, thought_budget):
+                if not is_morph and not has_emitted_a and tokens[-1] in newline_ids and step < min(48, thought_budget):
                     next_logits[ord("#")] = -torch.inf
 
                 # Permit paragraph breaks (\n\n) in multi-step reasoning traces while preventing >=3 consecutive newlines,
                 # mid-line consecutive spaces, or single-letter space alternation ("t a e o").
-                if len(tokens) >= 2 and tokens[-1] in newline_ids and tokens[-2] in newline_ids:
+                if is_morph:
+                    if len(tokens) >= 2 and tokens[-1] in pure_newline_ids and tokens[-2] in pure_newline_ids:
+                        for nl_id in pure_newline_ids:
+                            if nl_id < logit_bound:
+                                next_logits[nl_id] = -torch.inf
+                elif len(tokens) >= 2 and tokens[-1] in newline_ids and tokens[-2] in newline_ids:
                     for nl_id in newline_ids:
                         if nl_id < logit_bound:
                             next_logits[nl_id] = -torch.inf
@@ -647,27 +678,48 @@ class MultiPassController(nn.Module):
 
                 # Antidoom span-loop guard: detect and suppress only the exact trigger token that restarts a repeated span
                 gen_window = tokens[max(prompt_len, len(tokens) - 128) :]
-                if len(gen_window) >= 6:
-                    ctx5 = gen_window[-5:]
-                    for i in range(len(gen_window) - 5):
-                        if gen_window[i : i + 5] == ctx5:
-                            trig_b = gen_window[i + 5]
-                            if (32 <= trig_b < 127) or trig_b >= 260:
-                                next_logits[trig_b] -= 6.0
-                if len(gen_window) >= 4:
-                    ctx3 = gen_window[-3:]
-                    hits_3: dict[int, int] = {}
-                    for i in range(len(gen_window) - 3):
-                        if gen_window[i : i + 3] == ctx3:
-                            trig_b = gen_window[i + 3]
-                            hits_3[trig_b] = hits_3.get(trig_b, 0) + 1
-                    for trig_b, cnt in hits_3.items():
-                        if cnt >= 2 and ((32 <= trig_b < 127) or trig_b >= 260):
-                            next_logits[trig_b] -= 4.5 * cnt
+                if is_morph:
+                    if len(gen_window) >= 7:
+                        ctx6 = gen_window[-6:]
+                        for i in range(len(gen_window) - 6):
+                            if gen_window[i : i + 6] == ctx6:
+                                trig_b = gen_window[i + 6]
+                                if (32 <= trig_b < 127) or trig_b >= 260:
+                                    next_logits[trig_b] -= 5.0
+                    if len(gen_window) >= 5:
+                        ctx4 = gen_window[-4:]
+                        hits_4: dict[int, int] = {}
+                        for i in range(len(gen_window) - 4):
+                            if gen_window[i : i + 4] == ctx4:
+                                trig_b = gen_window[i + 4]
+                                hits_4[trig_b] = hits_4.get(trig_b, 0) + 1
+                        for trig_b, cnt in hits_4.items():
+                            if cnt >= 3 and ((32 <= trig_b < 127) or trig_b >= 260):
+                                next_logits[trig_b] -= 4.0 * (cnt - 1)
+                else:
+                    if len(gen_window) >= 6:
+                        ctx5 = gen_window[-5:]
+                        for i in range(len(gen_window) - 5):
+                            if gen_window[i : i + 5] == ctx5:
+                                trig_b = gen_window[i + 5]
+                                if (32 <= trig_b < 127) or trig_b >= 260:
+                                    next_logits[trig_b] -= 6.0
+                    if len(gen_window) >= 4:
+                        ctx3 = gen_window[-3:]
+                        hits_3: dict[int, int] = {}
+                        for i in range(len(gen_window) - 3):
+                            if gen_window[i : i + 3] == ctx3:
+                                trig_b = gen_window[i + 3]
+                                hits_3[trig_b] = hits_3.get(trig_b, 0) + 1
+                        for trig_b, cnt in hits_3.items():
+                            if cnt >= 2 and ((32 <= trig_b < 127) or trig_b >= 260):
+                                next_logits[trig_b] -= 4.5 * cnt
 
                 # Prevent XML/HTML tag openers ('<') or markdown headers ('#') at start of #T$# or #A$#, 3x identical token repeats, or 2x punctuation
-                if step == 0 or (has_emitted_a and len(tokens) == a_start_token_idx) or (
-                    len(tokens) >= len(a_tag_tokens) and tokens[-len(a_tag_tokens) :] == a_tag_tokens
+                if not is_morph and (
+                    step == 0
+                    or (has_emitted_a and len(tokens) == a_start_token_idx)
+                    or (len(tokens) >= len(a_tag_tokens) and tokens[-len(a_tag_tokens) :] == a_tag_tokens)
                 ):
                     for xid in xml_open_ids:
                         if xid < logit_bound:
@@ -677,7 +729,7 @@ class MultiPassController(nn.Module):
                             next_logits[hid] = -torch.inf
                 if len(tokens) >= 3 and tokens[-1] == tokens[-2] == tokens[-3]:
                     next_logits[tokens[-1]] = -torch.inf
-                elif len(tokens) >= 2 and tokens[-1] == tokens[-2]:
+                elif not is_morph and len(tokens) >= 2 and tokens[-1] == tokens[-2]:
                     if tokens[-1] >= 260 or not chr(min(126, max(32, tokens[-1]))).isalnum():
                         next_logits[tokens[-1]] = -torch.inf
 
@@ -689,9 +741,10 @@ class MultiPassController(nn.Module):
 
                 # Cleanly terminate if #A$# is complete and the model attempts to open a new episode marker after newline
                 if (
-                    has_emitted_a
+                    not is_morph
+                    and has_emitted_a
                     and a_start_token_idx > 0
-                    and len(tokens) - a_start_token_idx >= (16 if is_morph else 32)
+                    and len(tokens) - a_start_token_idx >= 32
                     and tokens[-1] in newline_ids
                     and (next_id in hash_start_ids or next_id in xml_open_ids)
                 ):
@@ -701,14 +754,14 @@ class MultiPassController(nn.Module):
                 if (
                     has_emitted_a
                     and a_start_token_idx > 0
-                    and tokens[-1] in (sent_end_ids - newline_ids)
+                    and tokens[-1] in punct_sent_end_ids
                     and (
                         (
                             bool(ap_toks)
                             and len(tokens) - a_start_token_idx >= (6 if is_morph else 18)
                             and (next_id in newline_ids or len(tokens) - a_start_token_idx >= (12 if is_morph else 36))
                         )
-                        or (step >= int(max_new_tokens * 0.82) and next_id in newline_ids)
+                        or (not is_morph and step >= int(max_new_tokens * 0.82) and next_id in newline_ids)
                     )
                 ):
                     break

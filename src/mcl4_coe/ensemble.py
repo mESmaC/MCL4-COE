@@ -523,6 +523,16 @@ class MultiPassController(nn.Module):
             a_marker_ids = [
                 str_to_id[m] for m in ("#A$#", "\n#A$#", "#A$# ") if m in str_to_id
             ]
+            fence_ids = [
+                str_to_id[m]
+                for m in ("```", "```python\n", "```python", "```\n")
+                if m in str_to_id
+            ]
+            tab_ids = [
+                str_to_id[m]
+                for m in ("\t", "\n\t", "\n\t\t")
+                if m in str_to_id
+            ]
 
             step = 0
             while step < hard_max_steps and len(tokens) < max_seq:
@@ -630,9 +640,14 @@ class MultiPassController(nn.Module):
                 next_logits[self.tokenizer.bos_id] = -torch.inf
                 if is_morph:
                     next_logits[self.tokenizer.unk_id] = -torch.inf
+                    for tid in tab_ids:
+                        next_logits[tid] = -torch.inf
                     for fid in forbidden_marker_ids:
                         next_logits[fid] = -torch.inf
-                    if has_emitted_a or step < min(8, thought_budget // 2):
+                    if not has_emitted_a and step < 4:
+                        for f_id in fence_ids:
+                            next_logits[f_id] = -torch.inf
+                    if has_emitted_a or step < min(4, thought_budget // 2):
                         for aid in a_marker_ids:
                             next_logits[aid] = -torch.inf
 
@@ -694,8 +709,8 @@ class MultiPassController(nn.Module):
                                 trig_b = gen_window[i + 4]
                                 hits_4[trig_b] = hits_4.get(trig_b, 0) + 1
                         for trig_b, cnt in hits_4.items():
-                            if cnt >= 3 and ((32 <= trig_b < 127) or trig_b >= 260):
-                                next_logits[trig_b] -= 4.0 * (cnt - 1)
+                            if cnt >= 2 and ((32 <= trig_b < 127) or trig_b >= 260):
+                                next_logits[trig_b] -= 4.5 * cnt
                 else:
                     if len(gen_window) >= 6:
                         ctx5 = gen_window[-5:]

@@ -650,6 +650,9 @@ _SCAFFOLD_CANDIDATES: tuple[str, ...] = (
     "association -> deduction -> decision -> evaluation -> metacognition",
     "abduction -> deduction -> decision -> metacognition",
     "decision -> deduction -> evaluation -> metacognition",
+    "abstraction -> deduction -> decision -> evaluation -> metacognition",
+    "induction -> abstraction -> deduction -> decision -> metacognition",
+    "analogy -> abduction -> deduction -> decision -> evaluation -> metacognition",
 )
 
 _SAFE_AST_NODES = (
@@ -661,6 +664,7 @@ _SAFE_AST_NODES = (
     ast.Assert,
     ast.Expr,
     ast.Assign,
+    ast.AnnAssign,
     ast.AugAssign,
     ast.If,
     ast.For,
@@ -674,6 +678,7 @@ _SAFE_AST_NODES = (
     ast.Compare,
     ast.IfExp,
     ast.Call,
+    ast.Attribute,
     ast.Name,
     ast.Constant,
     ast.Subscript,
@@ -682,6 +687,11 @@ _SAFE_AST_NODES = (
     ast.List,
     ast.Dict,
     ast.Set,
+    ast.ListComp,
+    ast.SetComp,
+    ast.DictComp,
+    ast.GeneratorExp,
+    ast.comprehension,
     ast.Load,
     ast.Store,
     ast.Add,
@@ -694,6 +704,9 @@ _SAFE_AST_NODES = (
     ast.BitXor,
     ast.BitAnd,
     ast.BitOr,
+    ast.LShift,
+    ast.RShift,
+    ast.Invert,
     ast.USub,
     ast.UAdd,
     ast.Not,
@@ -707,19 +720,79 @@ _SAFE_AST_NODES = (
     ast.GtE,
     ast.In,
     ast.NotIn,
+    ast.Is,
+    ast.IsNot,
 )
 _SAFE_BUILTINS: dict[str, Any] = {
     "abs": abs,
+    "all": all,
+    "any": any,
     "bool": bool,
+    "chr": chr,
+    "dict": dict,
+    "divmod": divmod,
+    "enumerate": enumerate,
+    "filter": filter,
     "float": float,
     "int": int,
     "len": len,
+    "list": list,
+    "map": map,
     "max": max,
     "min": min,
+    "ord": ord,
+    "pow": pow,
     "range": range,
+    "reversed": reversed,
     "round": round,
+    "set": set,
+    "sorted": sorted,
+    "str": str,
     "sum": sum,
+    "tuple": tuple,
+    "zip": zip,
 }
+_SAFE_METHOD_ATTRS: frozenset[str] = frozenset(
+    {
+        "append",
+        "extend",
+        "pop",
+        "insert",
+        "remove",
+        "sort",
+        "reverse",
+        "copy",
+        "clear",
+        "index",
+        "count",
+        "get",
+        "keys",
+        "values",
+        "items",
+        "update",
+        "setdefault",
+        "add",
+        "discard",
+        "union",
+        "intersection",
+        "difference",
+        "split",
+        "splitlines",
+        "join",
+        "strip",
+        "lstrip",
+        "rstrip",
+        "replace",
+        "lower",
+        "upper",
+        "isdigit",
+        "isalpha",
+        "isalnum",
+        "startswith",
+        "endswith",
+        "find",
+    }
+)
 _HACK_STUB_MARKERS: tuple[str, ...] = (
     "Constant stub",
     "Default fallback",
@@ -733,6 +806,83 @@ _HACK_STUB_MARKERS: tuple[str, ...] = (
 )
 
 
+def _verify_thought_equations(t_body: str) -> float:
+    """Check explicit integer `A op B = C` equations inside `#T$#`; return `0.25` if any arithmetic equation is false."""
+    import re
+
+    if "mod" in t_body.lower() or "%" in t_body or "^" in t_body:
+        return 1.0
+    # Match isolated `A op B = C` where A, B, C are not part of a chained expression like `A + B * C = D`
+    pattern = re.compile(r"(?<![\w*+\-/])(\d+)\s*([+\-*])\s*(\d+)\s*=\s*(-?\d+)(?!\s*[*+\-/^])")
+    for m in pattern.finditer(t_body):
+        lhs_a = int(m.group(1))
+        op = m.group(2)
+        lhs_b = int(m.group(3))
+        rhs_c = int(m.group(4))
+        expected = (
+            lhs_a + lhs_b
+            if op == "+"
+            else (lhs_a - lhs_b if op == "-" else lhs_a * lhs_b)
+        )
+        if expected != rhs_c:
+            return 0.25
+    return 1.0
+
+
+def _verify_ifeval_constraints(a_body: str, spec: str, gold_answer: str = "") -> float:
+    """Deterministically verify semicolon-separated `ifeval:` instruction-following & math constraints."""
+    import json
+    import re
+
+    rules = [r.strip() for r in spec[len("ifeval:") :].split(";") if r.strip()]
+    if not rules:
+        return 1.0 if (gold_answer and a_body.strip() == gold_answer.strip()) else 0.0
+
+    passed = 0
+    for rule in rules:
+        if rule == "lowercase":
+            if a_body == a_body.lower():
+                passed += 1
+        elif rule == "uppercase":
+            if a_body == a_body.upper():
+                passed += 1
+        elif rule == "no_comma":
+            if "," not in a_body:
+                passed += 1
+        elif rule == "json_valid":
+            try:
+                json.loads(a_body)
+                passed += 1
+            except Exception:
+                pass
+        elif rule.startswith("min_words:"):
+            n_w = int(rule.split(":", 1)[1])
+            if len(a_body.split()) >= n_w:
+                passed += 1
+        elif rule.startswith("max_words:"):
+            n_w = int(rule.split(":", 1)[1])
+            if 0 < len(a_body.split()) <= n_w:
+                passed += 1
+        elif rule.startswith("keyword:"):
+            kw = rule.split(":", 1)[1].strip().lower()
+            if kw and kw in a_body.lower():
+                passed += 1
+        elif rule.startswith("forbidden:"):
+            fw = rule.split(":", 1)[1].strip().lower()
+            if fw and fw not in a_body.lower():
+                passed += 1
+        elif rule.startswith("exact_int:"):
+            target_int = int(rule.split(":", 1)[1].strip())
+            nums = [int(x) for x in re.findall(r"-?\d+", a_body)]
+            if nums and target_int in nums:
+                passed += 1
+        elif rule.startswith("exact_answer:"):
+            target_str = rule.split(":", 1)[1].strip()
+            if target_str and target_str.lower() in a_body.lower():
+                passed += 1
+    return float(passed) / float(len(rules))
+
+
 def verify_python_rollout(
     trace_text: str,
     harness_h: str,
@@ -743,8 +893,10 @@ def verify_python_rollout(
     Enforces:
     1. Mandatory non-empty `#T$#` scratchpad before `#A$#` (returns `0.0` if missing).
     2. Rejection of boundary/constant hack stubs (`0.0`).
-    3. Multi-line AST-validated compiler, static linter (`FunctionDef` + `Return`), and sandboxed
-       execution of `def solve(...)` + `assert ...` or relational invariant assertions.
+    3. Inline `#T$#` arithmetic equation consistency check (`_verify_thought_equations`).
+    4. Multi-line AST-validated compiler, single-function purity check (`FunctionDef` + `Return`),
+       and sandboxed execution of `def solve(...)` + `assert ...`, relational invariant assertions,
+       or `ifeval:` constraint verification.
     """
     import re
 
@@ -760,7 +912,13 @@ def verify_python_rollout(
     if not t_body or not a_body:
         return 0.0
 
+    thought_consistency = _verify_thought_equations(t_body)
     harness_clean = harness_h.strip()
+
+    # Case 0: Instruction-following / mixed-constraint verifier (`ifeval:...`)
+    if harness_clean.startswith("ifeval:"):
+        if_score = _verify_ifeval_constraints(a_body, harness_clean, gold_answer)
+        return round(if_score * thought_consistency, 4)
 
     # Case 1: Executable single-line or multi-line indented Python function + `assert solve(...) == ...`
     if "def " in a_body and harness_clean.startswith("assert "):
@@ -773,23 +931,36 @@ def verify_python_rollout(
         program_src = f"{code_src}\n{harness_clean}\n"
         try:
             code_tree = ast.parse(code_src, mode="exec")
-            has_func = any(isinstance(n, ast.FunctionDef) for n in ast.walk(code_tree))
+            func_defs = [n for n in code_tree.body if isinstance(n, ast.FunctionDef)]
             has_return = any(isinstance(n, ast.Return) and n.value is not None for n in ast.walk(code_tree))
-            if not (has_func and has_return):
+            if not func_defs or not has_return:
+                return 0.0
+            # Reject duplicate/shadowing function definitions (`def solve` defined twice in #A$#)
+            if len({f.name for f in func_defs}) != len(func_defs):
+                return 0.0
+            # Require top-level statements in #A$# to be FunctionDef or constant Assign
+            if not all(isinstance(stmt, (ast.FunctionDef, ast.Assign)) for stmt in code_tree.body):
                 return 0.0
             tree = ast.parse(program_src, mode="exec")
             for node in ast.walk(tree):
                 if not isinstance(node, _SAFE_AST_NODES):
                     return 0.0
-                if isinstance(node, ast.Call):
-                    if not isinstance(node.func, ast.Name):
+                if isinstance(node, ast.Attribute):
+                    if node.attr.startswith("_") or node.attr not in _SAFE_METHOD_ATTRS:
                         return 0.0
+                if isinstance(node, ast.Call):
+                    if isinstance(node.func, ast.Name):
+                        continue
+                    if isinstance(node.func, ast.Attribute) and node.func.attr in _SAFE_METHOD_ATTRS:
+                        continue
+                    return 0.0
             env: dict[str, Any] = {"__builtins__": dict(_SAFE_BUILTINS)}
             exec(compile(tree, "<ornith_verifier>", "exec"), env, env)
-            return 1.0
+            return 1.0 * thought_consistency
         except AssertionError:
             # Compiles and passes AST lint checks (`FunctionDef` + `Return`), but failed unit test assertion
-            return 0.25 if any(op in t_body for op in ("*", "+", "-", "if", "for", "return")) else 0.15
+            base_partial = 0.25 if any(op in t_body for op in ("*", "+", "-", "if", "for", "return")) else 0.15
+            return base_partial * thought_consistency
         except Exception:
             return 0.0
 
@@ -799,8 +970,8 @@ def verify_python_rollout(
         first_num = nums[0]
         if harness_clean.lstrip("-").isdigit():
             if first_num == int(harness_clean):
-                return 1.0
-            return 0.15 if any(op in t_body for op in ("*", "+", "-")) else 0.0
+                return 1.0 * thought_consistency
+            return (0.15 if any(op in t_body for op in ("*", "+", "-")) else 0.0) * thought_consistency
 
         env_expr: dict[str, Any] = {
             "__builtins__": dict(_SAFE_BUILTINS),
@@ -820,13 +991,13 @@ def verify_python_rollout(
                     return 0.0
             passed = bool(eval(compile(tree_expr, "<ornith_expr>", "eval"), env_expr, env_expr))
             if passed:
-                return 1.0
+                return 1.0 * thought_consistency
         except Exception:
             pass
 
     if gold_answer and a_body == gold_answer.strip():
-        return 1.0
-    return 0.15 if any(op in t_body for op in ("*", "+", "-", "=")) else 0.0
+        return 1.0 * thought_consistency
+    return (0.15 if any(op in t_body for op in ("*", "+", "-", "=")) else 0.0) * thought_consistency
 
 
 class defaultdict_int(dict):
@@ -840,22 +1011,71 @@ class defaultdict_int(dict):
         return self._val
 
 
+class OrnithEnvArchitect:
+    """Self-scaffolding curriculum & cross-template compositional environment architect for Ornith-2.0.
+
+    Monitors empirical pass rate $\\hat{p}_k$, deduction alignment $C_k$, and frontier difficulty
+    $D(\\hat{p}_k; p^*=0.25)$ across all 24 procedural/compositional families (`0..19` primitive,
+    `20..23` cross-template compositional) and dynamically promotes `difficulty_tier` ($1 \\dots 4$)
+    and cross-template composition probability whenever a family's pass rate exceeds `0.78`.
+    """
+
+    NUM_PRIMITIVE_FAMILIES: int = 20
+    NUM_COMPOSITIONAL_FAMILIES: int = 4
+    TOTAL_FAMILIES: int = 24
+
+    def __init__(self, target_pass_rate: float = 0.25, ema_beta: float = 0.70) -> None:
+        self.target_pass_rate = float(target_pass_rate)
+        self.ema_beta = float(ema_beta)
+        self.family_pass_ema: list[float] = [0.50 for _ in range(self.TOTAL_FAMILIES)]
+        self.family_tiers: list[int] = [1 for _ in range(self.TOTAL_FAMILIES)]
+        self.family_counts: list[int] = [0 for _ in range(self.TOTAL_FAMILIES)]
+        self.compositional_boost: float = 0.20
+
+    def difficulty_tier(self, kind: int) -> int:
+        return int(self.family_tiers[kind % self.TOTAL_FAMILIES])
+
+    def select_family(self, idx: int, seed: int = 42) -> int:
+        """Select task family `0..23`, boosting compositional families (`20..23`) as primitive families saturate."""
+        base_slot = idx % self.TOTAL_FAMILIES
+        # Every 3rd step if primitive pass rates are high, route to a cross-template compositional family (20..23)
+        mean_prim_pass = sum(self.family_pass_ema[: self.NUM_PRIMITIVE_FAMILIES]) / float(self.NUM_PRIMITIVE_FAMILIES)
+        if mean_prim_pass > 0.72 and (idx % 3 == 2) and base_slot < self.NUM_PRIMITIVE_FAMILIES:
+            return self.NUM_PRIMITIVE_FAMILIES + ((idx + seed) % self.NUM_COMPOSITIONAL_FAMILIES)
+        return base_slot
+
+    def record_outcome(self, kind: int, pass_prob: float, alignment: float = 1.0) -> None:
+        """Update EMA pass rate for `kind` and promote `difficulty_tier` (`1 -> 4`) when saturated."""
+        k = kind % self.TOTAL_FAMILIES
+        self.family_counts[k] += 1
+        ema = self.ema_beta * self.family_pass_ema[k] + (1.0 - self.ema_beta) * float(pass_prob)
+        self.family_pass_ema[k] = ema
+        if ema > 0.78 and self.family_tiers[k] < 4 and self.family_counts[k] >= 2:
+            self.family_tiers[k] += 1
+            # Soft-reset EMA toward frontier when tier increases
+            self.family_pass_ema[k] = 0.55
+        elif ema < 0.18 and self.family_tiers[k] > 1 and self.family_counts[k] >= 4:
+            self.family_tiers[k] -= 1
+            self.family_pass_ema[k] = 0.45
+
+
 class OrnithSelfImprover:
-    """Executes the closed-loop Ornith-1.0 Self-Scaffolding, Ornith-1.5 Self-Improvement, and Dream-RSI cycle.
+    """Executes the closed-loop Ornith-1.0/2.0 Self-Scaffolding, Self-Improvement, and Dream-RSI cycle.
 
     Combines:
     - Stage 0 (`Dream-RSI` Evolving Worlds): Expands an online discovery tree $\\mathcal{T}_t$
       using active exploration policy $\\pi_t$, appends $\\mathcal{T}_t$ to the replay
       simulator pool $\\mathcal{H}_t$, and dreams $M$ candidate policy revisions offline at
       zero execution cost ($\\mathcal{H}_t \\xrightarrow{\\text{replay}} \\pi_{t+1}$).
-    - Stage 1 (`#Q$#` Proposer): Computes `<0.1ms` `Association` Novelty $N(q)$ against
-      `NoveltyTaskBuffer` and capability-frontier difficulty $D(p; p^*=0.20)$ for $R_{\\text{task}}$.
+    - Stage 1 (`#Q$#` Proposer & `OrnithEnvArchitect`): Computes `<0.1ms` `Association` Novelty $N(q)$
+      against `NoveltyTaskBuffer`, capability-frontier difficulty $D(p; p^*=0.20)$ for $R_{\\text{task}}$,
+      and dynamically composes cross-template RL environments as primitive templates saturate.
     - Stage 2 (`#H$# / #S$#` Architect): Scores Task Alignment $C(q, h)$ via `Deduction` and
       Reward Fidelity $F(h, \\{\\tau_i\\})$ via `Evaluation` (`compute_harness_reward`), while
       updating `ScaffoldCache` monotonically.
     - Stage 3 (`#T$# -> #A$#` Solver): Updates policy weights via staleness-weighted
       `grpo_clipped_loss` over group-normalized rollout advantages + `0x8000` masked
-      self-distillation on verified winning `#U$# -> #S$# -> #T$# -> #A$#` traces.
+      self-distillation + `MorphCode-16K` first-divergence `Antidoom FTPO`.
     """
 
     def __init__(
@@ -868,7 +1088,10 @@ class OrnithSelfImprover:
         enable_dream_rsi: bool = False,
         dream_every: int = 1,
         dream_engine: Any | None = None,
+        external_pool_path: str | Any | None = None,
+        external_tasks: list[OrnithTask] | None = None,
     ) -> None:
+        from pathlib import Path
         from .data import ByteTokenizer
         from .dream_rsi import DreamRSIEngine
 
@@ -881,6 +1104,7 @@ class OrnithSelfImprover:
             device=self.device,
         )
         self.scaffold_cache = ScaffoldCache()
+        self.env_architect = OrnithEnvArchitect()
         self._step_counter = 0
         self._rng_seed = seed
         self.enable_dream_rsi = enable_dream_rsi or (dream_engine is not None)
@@ -889,13 +1113,41 @@ class OrnithSelfImprover:
             DreamRSIEngine(seed=seed) if self.enable_dream_rsi else None
         )
         self._last_dream_out: Any | None = None
+        self.external_tasks: list[OrnithTask] = list(external_tasks) if external_tasks else []
+        self._last_task_kinds: dict[str, int] = {}
+        if external_pool_path is not None and not self.external_tasks:
+            p = Path(external_pool_path)
+            if p.is_file():
+                try:
+                    loaded = torch.load(p, map_location="cpu", weights_only=False)
+                    if isinstance(loaded, list):
+                        self.external_tasks = [t for t in loaded if isinstance(t, OrnithTask)]
+                    elif isinstance(loaded, dict) and "tasks" in loaded:
+                        self.external_tasks = [
+                            t if isinstance(t, OrnithTask) else OrnithTask(**t)
+                            for t in loaded["tasks"]
+                        ]
+                except Exception:
+                    self.external_tasks = []
 
     def _generate_task(self, idx: int, *, compact: bool = False) -> OrnithTask:
-        """Synthesize a verifiable coding, symbolic math, physics, or project-management task (#Q$#)."""
-        kind = idx % 12
-        a = 3 + ((idx * 7 + self._rng_seed) % 19)
-        b = 2 + ((idx * 11 + self._rng_seed) % 13)
-        c = 1 + ((idx * 5) % 9)
+        """Synthesize a verifiable coding, math, physics, logic, IFEval, or cross-template compositional task (#Q$#)."""
+        # Mix curated external HF RLVR tasks (when loaded and non-compact) with live procedural + compositional tasks
+        if not compact and self.external_tasks and (idx % 2 == 1):
+            ext_idx = ((idx // 2) * 131 + self._rng_seed) % len(self.external_tasks)
+            ext_task = self.external_tasks[ext_idx]
+            cached_s = self.scaffold_cache.get(
+                ext_task.task_id,
+                default=ext_task.scaffold_s or _SCAFFOLD_CANDIDATES[idx % len(_SCAFFOLD_CANDIDATES)],
+            )
+            return replace(ext_task, scaffold_s=cached_s)
+
+        kind = self.env_architect.select_family(idx, seed=self._rng_seed)
+        tier = self.env_architect.difficulty_tier(kind)
+        scale = tier  # Scales operand magnitudes and multi-step depth across tiers 1..4
+        a = (3 * scale) + ((idx * 7 + self._rng_seed) % (19 * scale))
+        b = (2 * scale) + ((idx * 11 + self._rng_seed) % (13 * scale))
+        c = 1 + ((idx * 5 + tier) % (9 + 2 * scale))
         shift = idx % 4
 
         def _permute(
@@ -942,13 +1194,13 @@ class OrnithSelfImprover:
                 f"#Q$# [code] Return verified implementation and result."
             )
             harness_h = f"assert solve({a}, {b}, {c}) == {ans_val}"
-            gold_t = f"Multiply {a}*{b}={a*b}, then add {c} to get {ans_val}."
-            gold_a = f"def solve(x, y, z):\n    res = x * y + z\n    return res"
+            gold_t = f"Multiply {a} * {b} = {a*b}, then add {c} to get {ans_val}."
+            gold_a = "def solve(x, y, z):\n    res = x * y + z\n    return res"
             base_cands = (
                 f"#T$# {gold_t}\n#A$# {gold_a}",
-                f"#T$# Add {a}+{b*c}={a+b*c}.\n#A$# def solve(x, y, z):\n    return x + y * z",
-                f"#T$# Subtract {a*b}-{c}={a*b-c}.\n#A$# def solve(x, y, z):\n    return x * y - z",
-                f"#T$# Constant stub.\n#A$# def solve(x, y, z):\n    return 0",
+                f"#T$# Add {a} + {b*c} = {a+b*c}.\n#A$# def solve(x, y, z):\n    return x + y * z",
+                f"#T$# Subtract {a*b} - {c} = {a*b-c}.\n#A$# def solve(x, y, z):\n    return x * y - z",
+                "#T$# Constant stub.\n#A$# def solve(x, y, z):\n    return 0",
             )
             base_scores = (1.0, 0.25, 0.20, 0.0)
             domain = "algorithmic_code"
@@ -961,13 +1213,13 @@ class OrnithSelfImprover:
                 f"#Q$# [deduction] How many active kernels are launched by Service A?"
             )
             harness_h = f"expected == {active_edges}"
-            gold_t = f"2-hop product: {a} workers * {c} kernels = {active_edges} (ignore {b} idle queues)."
+            gold_t = f"2-hop product: {a} * {c} = {active_edges} (ignore {b} idle queues)."
             gold_a = f"{active_edges}"
             base_cands = (
                 f"#T$# {gold_t}\n#A$# {gold_a}",
-                f"#T$# Sum all entities: {a}+{b}+{c}={a+b+c}.\n#A$# {a+b+c}",
+                f"#T$# Sum entities: {a} + {b} = {a+b}, plus {c} gives {a+b+c}.\n#A$# {a+b+c}",
                 f"#T$# Include idle queues: ({a}+{b})*{c}={(a+b)*c}.\n#A$# {(a+b)*c}",
-                f"#T$# Default fallback.\n#A$# 1",
+                "#T$# Default fallback.\n#A$# 1",
             )
             base_scores = (1.0, 0.10, 0.20, 0.0)
             domain = "multi_hop_deduction"
@@ -979,13 +1231,13 @@ class OrnithSelfImprover:
                 f"#Q$# [evaluation] Compute the invariant difference `acc - base`."
             )
             harness_h = f"delta == {diff_val}"
-            gold_t = f"Distribute: (i + {b})*{c} - i*{c} = {b}*{c} = {diff_val}."
+            gold_t = f"Distribute: {b} * {c} = {diff_val}."
             gold_a = f"{diff_val}"
             base_cands = (
                 f"#T$# {gold_t}\n#A$# {gold_a}",
-                f"#T$# Multiply index {a}*{b}={a*b}.\n#A$# {a*b}",
-                f"#T$# Add offsets {b}+{c}={b+c}.\n#A$# {b+c}",
-                f"#T$# Zero delta.\n#A$# 0",
+                f"#T$# Multiply index {a} * {b} = {a*b}.\n#A$# {a*b}",
+                f"#T$# Add offsets {b} + {c} = {b+c}.\n#A$# {b+c}",
+                "#T$# Zero delta.\n#A$# 0",
             )
             base_scores = (1.0, 0.10, 0.15, 0.0)
             domain = "invariant_verification"
@@ -997,12 +1249,12 @@ class OrnithSelfImprover:
                 f"#Q$# [deduction] Evaluate `dp[{c}]` in closed form."
             )
             harness_h = f"dp[{c}] == {dp_n}"
-            gold_t = f"Unroll {c} steps: dp[{c}] = dp[0] + {c}*{b} = {a} + {c*b} = {dp_n}."
+            gold_t = f"Unroll {c} steps: {c} * {b} = {c*b}, then {a} + {c*b} = {dp_n}."
             gold_a = f"{dp_n}"
             base_cands = (
-                f"#T$# {gold_t}\n#A$# {gold_a}",
-                f"#T$# Off-by-one step: {a} + {c-1}*{b} = {a+(c-1)*b}.\n#A$# {a+(c-1)*b}",
-                f"#T$# Multiply base: {a}*{c} + {b} = {a*c+b}.\n#A$# {a*c+b}",
+                f"#T$# {gold_t}\n#A$# {dp_n}",
+                f"#T$# Off-by-one step: {a} + {(c-1)*b} = {a+(c-1)*b}.\n#A$# {a+(c-1)*b}",
+                f"#T$# Multiply base: {a*c} + {b} = {a*c+b}.\n#A$# {a*c+b}",
                 f"#T$# Return base dp[0].\n#A$# {a}",
             )
             base_scores = (1.0, 0.20, 0.10, 0.0)
@@ -1015,13 +1267,13 @@ class OrnithSelfImprover:
                 f"#Q$# [code] Simplify the XOR involution and return `y`."
             )
             harness_h = f"y == {xor_val + c}"
-            gold_t = f"By XOR involution (x ^ m) ^ m == x, ({a} ^ {b}) ^ {b} = {a}; add {c} -> {a + c}."
+            gold_t = f"By XOR involution (x ^ m) ^ m == x, ({a} ^ {b}) ^ {b} = {a}; add {a} + {c} = {a + c}."
             gold_a = f"{a + c}"
             base_cands = (
                 f"#T$# {gold_t}\n#A$# {gold_a}",
-                f"#T$# Cancel all bits to 0 + {c}.\n#A$# {c}",
-                f"#T$# Sum operands {a}+{b}+{c}={a+b+c}.\n#A$# {a+b+c}",
-                f"#T$# Mask overflow.\n#A$# -1",
+                f"#T$# Cancel all bits to 0 + {c} = {c}.\n#A$# {c}",
+                f"#T$# Sum operands {a} + {b} = {a+b}, plus {c} gives {a+b+c}.\n#A$# {a+b+c}",
+                "#T$# Mask overflow.\n#A$# -1",
             )
             base_scores = (1.0, 0.15, 0.10, 0.0)
             domain = "bitmask_verification"
@@ -1035,13 +1287,13 @@ class OrnithSelfImprover:
                 f"#Q$# [code] Compute the overflow-safe midpoint `lo + (hi - lo) // 2`."
             )
             harness_h = f"mid == {mid}"
-            gold_t = f"Compute span hi - lo = {hi - lo}; half span = {b}; lo + {b} = {mid}."
+            gold_t = f"Compute span {hi} - {lo} = {hi - lo}; half span = {b}; {lo} + {b} = {mid}."
             gold_a = f"{mid}"
             base_cands = (
                 f"#T$# {gold_t}\n#A$# {gold_a}",
                 f"#T$# Subtract span {lo} - {b} = {lo - b}.\n#A$# {lo - b}",
                 f"#T$# Use full span {lo} + {2*b} = {hi}.\n#A$# {hi}",
-                f"#T$# Uninitialized pointer.\n#A$# 0",
+                "#T$# Uninitialized pointer.\n#A$# 0",
             )
             base_scores = (1.0, 0.10, 0.15, 0.0)
             domain = "binary_search"
@@ -1053,13 +1305,13 @@ class OrnithSelfImprover:
                 f"#Q$# [evaluation] What is the maximum inner-join output cardinality?"
             )
             harness_h = f"max_rows == {card}"
-            gold_t = f"At most min({a}, {b}) = {min(a, b)} keys match; with fanout {c}, max rows = {card}."
+            gold_t = f"At most min({a}, {b}) = {min(a, b)} keys match; {min(a, b)} * {c} = {card}."
             gold_a = f"{card}"
             base_cands = (
                 f"#T$# {gold_t}\n#A$# {gold_a}",
-                f"#T$# Cartesian product {a}*{b}*{c}={a*b*c}.\n#A$# {a*b*c}",
-                f"#T$# Max key bound max({a},{b})*{c}={max(a,b)*c}.\n#A$# {max(a,b)*c}",
-                f"#T$# Empty join.\n#A$# 0",
+                f"#T$# Cartesian product {a*b} * {c} = {a*b*c}.\n#A$# {a*b*c}",
+                f"#T$# Max key bound {max(a,b)} * {c} = {max(a,b)*c}.\n#A$# {max(a,b)*c}",
+                "#T$# Empty join.\n#A$# 0",
             )
             base_scores = (1.0, 0.10, 0.20, 0.0)
             domain = "relational_algebra"
@@ -1071,19 +1323,18 @@ class OrnithSelfImprover:
                 f"#Q$# [deduction] How many total lock acquisitions occur with 0 deadlock cycles?"
             )
             harness_h = f"acquisitions == {inversions} and cycles == 0"
-            gold_t = f"Strict total order prevents cycles (0 deadlocks); {b} threads * {c} locks = {inversions} acquisitions."
+            gold_t = f"Strict total order prevents cycles (0 deadlocks); {b} * {c} = {inversions} acquisitions."
             gold_a = f"{inversions} acquisitions, 0 cycles"
             base_cands = (
                 f"#T$# {gold_t}\n#A$# {gold_a}",
-                f"#T$# Multiply stages {a}*{b}={a*b} acquisitions, 1 cycle.\n#A$# {a*b} acquisitions, 1 cycle",
-                f"#T$# Sum threads {b}+{c}={b+c} acquisitions.\n#A$# {b+c} acquisitions, 0 cycles",
+                f"#T$# Multiply stages {a} * {b} = {a*b} acquisitions, 1 cycle.\n#A$# {a*b} acquisitions, 1 cycle",
+                f"#T$# Sum threads {b} + {c} = {b+c} acquisitions.\n#A$# {b+c} acquisitions, 0 cycles",
                 f"#T$# Deadlock immediately.\n#A$# 0 acquisitions, {b} cycles",
             )
             base_scores = (1.0, 0.10, 0.15, 0.0)
             domain = "concurrency_verification"
         elif kind == 8:
-            # Multi-line indented Python loop & conditional verification (Coding Pillar)
-            n_lim = c + 3
+            n_lim = (c % 7) + 3
             expected_sum = sum(i * a for i in range(1, n_lim + 1) if i % 2 == 1)
             task_id = f"code_odd_sum_{a}_{n_lim}"
             prompt_q = (
@@ -1105,14 +1356,13 @@ class OrnithSelfImprover:
             )
             base_cands = (
                 f"#T$# {gold_t}\n#A$# {gold_a}",
-                f"#T$# Sum all integers without odd filter.\n#A$# def solve(n, scale):\n    return sum(range(1, n + 1)) * scale",
-                f"#T$# Off-by-one range bound.\n#A$# def solve(n, scale):\n    return (n - 1) * scale",
-                f"#T$# Constant stub.\n#A$# def solve(n, scale):\n    return 0",
+                "#T$# Sum all integers without odd filter.\n#A$# def solve(n, scale):\n    return sum(range(1, n + 1)) * scale",
+                "#T$# Off-by-one range bound.\n#A$# def solve(n, scale):\n    return (n - 1) * scale",
+                "#T$# Constant stub.\n#A$# def solve(n, scale):\n    return 0",
             )
             base_scores = (1.0, 0.25, 0.15, 0.0)
             domain = "algorithmic_code"
         elif kind == 9:
-            # Step-by-step Symbolic Algebra Solver (Math Pillar)
             rhs = a * b + c
             task_id = f"math_linear_eq_{a}_{b}_{c}"
             prompt_q = (
@@ -1121,23 +1371,22 @@ class OrnithSelfImprover:
             )
             harness_h = f"expected == {b}"
             gold_t = (
-                f"Step 1: Subtract {c} from both sides to get {a}*x = {rhs} - {c} = {a*b}. "
-                f"Step 2: Divide both sides by {a} to isolate x = {a*b} // {a} = {b}."
+                f"Step 1: Subtract {rhs} - {c} = {a*b}. "
+                f"Step 2: Divide {a*b} // {a} = {b}."
             )
             gold_a = f"{b}"
             base_cands = (
                 f"#T$# {gold_t}\n#A$# {gold_a}",
                 f"#T$# Add {c} instead of subtracting: ({rhs} + {c}) // {a}.\n#A$# {(rhs + c) // max(1, a)}",
-                f"#T$# Subtract {a} from {rhs}: {rhs - a}.\n#A$# {rhs - a}",
-                f"#T$# Default fallback.\n#A$# 0",
+                f"#T$# Subtract {rhs} - {a} = {rhs - a}.\n#A$# {rhs - a}",
+                "#T$# Default fallback.\n#A$# 0",
             )
             base_scores = (1.0, 0.15, 0.10, 0.0)
             domain = "symbolic_math"
         elif kind == 10:
-            # Kinematics & Mechanical Energy (Physics Pillar)
             v0 = a
             accel = 2 * b
-            t_sec = c
+            t_sec = (c % 6) + 2
             disp = v0 * t_sec + (accel * t_sec * t_sec) // 2
             task_id = f"physics_kinematics_{v0}_{accel}_{t_sec}"
             prompt_q = (
@@ -1147,20 +1396,20 @@ class OrnithSelfImprover:
             )
             harness_h = f"expected == {disp}"
             gold_t = (
-                f"Apply kinematic law d = v0*t + 0.5*a*t^2: drift term v0*t = {v0}*{t_sec} = {v0*t_sec} m; "
-                f"acceleration term 0.5*{accel}*{t_sec}^2 = {(accel*t_sec*t_sec)//2} m; total d = {disp} m."
+                f"Drift term {v0} * {t_sec} = {v0*t_sec}; "
+                f"acceleration term 0.5*{accel}*{t_sec}^2 = {(accel*t_sec*t_sec)//2}; "
+                f"total {v0*t_sec} + {(accel*t_sec*t_sec)//2} = {disp}."
             )
             gold_a = f"{disp}"
             base_cands = (
                 f"#T$# {gold_t}\n#A$# {gold_a}",
                 f"#T$# Omit factor 0.5 on acceleration term: {v0*t_sec + accel*t_sec*t_sec}.\n#A$# {v0*t_sec + accel*t_sec*t_sec}",
-                f"#T$# Compute final velocity v = v0 + a*t = {v0 + accel*t_sec}.\n#A$# {v0 + accel*t_sec}",
-                f"#T$# Zero delta.\n#A$# 0",
+                f"#T$# Compute final velocity {v0} + {accel*t_sec} = {v0 + accel*t_sec}.\n#A$# {v0 + accel*t_sec}",
+                "#T$# Zero delta.\n#A$# 0",
             )
             base_scores = (1.0, 0.20, 0.15, 0.0)
             domain = "physics_kinematics"
-        else:
-            # Critical Path Method (CPM) & Float Slack (Project Management Pillar)
+        elif kind == 11:
             path_alpha = a + b + c
             path_beta = a + c
             slack_beta = path_alpha - path_beta
@@ -1172,21 +1421,295 @@ class OrnithSelfImprover:
             )
             harness_h = f"acquisitions == {path_alpha} and cycles == {slack_beta}"
             gold_t = (
-                f"Critical Path is the longest chain M1 -> Alpha -> M2 = {a} + {b} + {c} = {path_alpha} days. "
-                f"Track Beta completes in {a} + {c} = {path_beta} days, leaving float slack = {slack_beta} days."
+                f"Critical Path M1 -> Alpha -> M2: {a} + {b} = {a+b}, plus {c} gives {path_alpha} days. "
+                f"Track Beta takes {a} + {c} = {path_beta} days, slack {path_alpha} - {path_beta} = {slack_beta} days."
             )
             gold_a = f"{path_alpha} days critical path, {slack_beta} days slack"
             base_cands = (
                 f"#T$# {gold_t}\n#A$# {gold_a}",
                 f"#T$# Sum all nodes serially: {a+b+c+b} days critical path, 0 days slack.\n#A$# {a+b+c+b} days critical path, 0 days slack",
                 f"#T$# Shortest path duration: {path_beta} days critical path, {b} days slack.\n#A$# {path_beta} days critical path, {b} days slack",
-                f"#T$# Deadlock immediately.\n#A$# 0 days critical path, 0 days slack",
+                "#T$# Deadlock immediately.\n#A$# 0 days critical path, 0 days slack",
             )
             base_scores = (1.0, 0.15, 0.10, 0.0)
             domain = "project_management"
+        elif kind == 12:
+            # Modular Ring Arithmetic (`(a * b + c) mod p`)
+            p_mod = 17 + (idx % 13)
+            mod_val = (a * b + c) % p_mod
+            task_id = f"math_mod_ring_{a}_{b}_{c}_{p_mod}"
+            prompt_q = (
+                f"#U$# In the finite ring Z_{p_mod}, evaluate `r = ({a} * {b} + {c}) mod {p_mod}`.\n"
+                f"#Q$# [math] Compute the canonical residue `0 <= r < {p_mod}`."
+            )
+            harness_h = f"expected == {mod_val}"
+            gold_t = f"Compute {a} * {b} = {a*b}, add {a*b} + {c} = {a*b+c}, then reduce mod {p_mod} to get {mod_val}."
+            gold_a = f"{mod_val}"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                f"#T$# Unreduced sum {a*b + c} mod {p_mod}.\n#A$# {(a + b + c) % p_mod}",
+                f"#T$# Off-by-one residue {(mod_val + 1) % p_mod} mod {p_mod}.\n#A$# {(mod_val + 1) % p_mod}",
+                "#T$# Default fallback.\n#A$# 0",
+            )
+            base_scores = (1.0, 0.15, 0.10, 0.0)
+            domain = "symbolic_math"
+        elif kind == 13:
+            # 2x2 Matrix Determinant & Trace
+            det_m = a * c - b * 2
+            tr_m = a + c
+            task_id = f"math_matrix_det_{a}_{b}_{c}"
+            prompt_q = (
+                f"#U$# Matrix M = [[{a}, {b}], [2, {c}]].\n"
+                f"#Q$# [math] Compute det(M) = {a}*{c} - 2*{b} and trace(M) = {a} + {c}."
+            )
+            harness_h = f"acquisitions == {det_m} and cycles == {tr_m}"
+            gold_t = f"Determinant: {a} * {c} = {a*c}, 2 * {b} = {2*b}, so {a*c} - {2*b} = {det_m}. Trace: {a} + {c} = {tr_m}."
+            gold_a = f"det={det_m}, trace={tr_m}"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                f"#T$# Add diagonal products: {a*c} + {2*b} = {a*c + 2*b}.\n#A$# det={a*c + 2*b}, trace={tr_m}",
+                f"#T$# Swap determinant and trace.\n#A$# det={tr_m}, trace={det_m}",
+                "#T$# Zero delta.\n#A$# det=0, trace=0",
+            )
+            base_scores = (1.0, 0.20, 0.10, 0.0)
+            domain = "symbolic_math"
+        elif kind == 14:
+            # Multi-point Python List Comprehension / Filter-Transform
+            thresh = b % 7 + 2
+            mult = c % 5 + 2
+            sample_xs = [1, thresh, thresh + 2, thresh - 1, thresh + 5]
+            expected_out = [x * mult for x in sample_xs if x >= thresh]
+            task_id = f"code_list_comp_{thresh}_{mult}_{a}"
+            prompt_q = (
+                f"#U$# Write `solve(xs, t, m)` returning `[x * m for x in xs if x >= t]`.\n"
+                f"#Q$# [code] Verify on `xs = {sample_xs}`, `t = {thresh}`, `m = {mult}`."
+            )
+            harness_h = f"assert solve({sample_xs}, {thresh}, {mult}) == {expected_out} and solve([], {thresh}, {mult}) == []"
+            gold_t = f"Filter elements x >= {thresh} and multiply each by {mult} using a list comprehension."
+            gold_a = "def solve(xs, t, m):\n    return [x * m for x in xs if x >= t]"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                "#T$# Strict greater-than filter x > t.\n#A$# def solve(xs, t, m):\n    return [x * m for x in xs if x > t]",
+                "#T$# Add m instead of multiplying.\n#A$# def solve(xs, t, m):\n    return [x + m for x in xs if x >= t]",
+                "#T$# Constant stub.\n#A$# def solve(xs, t, m):\n    return []",
+            )
+            base_scores = (1.0, 0.25, 0.15, 0.0)
+            domain = "algorithmic_code"
+        elif kind == 15:
+            # Unnormalized Bayes Posterior Odds Numerator
+            prior_h1 = a
+            like_h1 = b
+            num_post = prior_h1 * like_h1
+            task_id = f"bayes_odds_{a}_{b}_{c}"
+            prompt_q = (
+                f"#U$# Hypothesis H1 has prior weight {prior_h1} and likelihood weight {like_h1}; "
+                f"distractor H0 has weight {c}.\n"
+                f"#Q$# [deduction] Compute the unnormalized posterior weight `prior_H1 * likelihood_H1`."
+            )
+            harness_h = f"expected == {num_post}"
+            gold_t = f"By Bayes rule numerator, multiply prior and likelihood: {prior_h1} * {like_h1} = {num_post}."
+            gold_a = f"{num_post}"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                f"#T$# Add weights: {prior_h1} + {like_h1} = {prior_h1 + like_h1}.\n#A$# {prior_h1 + like_h1}",
+                f"#T$# Multiply by distractor: {prior_h1} * {c} = {prior_h1 * c}.\n#A$# {prior_h1 * c}",
+                "#T$# Default fallback.\n#A$# 0",
+            )
+            base_scores = (1.0, 0.15, 0.10, 0.0)
+            domain = "multi_hop_deduction"
+        elif kind == 16:
+            # Thermodynamics Calorimetry Q = m * c_p * delta_T
+            mass_g = a
+            cp_j = (b % 5) + 2
+            dt_k = (c % 8) + 3
+            q_joules = mass_g * cp_j * dt_k
+            task_id = f"physics_calorimetry_{mass_g}_{cp_j}_{dt_k}"
+            prompt_q = (
+                f"#U$# A sample of mass `m = {mass_g} g` with specific heat `c = {cp_j} J/(g*K)` "
+                f"is heated by `dT = {dt_k} K`.\n"
+                f"#Q$# [physics] Compute absorbed thermal energy `Q = m * c * dT` in Joules."
+            )
+            harness_h = f"expected == {q_joules}"
+            gold_t = f"First compute m * c: {mass_g} * {cp_j} = {mass_g * cp_j}; then multiply by dT: {mass_g * cp_j} * {dt_k} = {q_joules}."
+            gold_a = f"{q_joules}"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                f"#T$# Add temperature change: {mass_g * cp_j} + {dt_k} = {mass_g * cp_j + dt_k}.\n#A$# {mass_g * cp_j + dt_k}",
+                f"#T$# Omit specific heat: {mass_g} * {dt_k} = {mass_g * dt_k}.\n#A$# {mass_g * dt_k}",
+                "#T$# Zero delta.\n#A$# 0",
+            )
+            base_scores = (1.0, 0.20, 0.15, 0.0)
+            domain = "physics_kinematics"
+        elif kind == 17:
+            # IFEval Constrained Verification (lowercase + no_comma + keyword + exact_int)
+            res_val = a + b * c
+            task_id = f"ifeval_math_{a}_{b}_{c}"
+            prompt_q = (
+                f"#U$# Compute `{a} + {b} * {c}` and reply in all lowercase letters with NO commas, "
+                f"including the word `verified` and the exact integer result.\n"
+                f"#Q$# [evaluation] Follow every formatting and arithmetic constraint."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;keyword:verified;exact_int:{res_val}"
+            gold_t = f"Multiply {b} * {c} = {b*c}, then add {a} + {b*c} = {res_val}. Format lowercase without commas."
+            gold_a = f"the verified result is {res_val} units"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                f"#T$# {gold_t}\n#A$# The Verified Result, is {res_val} units",
+                f"#T$# {gold_t}\n#A$# the result is {a + b + c} units",
+                "#T$# Default fallback.\n#A$# 0",
+            )
+            base_scores = (1.0, 0.25, 0.15, 0.0)
+            domain = "invariant_verification"
+        elif kind == 18:
+            # Multi-assert Python sequence generator
+            step_d = (b % 6) + 2
+            task_id = f"code_arith_prog_{a}_{step_d}"
+            prompt_q = (
+                f"#U$# Write `solve(n, start, step)` returning `start + n * step` for `n >= 0`.\n"
+                f"#Q$# [code] Must pass assertions at `n = 0`, `n = 3`, and `n = {c}`."
+            )
+            harness_h = (
+                f"assert solve(0, {a}, {step_d}) == {a} "
+                f"and solve(3, {a}, {step_d}) == {a + 3 * step_d} "
+                f"and solve({c}, {a}, {step_d}) == {a + c * step_d}"
+            )
+            gold_t = f"Closed form linear progression: return start + n * step; at n={c}, {c} * {step_d} = {c*step_d}, plus {a} = {a + c*step_d}."
+            gold_a = "def solve(n, start, step):\n    return start + n * step"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                "#T$# Off-by-one multiplier.\n#A$# def solve(n, start, step):\n    return start + (n + 1) * step",
+                "#T$# Multiply start instead of step.\n#A$# def solve(n, start, step):\n    return n * start + step",
+                "#T$# Constant stub.\n#A$# def solve(n, start, step):\n    return 0",
+            )
+            base_scores = (1.0, 0.25, 0.15, 0.0)
+            domain = "algorithmic_code"
+        elif kind == 19:
+            # Horn-Clause Boolean Propagation Checksum
+            w1 = a + b
+            w2 = w1 + c
+            checksum = w1 + w2
+            task_id = f"logic_horn_prop_{a}_{b}_{c}"
+            prompt_q = (
+                f"#U$# Horn rules: Fact `F1 = {a}`, Fact `F2 = {b}`. Rule R1 derives `G1 = F1 + F2`. "
+                f"Rule R2 derives `G2 = G1 + {c}`.\n"
+                f"#Q$# [deduction] Compute the forward-chaining sum `G1 + G2`."
+            )
+            harness_h = f"expected == {checksum}"
+            gold_t = f"Forward chain R1: {a} + {b} = {w1}. Forward chain R2: {w1} + {c} = {w2}. Sum: {w1} + {w2} = {checksum}."
+            gold_a = f"{checksum}"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                f"#T$# Only return G2: {w1} + {c} = {w2}.\n#A$# {w2}",
+                f"#T$# Sum raw facts once: {a} + {b} = {w1}.\n#A$# {w1}",
+                "#T$# Default fallback.\n#A$# 0",
+            )
+            base_scores = (1.0, 0.20, 0.10, 0.0)
+            domain = "multi_hop_deduction"
+        elif kind == 20:
+            # COMPOSED TEMPLATE 1 (Symbolic Algebra o Python Code):
+            # Solve linear equation for hidden slope k, then synthesize Python function using k.
+            k_slope = (b % 7) + 2
+            rhs_eq = a * k_slope + c
+            n_eval = (c % 5) + 3
+            expected_val = k_slope * n_eval + a
+            task_id = f"comp_alg_code_{a}_{k_slope}_{c}_{n_eval}"
+            prompt_q = (
+                f"#U$# [Composed Algebra->Code] First solve `{a} * k + {c} = {rhs_eq}` for integer `k`. "
+                f"Then implement `solve(n)` returning `{k_slope} * n + {a}` (using the solved `k`).\n"
+                f"#Q$# [code] Derive `k` in `#T$#` and implement `solve(n)` in `#A$#`."
+            )
+            harness_h = f"assert solve({n_eval}) == {expected_val} and solve(0) == {a}"
+            gold_t = (
+                f"Stage 1 (Algebra): {rhs_eq} - {c} = {a * k_slope}, so k = {a * k_slope} // {a} = {k_slope}. "
+                f"Stage 2 (Code): implement solve(n) = {k_slope} * n + {a}; at n={n_eval}, {k_slope} * {n_eval} = {k_slope * n_eval}, plus {a} = {expected_val}."
+            )
+            gold_a = f"def solve(n):\n    return {k_slope} * n + {a}"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                f"#T$# Wrong algebra k = {k_slope + 1}.\n#A$# def solve(n):\n    return {k_slope + 1} * n + {a}",
+                f"#T$# Hallucinated arithmetic {a} + {c} = {a + c + 5}.\n#A$# def solve(n):\n    return {k_slope} * n + {a}",
+                "#T$# Constant stub.\n#A$# def solve(n):\n    return 0",
+            )
+            base_scores = (1.0, 0.25, 0.20, 0.0)
+            domain = "compositional_code_math"
+        elif kind == 21:
+            # COMPOSED TEMPLATE 2 (Physics Kinematics o Modular Ring Checksum):
+            v0 = a % 15 + 2
+            accel = 2 * ((b % 6) + 1)
+            t_sec = (c % 4) + 2
+            disp = v0 * t_sec + (accel * t_sec * t_sec) // 2
+            p_ring = 23
+            residue = (disp + c) % p_ring
+            task_id = f"comp_phys_mod_{v0}_{accel}_{t_sec}_{c}"
+            prompt_q = (
+                f"#U$# [Composed Physics->ModRing] Stage 1: compute displacement `d = v0*t + 0.5*a*t^2` "
+                f"for `v0={v0}`, `a={accel}`, `t={t_sec}`. Stage 2: compute checksum `(d + {c}) mod {p_ring}`.\n"
+                f"#Q$# [physics] Derive `d` and return the final modular residue."
+            )
+            harness_h = f"expected == {residue}"
+            gold_t = (
+                f"Stage 1 (Kinematics): drift {v0} * {t_sec} = {v0*t_sec}, accel term = {(accel*t_sec*t_sec)//2}, "
+                f"d = {disp}. Stage 2 (ModRing): ({disp} + {c}) mod {p_ring} = {residue}."
+            )
+            gold_a = f"{residue}"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                f"#T$# Return unreduced displacement {disp} mod {p_ring}.\n#A$# {disp}",
+                f"#T$# Wrong kinematics d = {v0 + accel * t_sec} mod {p_ring}.\n#A$# {(v0 + accel * t_sec + c) % p_ring}",
+                "#T$# Zero delta.\n#A$# 0",
+            )
+            base_scores = (1.0, 0.20, 0.15, 0.0)
+            domain = "compositional_physics_math"
+        elif kind == 22:
+            # COMPOSED TEMPLATE 3 (Project DAG Critical Path o Python Slack Aggregator):
+            crit_len = a + b + c
+            sample_tracks = [a + c, a + b, crit_len]
+            expected_slack = sum(crit_len - t_d for t_d in sample_tracks)
+            task_id = f"comp_dag_code_{a}_{b}_{c}"
+            prompt_q = (
+                f"#U$# [Composed DAG->Code] Milestone M1 ({a}d) + Alpha ({b}d) + M2 ({c}d) defines critical path `C = {crit_len}`. "
+                f"Write `solve(tracks, crit)` returning `sum(crit - x for x in tracks)`.\n"
+                f"#Q$# [code] Implement `solve(tracks, crit)` and verify on `tracks={sample_tracks}, crit={crit_len}`."
+            )
+            harness_h = f"assert solve({sample_tracks}, {crit_len}) == {expected_slack}"
+            gold_t = (
+                f"Stage 1 (DAG): Critical path {a} + {b} = {a+b}, plus {c} = {crit_len}. "
+                f"Stage 2 (Code): Sum slack (crit - x) across tracks to get {expected_slack}."
+            )
+            gold_a = "def solve(tracks, crit):\n    return sum(crit - x for x in tracks)"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                "#T$# Sum tracks without subtracting from crit.\n#A$# def solve(tracks, crit):\n    return sum(tracks)",
+                "#T$# Only check max track.\n#A$# def solve(tracks, crit):\n    return crit - min(tracks)",
+                "#T$# Constant stub.\n#A$# def solve(tracks, crit):\n    return 0",
+            )
+            base_scores = (1.0, 0.25, 0.15, 0.0)
+            domain = "compositional_code_pm"
+        else:
+            # COMPOSED TEMPLATE 4 (Multi-Hop Deduction o IFEval Lexical Constraints):
+            prod_ab = a * b
+            final_v = prod_ab + c
+            task_id = f"comp_ded_ifeval_{a}_{b}_{c}"
+            prompt_q = (
+                f"#U$# [Composed Deduction->IFEval] Cluster A runs {a} nodes with {b} shards each, plus {c} standby shards. "
+                f"State the total shards in lowercase with no commas, including the keyword `shards` and the exact integer.\n"
+                f"#Q$# [evaluation] Satisfy both the 2-hop arithmetic deduction and all IFEval constraints."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;keyword:shards;exact_int:{final_v}"
+            gold_t = f"Stage 1: {a} * {b} = {prod_ab}, then {prod_ab} + {c} = {final_v}. Stage 2: format lowercase with no comma and keyword shards."
+            gold_a = f"cluster a manages {final_v} total shards online"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                f"#T$# {gold_t}\n#A$# Cluster A, manages {final_v} total shards online",
+                f"#T$# Sum {a} + {b} = {a+b}.\n#A$# cluster a manages {a+b+c} total units online",
+                "#T$# Default fallback.\n#A$# 0",
+            )
+            base_scores = (1.0, 0.25, 0.15, 0.0)
+            domain = "compositional_deduction_ifeval"
 
         p_cands, p_scores, g_idx = _permute(base_cands, base_scores)
         cached_s = self.scaffold_cache.get(task_id, default=_SCAFFOLD_CANDIDATES[idx % len(_SCAFFOLD_CANDIDATES)])
+        self._last_task_kinds[task_id] = kind
         return OrnithTask(
             task_id=task_id,
             domain=domain,
@@ -1207,7 +1730,7 @@ class OrnithSelfImprover:
         batch_size: int = 2,
         max_seq_len: int | None = None,
     ) -> OrnithStepOutput:
-        """Run one end-to-end Ornith-1.0 / 1.5 self-improvement step on `coe`."""
+        """Run one end-to-end Ornith-1.0 / 2.0 self-improvement step on `coe`."""
         from .data import DecisionExample, collate_decisions, get_tokenizer
 
         vocab_size = int(getattr(coe.backbone.config, "vocab_size", 260))
@@ -1346,7 +1869,7 @@ class OrnithSelfImprover:
         validity = (r_harness_vec > 0.05).float()
         r_task_vec = compute_task_reward(validity, pass_rates, novelties, target_p=0.20)
 
-        # Update Ornith-1.0 ScaffoldCache for each task
+        # Update Ornith-2.0 ScaffoldCache & OrnithEnvArchitect capability frontier for each task
         for b_idx, t in enumerate(tasks):
             cand_scaffolds = [
                 _SCAFFOLD_CANDIDATES[(b_idx + k) % len(_SCAFFOLD_CANDIDATES)]
@@ -1359,6 +1882,12 @@ class OrnithSelfImprover:
                 weighted_r,
                 step=self._step_counter,
             )
+            if t.task_id in self._last_task_kinds:
+                self.env_architect.record_outcome(
+                    self._last_task_kinds[t.task_id],
+                    float(pass_rates[b_idx].item()),
+                    float(task_alignment[b_idx].item()),
+                )
 
         # Group-normalized advantages A_i across the G=4 rollouts + staleness-weighted GRPO loss
         advantages = group_normalized_advantages(h_scores)
@@ -1403,7 +1932,7 @@ class OrnithSelfImprover:
         assert lm_distill_out.loss is not None
         self_distill_loss = 0.95 * decision_distill_loss + 0.05 * lm_distill_out.loss
 
-        # LiquidAI Antidoom FTPO + Compiler-in-the-Loop Token Targeting:
+        # LiquidAI Antidoom FTPO + Compiler-in-the-Loop Token Targeting (supports both ByteTokenizer & MorphCode-16K):
         # Strictly target either (a) an inner repetition trigger (`loop_hit is not None`), or
         # (b) the exact first token where the model's on-policy prediction diverges from the
         # verified rollout (`pred != gold`). Never penalize second-best tokens when greedy is 100% verified.
@@ -1428,15 +1957,13 @@ class OrnithSelfImprover:
             if loop_hit is not None:
                 trig_local, rej_tok, _ = loop_hit
                 pos_idx = int(valid_pos[min(trig_local, valid_pos.numel() - 1)].item())
-            elif vocab_size <= 1024:
+            else:
                 mismatches = (pred_ids[b_i, valid_pos] != lbl_tensor[b_i, valid_pos]).nonzero(as_tuple=False).squeeze(-1)
                 if mismatches.numel() == 0:
                     continue
                 first_err_local = int(mismatches[0].item())
                 pos_idx = int(valid_pos[first_err_local].item())
                 rej_tok = int(pred_ids[b_i, pos_idx].item())
-            else:
-                continue
             gold_tok = int(lbl_tensor[b_i, pos_idx].item())
             if rej_tok == gold_tok:
                 continue
@@ -1504,4 +2031,5 @@ class OrnithSelfImprover:
             antidoom_loss=round(float(antidoom_loss_t.detach().item()), 4),
             antidoom_chosen_win=round(float(antidoom_win), 4),
         )
+
 

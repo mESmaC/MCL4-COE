@@ -1076,7 +1076,70 @@ _SCAFFOLD_BRANCHES: tuple[str, ...] = (
     "decision -> deduction -> evaluation -> metacognition",
     "abduction -> induction -> deduction -> decision -> evaluation",
     "association -> synthesis -> deduction -> decision -> metacognition",
+    "abstraction -> abduction -> deduction -> decision -> evaluation -> metacognition",
+    "induction -> synthesis -> deduction -> evaluation -> decision -> metacognition",
 )
+
+_COGNITIVE_PRIMITIVES: tuple[str, ...] = (
+    "abstraction",
+    "abduction",
+    "association",
+    "synthesis",
+    "induction",
+    "deduction",
+    "decision",
+    "evaluation",
+    "metacognition",
+)
+
+
+def synthesize_operator_scaffold(
+    prev_scaffold: str,
+    *,
+    domain: str = "",
+    depth: int = 1,
+    parent_vetoed: bool = False,
+    ded_entailed: float = 0.7,
+    novelty: float = 0.5,
+    utility: float = 0.5,
+    confidence: float = 0.7,
+    node_id: int = 1,
+) -> str:
+    """Dynamically synthesize or mutate a `#S$#` cognitive operator scaffold from live node telemetry."""
+    ops = [op.strip() for op in prev_scaffold.split("->") if op.strip() in _COGNITIVE_PRIMITIVES]
+    if not ops:
+        ops = ["abduction", "deduction", "decision", "evaluation", "metacognition"]
+
+    dom = domain.lower()
+    if parent_vetoed or ded_entailed < 0.58:
+        # High contradiction / veto -> inject abstraction + deduction + evaluation verification loop
+        lead = ["abstraction", "deduction", "evaluation"]
+    elif novelty < 0.35:
+        # Low branch novelty -> inject abduction + association + induction hypothesis expansion
+        lead = ["abduction", "association", "induction"]
+    elif utility < 0.48 or confidence < 0.50:
+        # Low utility/confidence -> inject synthesis + deduction before decision
+        lead = ["association", "synthesis", "deduction"]
+    elif "code" in dom or "python" in dom:
+        lead = ["abstraction", "synthesis", "deduction"]
+    elif "math" in dom or "physics" in dom or "science" in dom:
+        lead = ["abduction", "induction", "deduction"]
+    else:
+        lead = ops[:2]
+
+    # Combine lead with complementary tail operators without adjacent duplicates
+    tail_candidates = [
+        op for op in ops if op not in lead
+    ] + ["deduction", "decision", "evaluation", "metacognition"]
+    merged: list[str] = []
+    for op in lead + tail_candidates:
+        if op in _COGNITIVE_PRIMITIVES and op not in merged:
+            merged.append(op)
+        if len(merged) >= 5 + (node_id % 2):
+            break
+    if "metacognition" not in merged:
+        merged.append("metacognition")
+    return " -> ".join(merged)
 
 
 def _ancestry_chain(view: View, parent_id: int) -> list[Node]:
@@ -1102,9 +1165,9 @@ class MCL4DreamDiscovery:
 
     Each call to `discover(view, parent_id, node_id)`:
     1. Traces the causal ancestor chain from root `0` to `parent_id`.
-    2. Selects or refines a `#S$#` cognitive operator scaffold conditioned only on
-       ancestor scaffolds and observed verifier/operator feedback (never the ground-truth
-       `#H$#` assertion).
+    2. Selects or dynamically synthesizes a `#S$#` cognitive operator scaffold conditioned
+       only on ancestor scaffolds and observed verifier/operator feedback (never the
+       ground-truth `#H$#` assertion).
     3. Evaluates `coe.forward_all_operators` on the ancestor-conditioned prompt and
        candidate `#T$# -> #A$#` rollouts, recording `score`, `utility` (`Evaluation`),
        `novelty` (`Association`), and `confidence` (`Metacognition`) into the tree node.
@@ -1128,6 +1191,8 @@ class MCL4DreamDiscovery:
         )
         self._node_embeddings: list[torch.Tensor] = []
 
+    synthesize_operator_scaffold = staticmethod(synthesize_operator_scaffold)
+
     @torch.no_grad()
     def __call__(self, view: View, parent_id: int, node_id: int) -> Outcome:
         from .data import DecisionExample, collate_decisions
@@ -1144,14 +1209,26 @@ class MCL4DreamDiscovery:
             parent_obs = ancestors[-1].observation
             prev_scaffold = str(parent_obs.get("scaffold", _SCAFFOLD_BRANCHES[0]))
             parent_vetoed = bool(parent_obs.get("vetoed", False))
-            # Refine the parent's scaffold along the branch based on observed operator feedback
-            base_idx = (
-                _SCAFFOLD_BRANCHES.index(prev_scaffold)
-                if prev_scaffold in _SCAFFOLD_BRANCHES
-                else 0
-            )
-            step_shift = 2 if parent_vetoed else 1
-            scaffold = _SCAFFOLD_BRANCHES[(base_idx + step_shift + depth) % len(_SCAFFOLD_BRANCHES)]
+            if (node_id + depth) % 2 == 1 or parent_vetoed:
+                scaffold = synthesize_operator_scaffold(
+                    prev_scaffold,
+                    domain=str(getattr(self.task, "domain", "")),
+                    depth=depth,
+                    parent_vetoed=parent_vetoed,
+                    ded_entailed=float(parent_obs.get("deduction_entailed", 0.7)),
+                    novelty=float(parent_obs.get("novelty", 0.5)),
+                    utility=float(parent_obs.get("utility", 0.5)),
+                    confidence=float(parent_obs.get("confidence", 0.7)),
+                    node_id=node_id,
+                )
+            else:
+                base_idx = (
+                    _SCAFFOLD_BRANCHES.index(prev_scaffold)
+                    if prev_scaffold in _SCAFFOLD_BRANCHES
+                    else 0
+                )
+                step_shift = 2 if parent_vetoed else 1
+                scaffold = _SCAFFOLD_BRANCHES[(base_idx + step_shift + depth) % len(_SCAFFOLD_BRANCHES)]
 
         ancestor_trace = []
         for anc in ancestors[1:][-3:]:
@@ -1252,7 +1329,7 @@ class MCL4DreamDiscovery:
 
 
 # Curated library of diverse, valid 6-line exploration policy candidates that
-# `MCL4PolicyProposer` scores and adapts using `MCL4-COE` operators + replay feedback.
+# `MCL4PolicyProposer` scores, mutates, and adapts using `MCL4-COE` operators + replay feedback.
 _CANDIDATE_POLICY_TEMPLATES: tuple[Program, ...] = (
     Program(width=1, root_every=2, rank=("SCORE", "GAIN", "UTILITY"), stop=0.90, patience=3, rounds=4),
     Program(width=2, root_every=2, rank=("SCORE", "GAIN", "UTILITY"), stop=0.88, patience=3, rounds=4),
@@ -1268,12 +1345,21 @@ _CANDIDATE_POLICY_TEMPLATES: tuple[Program, ...] = (
     Program(width=2, root_every=1, rank=("UTILITY", "SCORE", "GAIN", "CONFIDENCE"), stop=None, patience=2, rounds=3),
 )
 
+_MUTATION_RANK_ORDERS: tuple[tuple[str, ...], ...] = (
+    ("SCORE", "UTILITY", "CONFIDENCE", "GAIN"),
+    ("UTILITY", "CONFIDENCE", "SCORE", "NOVELTY"),
+    ("CONFIDENCE", "UTILITY", "GAIN", "SCORE"),
+    ("GAIN", "SCORE", "UTILITY", "DEEP"),
+    ("NOVELTY", "UTILITY", "SCORE", "GAIN"),
+    ("SCORE", "GAIN", "CONFIDENCE", "UTILITY"),
+)
+
 
 class MCL4PolicyProposer:
-    """Proposes candidate 6-line `Program` revisions conditioned on replay diagnostics.
+    """Proposes and mutates candidate 6-line `Program` revisions conditioned on replay diagnostics.
 
     Uses `MCL4-COE`'s `CognitiveOperatorEnsemble` (`Decision` + `Evaluation` +
-    `Metacognition`) when a live model is attached to rank candidate policy revisions
+    `Metacognition`) when a live model is attached to rank synthesized policy revisions
     against the replay feedback summary, and returns `{"text": str, "finished": True}`.
     """
 
@@ -1281,6 +1367,48 @@ class MCL4PolicyProposer:
         self.coe = coe
         self.seed = seed
         self._call_count = 0
+
+    def _synthesize_mutated_programs(
+        self,
+        incumbent: Program,
+        *,
+        mean_hv: float,
+        mean_penalty: float,
+        max_w: int,
+        max_r: int,
+        revision: int,
+    ) -> list[Program]:
+        """Synthesize mutated and crossover 6-line `Program` policies around `incumbent`."""
+        mutated: list[Program] = []
+        base_stop = 0.84 if incumbent.stop is None else float(incumbent.stop)
+        rank_choice = _MUTATION_RANK_ORDERS[(self.seed + revision + self._call_count) % len(_MUTATION_RANK_ORDERS)]
+
+        # Mutation 1: Feature-rank crossover with adaptive stop threshold tightening
+        stop_m1 = round(max(0.68, min(0.94, base_stop + (-0.02 if mean_hv < 0.65 else 0.02))), 2)
+        mutated.append(
+            Program(
+                width=min(max_w, max(2, incumbent.width)),
+                root_every=2 if incumbent.root_every != 2 else 1,
+                rank=rank_choice,
+                stop=stop_m1,
+                patience=max(1, min(3, (incumbent.patience or 1) + (1 if mean_hv < 0.55 else 0))),
+                rounds=min(max_r, max(2, incumbent.rounds)),
+            )
+        )
+
+        # Mutation 2: Depth-focused leaf refinement (root_every=2 or 0) when penalty is high
+        stop_m2 = round(max(0.68, min(0.92, base_stop - 0.03)), 2)
+        mutated.append(
+            Program(
+                width=min(max_w, 2),
+                root_every=2 if mean_penalty <= 0.40 else 0,
+                rank=("UTILITY", "CONFIDENCE", "SCORE", "GAIN"),
+                stop=stop_m2,
+                patience=1 if mean_penalty > 0.30 else 2,
+                rounds=min(max_r, max(2, incumbent.rounds - (1 if mean_penalty > 0.35 else 0))),
+            )
+        )
+        return mutated
 
     @torch.no_grad()
     def __call__(
@@ -1294,10 +1422,9 @@ class MCL4PolicyProposer:
         max_w = max(1, int(budgets.get("workers", 4)))
         max_r = max(1, int(budgets.get("max_rounds", 8)))
 
-        # Construct adaptive candidate programs informed by replay diagnostics
+        # Construct adaptive candidate programs informed by replay diagnostics + genetic mutation
         dynamic_candidates: list[Program] = []
         if incumbent.width < max_w or incumbent.root_every == 1:
-            # Step 1 progression: move from sequential root-only to parallel depth-refinement
             dynamic_candidates.append(
                 Program(
                     width=min(max_w, max(1, incumbent.width)),
@@ -1309,7 +1436,6 @@ class MCL4PolicyProposer:
                 )
             )
         if incumbent.rounds > 2:
-            # Test compact depth-refinement policies that hit the world ceiling in fewer calls
             dynamic_candidates.append(
                 Program(
                     width=min(max_w, max(2, incumbent.width)),
@@ -1321,7 +1447,6 @@ class MCL4PolicyProposer:
                 )
             )
         if mean_penalty > 0.35:
-            # High round/call ratio -> increase batch width or stop earlier once ceiling is reached
             dynamic_candidates.append(
                 Program(
                     width=min(max_w, max(2, incumbent.width)),
@@ -1333,7 +1458,6 @@ class MCL4PolicyProposer:
                 )
             )
         if mean_hv < 0.65:
-            # Refine stop threshold and operator feature ranking to capture deeper nodes efficiently
             stop_cand = 0.78 if incumbent.stop is None else max(0.68, round(float(incumbent.stop) - 0.02, 2))
             dynamic_candidates.append(
                 Program(
@@ -1345,6 +1469,17 @@ class MCL4PolicyProposer:
                     rounds=min(max_r, 2),
                 )
             )
+        for mut_p in self._synthesize_mutated_programs(
+            incumbent,
+            mean_hv=mean_hv,
+            mean_penalty=mean_penalty,
+            max_w=max_w,
+            max_r=max_r,
+            revision=revision,
+        ):
+            if mut_p != incumbent and mut_p not in dynamic_candidates:
+                dynamic_candidates.append(mut_p)
+
         for tpl in _CANDIDATE_POLICY_TEMPLATES:
             adapted = Program(
                 width=min(max_w, tpl.width),
@@ -1398,7 +1533,11 @@ class MCL4PolicyProposer:
                     batch["option_lengths"],
                     batch["targets"],
                 )
-            pick = int(op_out.decision.probabilities[0].argmax().item())
+            d_probs = op_out.decision.probabilities[0].float()
+            e_utils = op_out.evaluation_utilities.float().view(-1).clamp(0.0, 1.0)
+            m_conf = op_out.metacognition_probs[:, 0].float().view(-1).clamp(0.0, 1.0)
+            joint_score = 0.60 * d_probs + 0.25 * e_utils + 0.15 * m_conf
+            pick = int(joint_score.argmax().item())
             chosen = four_cands[pick]
         else:
             chosen = dynamic_candidates[(revision - 1) % len(dynamic_candidates)]

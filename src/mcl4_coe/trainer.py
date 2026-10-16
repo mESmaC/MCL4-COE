@@ -716,6 +716,7 @@ class MCL4COETrainer:
             if self.config.enable_dream_rsi
             else None
         )
+        rlvr_pool_path = Path(self.config.shards_root).expanduser().resolve() / "rlvr_env_pool.pt"
         self.ornith_improver = OrnithSelfImprover(
             projection_dim=self.config.projection_dim,
             max_seq_len=min(512, self.config.max_seq_len),
@@ -723,6 +724,7 @@ class MCL4COETrainer:
             enable_dream_rsi=self.config.enable_dream_rsi,
             dream_every=self.config.dream_every,
             dream_engine=dream_engine,
+            external_pool_path=rlvr_pool_path if rlvr_pool_path.is_file() else None,
         )
 
     def _write_manifest(self, status: str) -> None:

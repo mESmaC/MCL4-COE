@@ -136,6 +136,7 @@ from .optim import CPUOffloadAdamW, model_state_cpu, prepare_model
 from .ornith_rl import (
     ExpertMorphResult,
     NoveltyTaskBuffer,
+    OrnithEnvArchitect,
     OrnithSelfImprover,
     OrnithStepOutput,
     OrnithTask,
@@ -264,6 +265,7 @@ __all__ = [
     "NVFP4Conv2d",
     "NVFP4Linear",
     "NoveltyTaskBuffer",
+    "OrnithEnvArchitect",
     "OrnithSelfImprover",
     "OrnithStepOutput",
     "OrnithTask",

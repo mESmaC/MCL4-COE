@@ -1856,3 +1856,120 @@ def test_pre_scaling_housekeeping_gist_conditioning_and_repo_uta_traces(tmp_path
     assert len(mp16) == 8
     assert len({idx for pair in mp16 for idx in pair}) == 16
 
+
+def test_ornith_v2_compositional_rlvr_and_dream_evolution(tmp_path: Path) -> None:
+    """Verify Ornith-2.0 compositional environments, inline #T$# equation checker, IFEval verifier,
+    OrnithEnvArchitect curriculum tiering, external rlvr_env_pool loading, and Dream-RSI scaffold/policy mutation.
+    """
+    from mcl4_coe import (
+        COEConfig,
+        CognitiveOperatorEnsemble,
+        DreamProgram,
+        MCL4CEDBackbone,
+        MCL4CEDConfig,
+        MCL4DreamDiscovery,
+        MCL4PolicyProposer,
+        OrnithEnvArchitect,
+        OrnithSelfImprover,
+        verify_python_rollout,
+    )
+
+    # 1. Verify inline #T$# arithmetic consistency penalty and single-function AST purity
+    h_code = "assert solve([1, 4, 6], 3, 2) == [8, 12]"
+    valid_comp = "#T$# Filter x >= 3 and multiply 4 * 2 = 8, 6 * 2 = 12.\n#A$# def solve(xs, t, m):\n    return [x * m for x in xs if x >= t]"
+    assert verify_python_rollout(valid_comp, h_code) == 1.0
+
+    # Hallucinated arithmetic in #T$# (`50 + 10 = 20`) must be penalized by 0.25x
+    hallucinated_t = "#T$# First compute 50 + 10 = 20.\n#A$# def solve(xs, t, m):\n    return [x * m for x in xs if x >= t]"
+    assert verify_python_rollout(hallucinated_t, h_code) == 0.25
+
+    # Duplicate/shadowing `def solve` definitions in #A$# must be rejected (0.0)
+    dup_fn = "#T$# Valid thought 2 + 2 = 4.\n#A$# def solve(xs, t, m):\n    return []\ndef solve(xs, t, m):\n    return [8, 12]"
+    assert verify_python_rollout(dup_fn, h_code) == 0.0
+
+    # 2. Verify IFEval constraint harness (`ifeval:lowercase;no_comma;keyword:shards;exact_int:31`)
+    h_if = "ifeval:lowercase;no_comma;keyword:shards;exact_int:31"
+    assert verify_python_rollout("#T$# 6 * 5 = 30, 30 + 1 = 31.\n#A$# cluster manages 31 total shards", h_if) == 1.0
+    assert verify_python_rollout("#T$# 6 * 5 = 30, 30 + 1 = 31.\n#A$# Cluster, manages 31 total shards", h_if) == 0.5
+
+    # 3. Verify all 24 procedural + cross-template compositional families (0..23) pass gold == 1.0 and hack == 0.0
+    improver = OrnithSelfImprover(projection_dim=16, max_seq_len=256)
+    seen_domains: set[str] = set()
+    for k in range(24):
+        t = improver._generate_task(k, compact=False)
+        seen_domains.add(t.domain)
+        gold_cand = t.candidate_rollouts[t.gold_index]
+        assert verify_python_rollout(gold_cand, t.harness_h, t.gold_answer) == 1.0, f"Family {k} ({t.task_id}) gold failed"
+        assert min(verify_python_rollout(c, t.harness_h, t.gold_answer) for c in t.candidate_rollouts) == 0.0
+    assert "compositional_code_math" in seen_domains
+    assert "compositional_physics_math" in seen_domains
+    assert "compositional_code_pm" in seen_domains
+    assert "compositional_deduction_ifeval" in seen_domains
+
+    # 4. Verify OrnithEnvArchitect promotes difficulty_tier when pass rate exceeds threshold
+    arch = OrnithEnvArchitect()
+    assert arch.difficulty_tier(0) == 1
+    for _ in range(4):
+        arch.record_outcome(0, pass_prob=0.95)
+    assert arch.difficulty_tier(0) == 2
+
+    # 5. Verify external rlvr_env_pool.pt loading and MorphCode-16K first-divergence FTPO
+    pool_file = tmp_path / "rlvr_env_pool.pt"
+    ext_t = improver._generate_task(20, compact=False)
+    torch.save({"tasks": [ext_t]}, pool_file)
+    improver_ext = OrnithSelfImprover(
+        projection_dim=16,
+        max_seq_len=256,
+        external_pool_path=pool_file,
+    )
+    assert len(improver_ext.external_tasks) == 1
+    sampled_ext = improver_ext._generate_task(1, compact=False)
+    assert sampled_ext.task_id == ext_t.task_id
+
+    cfg16k = MCL4CEDConfig(
+        vocab_size=16384,
+        d_model=64,
+        n_heads=4,
+        n_encoder_layers=1,
+        n_decoder_layers=1,
+        ple_dim=16,
+        expert_hidden_dim=128,
+        num_experts=4,
+        top_k=2,
+        max_seq_len=96,
+    )
+    m16k = CognitiveOperatorEnsemble(MCL4CEDBackbone(cfg16k), COEConfig(projection_dim=16)).train()
+    out16k = improver_ext.step_self_improvement(m16k, batch_size=2, max_seq_len=96)
+    assert torch.isfinite(out16k.loss)
+    assert out16k.antidoom_loss > 0.0  # MorphCode-16K first-divergence FTPO active!
+
+    # 6. Verify Dream-RSI dynamic operator scaffold synthesis and policy mutation
+    s_veto = MCL4DreamDiscovery.synthesize_operator_scaffold(
+        "abduction -> decision -> metacognition",
+        domain="compositional_code_math",
+        depth=2,
+        parent_vetoed=True,
+        ded_entailed=0.2,
+        novelty=0.5,
+        utility=0.4,
+        confidence=0.3,
+        node_id=2,
+    )
+    assert "abstraction" in s_veto and "deduction" in s_veto and s_veto.endswith("metacognition")
+
+    proposer = MCL4PolicyProposer(m16k, seed=42)
+    muts = proposer._synthesize_mutated_programs(
+        DreamProgram(),
+        mean_hv=0.45,
+        mean_penalty=0.20,
+        max_w=3,
+        max_r=4,
+        revision=1,
+    )
+    assert len(muts) >= 2
+    for mp in muts:
+        parsed = DreamProgram.from_text(mp.to_text())
+        assert 1 <= parsed.width <= 4
+
+
+

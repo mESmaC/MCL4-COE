@@ -1045,12 +1045,12 @@ class OrnithEnvArchitect:
         return base_slot
 
     def record_outcome(self, kind: int, pass_prob: float, alignment: float = 1.0) -> None:
-        """Update EMA pass rate for `kind` and promote `difficulty_tier` (`1 -> 4`) when saturated."""
+        """Update EMA pass rate for `kind` and promote `difficulty_tier` (`1 -> 8`) when saturated."""
         k = kind % self.TOTAL_FAMILIES
         self.family_counts[k] += 1
         ema = self.ema_beta * self.family_pass_ema[k] + (1.0 - self.ema_beta) * float(pass_prob)
         self.family_pass_ema[k] = ema
-        if ema > 0.78 and self.family_tiers[k] < 4 and self.family_counts[k] >= 2:
+        if ema > 0.78 and self.family_tiers[k] < 8 and self.family_counts[k] >= 2:
             self.family_tiers[k] += 1
             # Soft-reset EMA toward frontier when tier increases
             self.family_pass_ema[k] = 0.55
@@ -1130,6 +1130,231 @@ class OrnithSelfImprover:
                 except Exception:
                     self.external_tasks = []
 
+    def _synthesize_combinatorial_pipeline_task(self, idx: int, *, tier: int = 1) -> OrnithTask:
+        """Synthesize a randomized 3-stage cross-template pipeline ($8 \\times 6 \\times 4 = 192$ combinations)
+        with length-matched adversarial multi-stage distractors (Stage-1 vs Stage-2 error propagation).
+        """
+        scale = max(1, int(tier))
+        a = (3 * scale) + ((idx * 7 + self._rng_seed) % (17 * scale + 3))
+        b = (2 * scale) + ((idx * 11 + self._rng_seed) % (13 * scale + 2))
+        c = 2 + ((idx * 5 + scale) % (9 + 2 * scale))
+
+        prod_id = (idx * 3 + self._rng_seed) % 8
+        trans_id = (idx * 5 + self._rng_seed // 3) % 6
+        term_id = (idx * 7 + self._rng_seed // 7) % 4
+
+        # --- Stage 1 Producer (8 families -> outputs v1, with plausible Stage-1 error v1_err) ---
+        if prod_id == 0:
+            v1 = (b % 9) + 2 * scale
+            rhs = a * v1 + c
+            v1_err = v1 + 2
+            s1_prompt = f"Stage 1 (Algebra): solve `{a} * v1 + {c} = {rhs}` for `v1`."
+            s1_gold_t = f"Stage 1: subtract {rhs} - {c} = {a * v1}, then divide {a * v1} // {a} to get v1 = {v1}."
+            s1_err_t = f"Stage 1: add offset to get ({rhs} + {c}) // {a} so v1 = {v1_err}."
+        elif prod_id == 1:
+            v0 = (a % 12) + 2
+            acc = 2 * ((b % 5) + 1)
+            t_s = (c % 4) + 2
+            v1 = v0 * t_s + (acc * t_s * t_s) // 2
+            v1_err = v0 * t_s + acc * t_s * t_s
+            s1_prompt = f"Stage 1 (Kinematics): compute displacement `v1 = {v0}*{t_s} + 0.5*{acc}*{t_s}^2`."
+            s1_gold_t = f"Stage 1: drift {v0} * {t_s} = {v0 * t_s}, accel term = {(acc * t_s * t_s) // 2}, sum v1 = {v1}."
+            s1_err_t = f"Stage 1: drift {v0} * {t_s} = {v0 * t_s}, unhalved accel term = {acc * t_s * t_s}, sum v1 = {v1_err}."
+        elif prod_id == 2:
+            v1 = a + b + c
+            v1_err = a + c
+            s1_prompt = f"Stage 1 (DAG Critical Path): M1 ({a}d) -> parallel Alpha ({b}d), Beta (0d) -> M2 ({c}d); set `v1` to critical path."
+            s1_gold_t = f"Stage 1: longest chain M1 + Alpha + M2 gives {a} + {b} = {a + b}, plus {c} gives v1 = {v1}."
+            s1_err_t = f"Stage 1: shortest chain M1 + Beta + M2 gives {a} + {c} = {v1_err} so v1 = {v1_err}."
+        elif prod_id == 3:
+            c_mat = (c % 7) + 4
+            b_mat = (b % 5) + 1
+            v1 = a * c_mat - 2 * b_mat
+            v1_err = a * c_mat + 2 * b_mat
+            s1_prompt = f"Stage 1 (Matrix Det): compute `v1 = det([[{a}, {b_mat}], [2, {c_mat}]])`."
+            s1_gold_t = f"Stage 1: main diagonal {a} * {c_mat} = {a * c_mat}, off-diagonal 2 * {b_mat} = {2 * b_mat}, det v1 = {v1}."
+            s1_err_t = f"Stage 1: main diagonal {a} * {c_mat} = {a * c_mat}, plus off-diagonal {2 * b_mat} gives v1 = {v1_err}."
+        elif prod_id == 4:
+            cp = (b % 4) + 2
+            dt = (c % 5) + 2
+            v1 = a * cp * dt
+            v1_err = a * (cp + dt)
+            s1_prompt = f"Stage 1 (Calorimetry): compute thermal energy `v1 = {a} * {cp} * {dt}`."
+            s1_gold_t = f"Stage 1: heat capacity {a} * {cp} = {a * cp}, times dT {dt} gives v1 = {v1}."
+            s1_err_t = f"Stage 1: sum specific heat and dT ({cp} + {dt}) times mass {a} gives v1 = {v1_err}."
+        elif prod_id == 5:
+            steps_k = (c % 6) + 2
+            v1 = a + steps_k * b
+            v1_err = a + (steps_k - 1) * b
+            s1_prompt = f"Stage 1 (Recurrence): `dp[0] = {a}`, `dp[k] = dp[k-1] + {b}`; evaluate `v1 = dp[{steps_k}]`."
+            s1_gold_t = f"Stage 1: unroll {steps_k} steps: {steps_k} * {b} = {steps_k * b}, plus base {a} gives v1 = {v1}."
+            s1_err_t = f"Stage 1: unroll {steps_k - 1} steps: {(steps_k - 1) * b}, plus base {a} gives v1 = {v1_err}."
+        elif prod_id == 6:
+            fan = (c % 5) + 2
+            v1 = min(a, b) * fan
+            v1_err = max(a, b) * fan
+            s1_prompt = f"Stage 1 (Inner Join): Table R ({a} keys) joins Table S ({b} keys) with fanout {fan}; set `v1` to max rows."
+            s1_gold_t = f"Stage 1: matched keys min({a}, {b}) = {min(a, b)}, times fanout {fan} gives v1 = {v1}."
+            s1_err_t = f"Stage 1: outer bound max({a}, {b}) = {max(a, b)}, times fanout {fan} gives v1 = {v1_err}."
+        else:
+            v1 = a * c
+            v1_err = (a + b) * c
+            s1_prompt = f"Stage 1 (Service Graph): {a} active workers launch {c} kernels each ({b} idle queues); set `v1` to active kernels."
+            s1_gold_t = f"Stage 1: multiply active workers {a} * {c} = {v1} (ignoring {b} idle queues) so v1 = {v1}."
+            s1_err_t = f"Stage 1: include idle queues ({a} + {b}) * {c} = {v1_err} so v1 = {v1_err}."
+
+        # --- Stage 2 Transformer (6 families taking v1 -> v2) ---
+        if trans_id == 0:
+            p_ring = 29 + (idx % 11) * 2
+            v2 = (v1 + c) % p_ring
+            v2_s2err = (v1 + c + 3) % p_ring
+            v2_s1err = (v1_err + c) % p_ring
+            if v2_s1err == v2:
+                v2_s1err = (v2 + 5) % p_ring
+            s2_prompt = f"Stage 2 (ModRing): compute `v2 = (v1 + {c}) mod {p_ring}`."
+            s2_gold_t = f"Stage 2: ({v1} + {c}) mod {p_ring} = {v2}."
+            s2_err_t = f"Stage 2: shifted residue ({v1} + {c} + 3) mod {p_ring} = {v2_s2err}."
+            s2_from_s1err_t = f"Stage 2: ({v1_err} + {c}) mod {p_ring} = {v2_s1err}."
+        elif trans_id == 1:
+            v2 = v1 + c
+            v2_s2err = v1 - c
+            v2_s1err = v1_err + c
+            s2_prompt = f"Stage 2 (XOR Involution): simplify `v2 = ((v1 ^ {b}) ^ {b}) + {c}`."
+            s2_gold_t = f"Stage 2: XOR involution cancels mask {b}, leaving {v1} + {c} = {v2}."
+            s2_err_t = f"Stage 2: subtract offset after XOR cancellation, leaving {v1} - {c} = {v2_s2err}."
+            s2_from_s1err_t = f"Stage 2: XOR involution cancels mask {b}, leaving {v1_err} + {c} = {v2_s1err}."
+        elif trans_id == 2:
+            g1 = v1 + b
+            v2 = g1 + c
+            v2_s2err = g1 - c
+            v2_s1err = v1_err + b + c
+            s2_prompt = f"Stage 2 (Horn Chain): derive `G1 = v1 + {b}` and `v2 = G1 + {c}`."
+            s2_gold_t = f"Stage 2: forward chain G1 = {v1} + {b} = {g1}, then v2 = {g1} + {c} = {v2}."
+            s2_err_t = f"Stage 2: forward chain G1 = {v1} + {b} = {g1}, then subtract {c} to get v2 = {v2_s2err}."
+            s2_from_s1err_t = f"Stage 2: forward chain G1 = {v1_err} + {b} = {v1_err + b}, then v2 = {v2_s1err}."
+        elif trans_id == 3:
+            v2 = v1 + b
+            v2_s2err = v1 + 2 * b
+            v2_s1err = v1_err + b
+            s2_prompt = f"Stage 2 (Binary Search Mid): window `lo = v1`, `hi = v1 + {2 * b}`; set `v2 = lo + (hi - lo) // 2`."
+            s2_gold_t = f"Stage 2: half-span is {b}, so midpoint v2 = {v1} + {b} = {v2}."
+            s2_err_t = f"Stage 2: use full span {2 * b}, so endpoint v2 = {v1} + {2 * b} = {v2_s2err}."
+            s2_from_s1err_t = f"Stage 2: half-span is {b}, so midpoint v2 = {v1_err} + {b} = {v2_s1err}."
+        elif trans_id == 4:
+            delta_inv = 2 * b
+            v2 = v1 + delta_inv
+            v2_s2err = v1 + b
+            v2_s1err = v1_err + delta_inv
+            s2_prompt = f"Stage 2 (Loop Invariant): add invariant delta `((i + {b}) * 2 - i * 2)` to `v1` to get `v2`."
+            s2_gold_t = f"Stage 2: invariant delta is {delta_inv}, so v2 = {v1} + {delta_inv} = {v2}."
+            s2_err_t = f"Stage 2: unscaled delta is {b}, so v2 = {v1} + {b} = {v2_s2err}."
+            s2_from_s1err_t = f"Stage 2: invariant delta is {delta_inv}, so v2 = {v1_err} + {delta_inv} = {v2_s1err}."
+        else:
+            v2 = v1 * 2 + c
+            v2_s2err = v1 * 2 - c
+            v2_s1err = v1_err * 2 + c
+            s2_prompt = f"Stage 2 (Affine Transform): evaluate `v2 = 2 * v1 + {c}`."
+            s2_gold_t = f"Stage 2: double {v1} * 2 = {v1 * 2}, then add {c} to get v2 = {v2}."
+            s2_err_t = f"Stage 2: double {v1} * 2 = {v1 * 2}, then subtract {c} to get v2 = {v2_s2err}."
+            s2_from_s1err_t = f"Stage 2: double {v1_err} * 2 = {v1_err * 2}, then add {c} to get v2 = {v2_s1err}."
+
+        # --- Stage 3 Terminal Modality (4 verifiable output harnesses) ---
+        task_id = f"comb_t{tier}_p{prod_id}_tr{trans_id}_m{term_id}_{idx}"
+        if term_id == 0:
+            # Terminal 0: Executable multi-assert Python function parameterized by v2
+            n_test = (c % 4) + 2
+            expected_n = n_test * v2 + v1
+            expected_0 = v1
+            prompt_q = (
+                f"#U$# [Combinatorial Pipeline P{prod_id}->T{trans_id}->Code] {s1_prompt} {s2_prompt} "
+                f"Stage 3: Implement `solve(n)` in Python returning `n * v2 + v1` using your exact integers `v1` and `v2`.\n"
+                f"#Q$# [code] Derive `v1, v2` in `#T$#` and implement `solve(n)` in `#A$#`."
+            )
+            harness_h = f"assert solve({n_test}) == {expected_n} and solve(0) == {expected_0}"
+            gold_t = f"{s1_gold_t} {s2_gold_t} Stage 3: implement solve(n) returning n * {v2} + {v1}."
+            d1_t = f"{s1_gold_t} {s2_err_t} Stage 3: implement solve(n) returning n * {v2_s2err} + {v1}."
+            d2_t = f"{s1_err_t} {s2_from_s1err_t} Stage 3: implement solve(n) returning n * {v2_s1err} + {v1_err}."
+            gold_a = f"def solve(n):\n    return n * {v2} + {v1}"
+            d1_a = f"def solve(n):\n    return n * {v2_s2err} + {v1}"
+            d2_a = f"def solve(n):\n    return n * {v2_s1err} + {v1_err}"
+            hack_a = "def solve(n):\n    return 0"
+            domain = "compositional_code_math"
+        elif term_id == 1:
+            # Terminal 1: Multi-constraint IFEval + exact integer v2
+            prompt_q = (
+                f"#U$# [Combinatorial Pipeline P{prod_id}->T{trans_id}->IFEval] {s1_prompt} {s2_prompt} "
+                f"Stage 3: State `v2` in lowercase with NO commas, at least 6 words, including the keyword `verified`.\n"
+                f"#Q$# [evaluation] Satisfy both reasoning stages and all formatting constraints."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:verified;exact_int:{v2}"
+            gold_t = f"{s1_gold_t} {s2_gold_t} Stage 3: format lowercase without commas and include keyword verified."
+            d1_t = f"{s1_gold_t} {s2_err_t} Stage 3: format lowercase without commas and include keyword verified."
+            d2_t = f"{s1_err_t} {s2_from_s1err_t} Stage 3: format lowercase without commas and include keyword verified."
+            gold_a = f"the verified pipeline output value is {v2} units"
+            d1_a = f"the verified pipeline output value is {v2_s2err} units"
+            d2_a = f"The Pipeline, Output Value Is {v2_s1err} units"
+            hack_a = "0"
+            domain = "compositional_deduction_ifeval"
+        elif term_id == 2:
+            # Terminal 2: Dual-stage invariant verification (both v1 and v2 must match)
+            prompt_q = (
+                f"#U$# [Combinatorial Pipeline P{prod_id}->T{trans_id}->DualInvariant] {s1_prompt} {s2_prompt}\n"
+                f"#Q$# [deduction] Report both `v1` and `v2` as `v1=<int> v2=<int>`."
+            )
+            harness_h = f"acquisitions == {v1} and cycles == {v2}"
+            gold_t = f"{s1_gold_t} {s2_gold_t}"
+            d1_t = f"{s1_gold_t} {s2_err_t}"
+            d2_t = f"{s1_err_t} {s2_from_s1err_t}"
+            gold_a = f"v1={v1} v2={v2}"
+            d1_a = f"v1={v1} v2={v2_s2err}"
+            d2_a = f"v1={v1_err} v2={v2_s1err}"
+            hack_a = "v1=0 v2=0"
+            domain = "compositional_physics_math"
+        else:
+            # Terminal 3: Exact terminal scalar with length-matched multi-stage distractors
+            prompt_q = (
+                f"#U$# [Combinatorial Pipeline P{prod_id}->T{trans_id}->Scalar] {s1_prompt} {s2_prompt}\n"
+                f"#Q$# [math] Derive `v1` then return the exact integer `v2`."
+            )
+            harness_h = f"expected == {v2}"
+            gold_t = f"{s1_gold_t} {s2_gold_t}"
+            d1_t = f"{s1_gold_t} {s2_err_t}"
+            d2_t = f"{s1_err_t} {s2_from_s1err_t}"
+            gold_a = f"{v2}"
+            d1_a = f"{v2_s2err}"
+            d2_a = f"{v2_s1err}"
+            hack_a = "0"
+            domain = "compositional_code_pm"
+
+        base_cands = (
+            f"#T$# {gold_t}\n#A$# {gold_a}",
+            f"#T$# {d1_t}\n#A$# {d1_a}",
+            f"#T$# {d2_t}\n#A$# {d2_a}",
+            f"#T$# Default fallback.\n#A$# {hack_a}",
+        )
+        base_scores = (1.0, 0.20, 0.10, 0.0)
+        order = [0, 1, 2, 3]
+        shift = idx % 4
+        order[0], order[shift] = order[shift], order[0]
+        p_cands = tuple(base_cands[i] for i in order)
+        p_scores = tuple(base_scores[i] for i in order)
+        g_idx = order.index(0)
+        fam_slot = 20 + (term_id % 4)
+        self._last_task_kinds[task_id] = fam_slot
+        cached_s = self.scaffold_cache.get(task_id, default=_SCAFFOLD_CANDIDATES[idx % len(_SCAFFOLD_CANDIDATES)])
+        return OrnithTask(
+            task_id=task_id,
+            domain=domain,
+            prompt_q=prompt_q,
+            harness_h=harness_h,
+            scaffold_s=cached_s,
+            candidate_rollouts=p_cands,
+            harness_scores=p_scores,
+            gold_index=g_idx,
+            gold_thought=gold_t,
+            gold_answer=gold_a,
+        )
+
     def _generate_task(self, idx: int, *, compact: bool = False) -> OrnithTask:
         """Synthesize a verifiable coding, math, physics, logic, IFEval, or cross-template compositional task (#Q$#)."""
         # Mix curated external HF RLVR tasks (when loaded and non-compact) with live procedural + compositional tasks
@@ -1144,7 +1369,12 @@ class OrnithSelfImprover:
 
         kind = self.env_architect.select_family(idx, seed=self._rng_seed)
         tier = self.env_architect.difficulty_tier(kind)
-        scale = tier  # Scales operand magnitudes and multi-step depth across tiers 1..4
+        # For online training steps beyond the initial 24-family sweep, dynamically invoke the 192-pipeline
+        # combinatorial cross-template synthesizer on every 3rd procedural slot or when kind >= 20 and idx >= 24.
+        if not compact and idx >= 24 and (kind >= 20 or idx % 3 == 0):
+            return self._synthesize_combinatorial_pipeline_task(idx, tier=tier)
+
+        scale = tier  # Scales operand magnitudes and multi-step depth across tiers 1..8
         a = (3 * scale) + ((idx * 7 + self._rng_seed) % (19 * scale))
         b = (2 * scale) + ((idx * 11 + self._rng_seed) % (13 * scale))
         c = 1 + ((idx * 5 + tier) % (9 + 2 * scale))
@@ -1626,8 +1856,8 @@ class OrnithSelfImprover:
             gold_a = f"def solve(n):\n    return {k_slope} * n + {a}"
             base_cands = (
                 f"#T$# {gold_t}\n#A$# {gold_a}",
-                f"#T$# Wrong algebra k = {k_slope + 1}.\n#A$# def solve(n):\n    return {k_slope + 1} * n + {a}",
-                f"#T$# Hallucinated arithmetic {a} + {c} = {a + c + 5}.\n#A$# def solve(n):\n    return {k_slope} * n + {a}",
+                f"#T$# Stage 1 (Algebra): {rhs_eq} + {c} = {rhs_eq + c}, so k = {k_slope + 1}. Stage 2 (Code): implement solve(n) = {k_slope + 1} * n + {a}.\n#A$# def solve(n):\n    return {k_slope + 1} * n + {a}",
+                f"#T$# Stage 1 (Algebra): {rhs_eq} - {c} = {a * k_slope}, so k = {k_slope}. Stage 2 (Code): subtract offset {a} instead of adding.\n#A$# def solve(n):\n    return {k_slope} * n - {a}",
                 "#T$# Constant stub.\n#A$# def solve(n):\n    return 0",
             )
             base_scores = (1.0, 0.25, 0.20, 0.0)
@@ -1654,8 +1884,8 @@ class OrnithSelfImprover:
             gold_a = f"{residue}"
             base_cands = (
                 f"#T$# {gold_t}\n#A$# {gold_a}",
-                f"#T$# Return unreduced displacement {disp} mod {p_ring}.\n#A$# {disp}",
-                f"#T$# Wrong kinematics d = {v0 + accel * t_sec} mod {p_ring}.\n#A$# {(v0 + accel * t_sec + c) % p_ring}",
+                f"#T$# Stage 1 (Kinematics): drift {v0} * {t_sec} = {v0*t_sec}, accel term = {(accel*t_sec*t_sec)//2}, d = {disp}. Stage 2 (ModRing): omit mod reduction.\n#A$# {disp}",
+                f"#T$# Stage 1 (Kinematics): final velocity {v0} + {accel * t_sec} = {v0 + accel * t_sec}. Stage 2 (ModRing): ({v0 + accel * t_sec} + {c}) mod {p_ring}.\n#A$# {(v0 + accel * t_sec + c) % p_ring}",
                 "#T$# Zero delta.\n#A$# 0",
             )
             base_scores = (1.0, 0.20, 0.15, 0.0)
@@ -1679,8 +1909,8 @@ class OrnithSelfImprover:
             gold_a = "def solve(tracks, crit):\n    return sum(crit - x for x in tracks)"
             base_cands = (
                 f"#T$# {gold_t}\n#A$# {gold_a}",
-                "#T$# Sum tracks without subtracting from crit.\n#A$# def solve(tracks, crit):\n    return sum(tracks)",
-                "#T$# Only check max track.\n#A$# def solve(tracks, crit):\n    return crit - min(tracks)",
+                f"#T$# Stage 1 (DAG): Critical path {a} + {b} = {a+b}, plus {c} = {crit_len}. Stage 2 (Code): Sum tracks directly without subtracting from crit.\n#A$# def solve(tracks, crit):\n    return sum(tracks)",
+                f"#T$# Stage 1 (DAG): Shortest path {a} + {c} = {a+c}. Stage 2 (Code): Return single max slack crit - min(tracks).\n#A$# def solve(tracks, crit):\n    return crit - min(tracks)",
                 "#T$# Constant stub.\n#A$# def solve(tracks, crit):\n    return 0",
             )
             base_scores = (1.0, 0.25, 0.15, 0.0)
@@ -1701,7 +1931,7 @@ class OrnithSelfImprover:
             base_cands = (
                 f"#T$# {gold_t}\n#A$# {gold_a}",
                 f"#T$# {gold_t}\n#A$# Cluster A, manages {final_v} total shards online",
-                f"#T$# Sum {a} + {b} = {a+b}.\n#A$# cluster a manages {a+b+c} total units online",
+                f"#T$# Stage 1: {a} + {b} = {a+b}, then {a+b} + {c} = {a+b+c}. Stage 2: format lowercase with no comma.\n#A$# cluster a manages {a+b+c} total units online",
                 "#T$# Default fallback.\n#A$# 0",
             )
             base_scores = (1.0, 0.25, 0.15, 0.0)
@@ -1930,7 +2160,7 @@ class OrnithSelfImprover:
         )
         lm_distill_out = coe.forward_inference(inp_tensor, targets=lbl_tensor)
         assert lm_distill_out.loss is not None
-        self_distill_loss = 0.95 * decision_distill_loss + 0.05 * lm_distill_out.loss
+        self_distill_loss = 0.70 * decision_distill_loss + 0.30 * lm_distill_out.loss
 
         # LiquidAI Antidoom FTPO + Compiler-in-the-Loop Token Targeting (supports both ByteTokenizer & MorphCode-16K):
         # Strictly target either (a) an inner repetition trigger (`loop_hit is not None`), or

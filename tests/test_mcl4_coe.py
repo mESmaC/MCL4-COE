@@ -1892,7 +1892,7 @@ def test_ornith_v2_compositional_rlvr_and_dream_evolution(tmp_path: Path) -> Non
     assert verify_python_rollout("#T$# 6 * 5 = 30, 30 + 1 = 31.\n#A$# cluster manages 31 total shards", h_if) == 1.0
     assert verify_python_rollout("#T$# 6 * 5 = 30, 30 + 1 = 31.\n#A$# Cluster, manages 31 total shards", h_if) == 0.5
 
-    # 3. Verify all 24 procedural + cross-template compositional families (0..23) pass gold == 1.0 and hack == 0.0
+    # 3. Verify all 24 procedural families + all 8x6x4 = 192 cross-template combinatorial pipelines pass gold == 1.0 and hack == 0.0
     improver = OrnithSelfImprover(projection_dim=16, max_seq_len=256)
     seen_domains: set[str] = set()
     for k in range(24):
@@ -1901,12 +1901,18 @@ def test_ornith_v2_compositional_rlvr_and_dream_evolution(tmp_path: Path) -> Non
         gold_cand = t.candidate_rollouts[t.gold_index]
         assert verify_python_rollout(gold_cand, t.harness_h, t.gold_answer) == 1.0, f"Family {k} ({t.task_id}) gold failed"
         assert min(verify_python_rollout(c, t.harness_h, t.gold_answer) for c in t.candidate_rollouts) == 0.0
+    for c_idx in range(1, 193):
+        ct = improver._synthesize_combinatorial_pipeline_task(c_idx, tier=(c_idx % 8) + 1)
+        seen_domains.add(ct.domain)
+        gold_cand = ct.candidate_rollouts[ct.gold_index]
+        assert verify_python_rollout(gold_cand, ct.harness_h, ct.gold_answer) == 1.0, f"Combo {c_idx} ({ct.task_id}) gold failed"
+        assert min(verify_python_rollout(c, ct.harness_h, ct.gold_answer) for c in ct.candidate_rollouts) == 0.0
     assert "compositional_code_math" in seen_domains
     assert "compositional_physics_math" in seen_domains
     assert "compositional_code_pm" in seen_domains
     assert "compositional_deduction_ifeval" in seen_domains
 
-    # 4. Verify OrnithEnvArchitect promotes difficulty_tier when pass rate exceeds threshold
+    # 4. Verify OrnithEnvArchitect promotes difficulty_tier up to Tier 8 when pass rate exceeds threshold
     arch = OrnithEnvArchitect()
     assert arch.difficulty_tier(0) == 1
     for _ in range(4):
@@ -1915,7 +1921,7 @@ def test_ornith_v2_compositional_rlvr_and_dream_evolution(tmp_path: Path) -> Non
 
     # 5. Verify external rlvr_env_pool.pt loading and MorphCode-16K first-divergence FTPO
     pool_file = tmp_path / "rlvr_env_pool.pt"
-    ext_t = improver._generate_task(20, compact=False)
+    ext_t = improver._synthesize_combinatorial_pipeline_task(1, tier=2)
     torch.save({"tasks": [ext_t]}, pool_file)
     improver_ext = OrnithSelfImprover(
         projection_dim=16,

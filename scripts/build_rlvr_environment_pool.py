@@ -106,22 +106,34 @@ def _extract_kodcode_tasks(parquet_path: Path, max_tasks: int = 1200) -> list[Or
         if verify_python_rollout(gold_cand, harness_h, gold_a) < 0.99:
             continue
 
-        # Build 3 hard negatives (mutated operator, mutated return, constant stub)
-        mut1_a = (
-            gold_a.replace(" + ", " - ", 1)
-            if " + " in gold_a
-            else (
-                gold_a.replace(" - ", " + ", 1)
-                if " - " in gold_a
-                else gold_a + "\n    return None"
-            )
-        )
-        mut2_a = f"def {fn_name}(*args):\n    return -1"
+        # Build 3 hard negatives with length-matched #T$# thoughts and full-body code mutations
+        if " + " in gold_a:
+            mut1_a = gold_a.replace(" + ", " - ", 1)
+        elif " - " in gold_a:
+            mut1_a = gold_a.replace(" - ", " + ", 1)
+        elif " * " in gold_a:
+            mut1_a = gold_a.replace(" * ", " // ", 1)
+        elif "return " in gold_a:
+            mut1_a = re.sub(r"return\s+([^\n]+)", r"return (\1) + 1", gold_a, count=1)
+        else:
+            mut1_a = gold_a + "\n    return None"
+
+        if " == " in gold_a:
+            mut2_a = gold_a.replace(" == ", " != ", 1)
+        elif " < " in gold_a:
+            mut2_a = gold_a.replace(" < ", " <= ", 1)
+        elif " > " in gold_a:
+            mut2_a = gold_a.replace(" > ", " >= ", 1)
+        elif "return " in gold_a:
+            mut2_a = re.sub(r"return\s+([^\n]+)", r"return -(\1)", gold_a, count=1)
+        else:
+            mut2_a = f"def {fn_name}(*args):\n    return -1"
+
         hack_a = f"def {fn_name}(*args):\n    return 0"
         base_cands = (
             gold_cand,
-            f"#T$# Perturbed operator branch.\n#A$# {mut1_a}",
-            f"#T$# Fallback return -1.\n#A$# {mut2_a}",
+            f"#T$# {gold_t}\n#A$# {mut1_a}",
+            f"#T$# {gold_t}\n#A$# {mut2_a}",
             f"#T$# Constant stub.\n#A$# {hack_a}",
         )
         base_scores = (1.0, 0.20, 0.10, 0.0)
@@ -159,6 +171,17 @@ def _extract_integer_answer(ans_raw: str) -> int | None:
     return None
 
 
+def _perturb_thought_number(gold_t: str, gold_int: int, target_int: int) -> str:
+    """Create a length-matched adversarial thought by substituting `gold_int` with `target_int`."""
+    g_str = str(gold_int)
+    t_str = str(target_int)
+    if g_str in gold_t:
+        # Replace the last occurrence of gold_int in the thought
+        parts = gold_t.rsplit(g_str, 1)
+        return t_str.join(parts)
+    return f"{gold_t} [perturbed->{t_str}]"
+
+
 def _build_numeric_task(
     task_id: str,
     domain: str,
@@ -184,12 +207,17 @@ def _build_numeric_task(
         if verify_python_rollout(gold_cand, harness_h, gold_a) < 0.99:
             return None
 
-    d1 = ans_int + (1 if ans_int >= 0 else -1)
-    d2 = ans_int * 2 if ans_int != 0 else 7
+    delta1 = ((shift % 5) + 1) * (1 if (shift % 2 == 0) else -1)
+    d1 = ans_int + delta1
+    if d1 == ans_int:
+        d1 = ans_int + 1
+    d2 = ans_int - delta1 * 2 if ans_int != delta1 * 2 else ans_int + 7
+    t_d1 = _perturb_thought_number(gold_t, ans_int, d1)
+    t_d2 = _perturb_thought_number(gold_t, ans_int, d2)
     base_cands = (
         gold_cand,
-        f"#T$# Off-by-one boundary evaluation yields {d1}.\n#A$# {d1}",
-        f"#T$# Unscaled intermediate factor yields {d2}.\n#A$# {d2}",
+        f"#T$# {t_d1}\n#A$# {d1}",
+        f"#T$# {t_d2}\n#A$# {d2}",
         "#T$# Default fallback.\n#A$# 0",
     )
     base_scores = (1.0, 0.20, 0.10, 0.0)
@@ -316,10 +344,14 @@ def _extract_reasoning_gym_tasks(jsonl_path: Path, max_tasks: int = 1200) -> lis
                 gold_cand = f"#T$# {gold_t}\n#A$# {gold_a}"
                 if verify_python_rollout(gold_cand, harness_h, gold_a) < 0.99:
                     continue
+                d1_a = gold_a[::-1] if len(gold_a) > 1 and gold_a[::-1] != gold_a else f"{gold_a}_alt"
+                d2_a = gold_a.upper() if gold_a.upper() != gold_a else f"{gold_a}_null"
+                t_d1 = gold_t.replace(f"`{ans_raw}`", f"`{d1_a}`")
+                t_d2 = gold_t.replace(f"`{ans_raw}`", f"`{d2_a}`")
                 base_cands = (
                     gold_cand,
-                    f"#T$# Partial transition.\n#A$# {gold_a[::-1] if len(gold_a) > 1 else 'none'}",
-                    "#T$# Empty state.\n#A$# null",
+                    f"#T$# {t_d1}\n#A$# {d1_a}",
+                    f"#T$# {t_d2}\n#A$# {d2_a}",
                     "#T$# Default fallback.\n#A$# 0",
                 )
                 base_scores = (1.0, 0.15, 0.10, 0.0)
@@ -375,7 +407,7 @@ def _extract_allenai_rlvr_if_tasks(parquet_path: Path, max_tasks: int = 800) -> 
                             base_cands = (
                                 gold_cand,
                                 f"#T$# {gold_t}\n#A$# Verified Response, with comma and {kw}",
-                                f"#T$# Omit keyword.\n#A$# verified response without target token",
+                                f"#T$# {gold_t}\n#A$# verified response omitting target token directly",
                                 "#T$# Default fallback.\n#A$# 0",
                             )
                             p_cands, p_scores, g_idx = _permute_candidates(base_cands, (1.0, 0.25, 0.15, 0.0), idx)
@@ -411,10 +443,12 @@ def _extract_allenai_rlvr_if_tasks(parquet_path: Path, max_tasks: int = 800) -> 
             gold_cand = f"#T$# {gold_t}\n#A$# {gold_a}"
             if verify_python_rollout(gold_cand, harness_h, gold_a) < 0.99:
                 continue
+            t_d1 = _perturb_thought_number(gold_t, ans_int, ans_int + 1)
+            t_d2 = _perturb_thought_number(gold_t, ans_int, ans_int + 3)
             base_cands = (
                 gold_cand,
-                f"#T$# {gold_t}\n#A$# The Answer, With Commas, Is {ans_int + 1}",
-                f"#T$# Wrong integer.\n#A$# the answer is {ans_int + 3}",
+                f"#T$# {t_d1}\n#A$# The Answer, With Commas, Is {ans_int + 1}",
+                f"#T$# {t_d2}\n#A$# the verified answer is {ans_int + 3}",
                 "#T$# Default fallback.\n#A$# 0",
             )
             p_cands, p_scores, g_idx = _permute_candidates(base_cands, (1.0, 0.25, 0.15, 0.0), idx)
@@ -435,12 +469,28 @@ def _extract_allenai_rlvr_if_tasks(parquet_path: Path, max_tasks: int = 800) -> 
     return tasks
 
 
+def _build_combinatorial_192_pool(count: int = 1536) -> list[OrnithTask]:
+    """Synthesize and deterministically verify `count` tasks spanning all 8x6x4 = 192 cross-template pipelines."""
+    from mcl4_coe.ornith_rl import OrnithSelfImprover
+
+    improver = OrnithSelfImprover(projection_dim=16, max_seq_len=256)
+    tasks: list[OrnithTask] = []
+    for i in range(count):
+        tier = (i // 192) % 8 + 1
+        t = improver._synthesize_combinatorial_pipeline_task(i + 1, tier=tier)
+        gold_cand = t.candidate_rollouts[t.gold_index]
+        if verify_python_rollout(gold_cand, t.harness_h, t.gold_answer) >= 0.99:
+            tasks.append(t)
+    return tasks
+
+
 def append_rlvr_uta_shard(
     tasks: list[OrnithTask],
     shards_root: Path,
     *,
     vocab_size: int = 16384,
     seq_len: int = 512,
+    corpus_tag: str = "rlvr_env_pool_r2_combinatorial192",
 ) -> dict[str, Any]:
     """Pack verified `OrnithTask` `(U, T, A)` traces into an additional `uta_trace` shard and update `index_receipt.json`."""
     import hashlib
@@ -452,9 +502,9 @@ def append_rlvr_uta_shard(
 
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     seq_len = int(receipt.get("seq_len", seq_len))
-    # Avoid duplicate append if an rlvr shard is already registered
+    # Avoid duplicate append if this specific corpus_tag is already registered
     for s in receipt.get("shards", []):
-        if "rlvr_env_pool" in str(s.get("provenance", [])):
+        if corpus_tag in str(s.get("provenance", [])):
             return {"appended_blocks": int(s.get("num_blocks", 0)), "already_present": True}
 
     tok = get_tokenizer(vocab_size)
@@ -500,7 +550,7 @@ def append_rlvr_uta_shard(
         "sha256": sha256_hex,
         "provenance": [
             {
-                "corpus_name": "rlvr_env_pool_6datasets",
+                "corpus_name": corpus_tag,
                 "source_file": "rlvr_env_pool.pt",
                 "records_accepted": len(tasks),
                 "records_rejected": 0,
@@ -525,13 +575,18 @@ def append_rlvr_uta_shard(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build verified RLVR OrnithTask pool from cached HF datasets.")
     parser.add_argument("--shards-root", type=Path, default=Path("/content/data_shards_morph16k"))
-    parser.add_argument("--max-per-source", type=int, default=1000)
+    parser.add_argument("--max-per-source", type=int, default=2000)
     args = parser.parse_args()
 
     from huggingface_hub import hf_hub_download
 
     all_tasks: list[OrnithTask] = []
     summary: dict[str, int] = {}
+
+    # 0. Combinatorial 8x6x4 = 192 cross-template pipeline pool (1,536 verified tasks across 8 tiers)
+    combo_tasks = _build_combinatorial_192_pool(count=1536)
+    all_tasks.extend(combo_tasks)
+    summary["Combinatorial-192-Pipeline"] = len(combo_tasks)
 
     # 1. KodCode-Light-RL-10K
     try:
@@ -620,7 +675,12 @@ def main() -> None:
         },
         pool_path,
     )
-    shard_info = append_rlvr_uta_shard(all_tasks, args.shards_root)
+    # Append the 1,536 combinatorial 192-pipeline tasks + upgraded RLVR sample to uta_trace
+    shard_info = append_rlvr_uta_shard(
+        combo_tasks + all_tasks[len(combo_tasks) :: 2],
+        args.shards_root,
+        corpus_tag="rlvr_env_pool_r2_combinatorial192",
+    )
     print(
         json.dumps(
             {

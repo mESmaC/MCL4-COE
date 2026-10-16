@@ -295,6 +295,54 @@ def _iter_hf_source_rows(
             if yielded >= max_rows:
                 return
 
+    if load_dataset_fn is not None and ds_path.startswith("camel-ai/"):
+        try:
+            parquet_url = f"hf://datasets/{ds_path}@refs/convert/parquet/default/train/0000.parquet"
+            stream = load_dataset_fn(
+                "parquet",
+                data_files=[parquet_url],
+                split="train",
+                streaming=True,
+                token=token,
+            )
+            for row in stream:
+                if isinstance(row, dict):
+                    yielded += 1
+                    yield row
+                    if yielded >= max_rows:
+                        return
+            if yielded > 0:
+                return
+        except Exception:
+            if yielded >= max_rows:
+                return
+
+    if load_dataset_fn is not None and ds_path == "AlgorithmicResearchGroup/arxiv_cplusplus_research_code":
+        try:
+            num_shards = min(44, max(2, (max_rows // 10000) + 2))
+            parquet_urls = [
+                f"hf://datasets/{ds_path}/data/train-{i:05d}-of-00044.parquet"
+                for i in range(num_shards)
+            ]
+            stream = load_dataset_fn(
+                "parquet",
+                data_files=parquet_urls,
+                split="train",
+                streaming=True,
+                token=token,
+            )
+            for raw_row in stream:
+                if isinstance(raw_row, dict):
+                    yielded += 1
+                    yield normalize_github_code_record(raw_row)
+                    if yielded >= max_rows:
+                        return
+            if yielded > 0:
+                return
+        except Exception:
+            if yielded >= max_rows:
+                return
+
     if load_dataset_fn is not None:
         try:
             stream = load_dataset_fn(

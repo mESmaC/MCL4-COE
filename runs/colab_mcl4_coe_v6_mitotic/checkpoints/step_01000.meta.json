@@ -1,0 +1,209 @@
+{
+  "checkpoint_id": "colab_mcl4_coe_v6_mitotic/step_01000",
+  "config": {
+    "batch_size": 16,
+    "checkpoint_every": 250,
+    "corpora_root": "/content/MCL4-COE/corpora",
+    "cpu_offload_optimizer": false,
+    "curriculum_mode": "cosine",
+    "d_model": 512,
+    "decision_batch_size": 4,
+    "deep_supervision_weight": 0.2,
+    "depth_ponder": true,
+    "dream_every": 10,
+    "dream_max_calls": 4,
+    "dream_max_rounds": 3,
+    "dream_revisions": 3,
+    "dream_workers": 2,
+    "enable_dream_rsi": true,
+    "enable_gist_conditioning": true,
+    "enable_mitosis": true,
+    "enable_ornith_rl": true,
+    "end_weights": {
+      "pretrain_lm": 0.25,
+      "typed_decision": 0.2,
+      "uta_trace": 0.55
+    },
+    "eval_every": 200,
+    "expert_hidden_dim": 1024,
+    "gist_conditioning_prob": 0.35,
+    "grad_clip": 1.0,
+    "latent_prior_scale": 0.35,
+    "lr": 0.0012,
+    "max_experts": 16,
+    "max_seq_len": 1024,
+    "micro_batch_size": 16,
+    "min_lr_ratio": 0.1,
+    "mitosis_every": 1000,
+    "mitosis_step_size": 4,
+    "n_decoder_layers": 4,
+    "n_encoder_layers": 4,
+    "n_heads": 8,
+    "num_experts": 8,
+    "nvfp4_sparsity_mode": "2to4_transposable",
+    "nvfp4_sr_ste_decay": 0.0001,
+    "ornith_every": 8,
+    "ornith_warmup_ratio": 0.65,
+    "ornith_weight": 0.2,
+    "ple_dim": 128,
+    "projection_dim": 128,
+    "recurrence_steps": 2,
+    "recurrent_kv": true,
+    "resume_checkpoint": null,
+    "run_id": "colab_mcl4_coe_v6_mitotic",
+    "runs_root": "/content/runs",
+    "sample_every": 200,
+    "sample_prompt": "Locate MCL4CEDBackbone in src/mcl4_coe/backbone.py and explain how recurrent depth pondering refines latent representations.",
+    "seed": 42,
+    "shards_root": "/content/data_shards_morph16k",
+    "start_weights": {
+      "pretrain_lm": 0.5,
+      "typed_decision": 0.15,
+      "uta_trace": 0.35
+    },
+    "top_k": 2,
+    "total_steps": 4000,
+    "use_nvfp4": false,
+    "val_max_batches_per_track": 8,
+    "vocab_size": 16384,
+    "warmup_ratio": 0.06,
+    "weight_decay": 0.01
+  },
+  "meta_file": "/content/runs/colab_mcl4_coe_v6_mitotic/checkpoints/step_01000.meta.json",
+  "metrics": {
+    "abstraction_loss": 0.02314,
+    "cumulative_tokens": 12715527,
+    "decision_loss": 0.90855,
+    "deduction_loss": 1.01176,
+    "evaluation_loss": 0.40829,
+    "expert_load": [
+      0.1457,
+      0.0846,
+      0.1349,
+      0.1357,
+      0.1656,
+      0.1343,
+      0.098,
+      0.1012
+    ],
+    "lm_loss": 3.59546,
+    "loss_pretrain_lm": 4.20907,
+    "loss_typed_decision": 3.10408,
+    "loss_uta_trace": 2.42025,
+    "lr": 0.001095,
+    "metacognition_loss": 0.61414,
+    "mitosis_event": {
+      "action": "expand",
+      "added_pairs": [
+        [
+          0,
+          4
+        ],
+        [
+          3,
+          5
+        ],
+        [
+          2,
+          6
+        ],
+        [
+          1,
+          7
+        ]
+      ],
+      "mitotic_pairs": [
+        [
+          0,
+          4
+        ],
+        [
+          3,
+          5
+        ],
+        [
+          2,
+          6
+        ],
+        [
+          1,
+          7
+        ]
+      ],
+      "new_experts": 8,
+      "old_experts": 4,
+      "parameter_count": 128651531,
+      "step": 1000
+    },
+    "mitotic_pairs": [
+      [
+        0,
+        4
+      ],
+      [
+        3,
+        5
+      ],
+      [
+        2,
+        6
+      ],
+      [
+        1,
+        7
+      ]
+    ],
+    "num_experts": 8,
+    "nvfp4_gemms": 0,
+    "nvfp4_sparse_2to4_gemms": 0,
+    "progress": 0.25,
+    "quotas": {
+      "pretrain_lm": 7,
+      "typed_decision": 3,
+      "uta_trace": 6
+    },
+    "step": 1000,
+    "step_time_s": 2.048,
+    "step_tokens": 11477,
+    "tok_per_s": 5604.7,
+    "total_loss": 4.56499,
+    "total_steps": 4000,
+    "train_bpb": 1.73525,
+    "train_bpt": 5.18715,
+    "val_bpb": 1.62263,
+    "val_bpb_pretrain_lm": 1.50214,
+    "val_bpb_typed_decision": 1.46843,
+    "val_bpb_uta_trace": 2.0048,
+    "val_bpt": 4.8987,
+    "val_bpt_pretrain_lm": 4.27683,
+    "val_bpt_typed_decision": 5.3929,
+    "val_bpt_uta_trace": 5.65975,
+    "val_bytes_evaluated": 778025,
+    "val_lm_loss": 3.39552,
+    "val_loss_pretrain_lm": 2.96448,
+    "val_loss_typed_decision": 3.73807,
+    "val_loss_uta_trace": 3.92304,
+    "val_mcqa_acc": 0.365,
+    "val_mcqa_ce_loss": 1.37601,
+    "val_mcqa_n": 263,
+    "val_tokens_evaluated": 257710,
+    "vram_allocated_mb": 1980.5,
+    "vram_reserved_mb": 36018.0,
+    "wall_time_s": 517.44,
+    "weights": {
+      "pretrain_lm": 0.4634,
+      "typed_decision": 0.1573,
+      "uta_trace": 0.3793
+    }
+  },
+  "num_experts": 8,
+  "parameter_count": 128651531,
+  "pt_file": "/content/runs/colab_mcl4_coe_v6_mitotic/checkpoints/step_01000.pt",
+  "run_id": "colab_mcl4_coe_v6_mitotic",
+  "sample_prompt": "Locate MCL4CEDBackbone in src/mcl4_coe/backbone.py and explain how recurrent depth pondering refines latent representations.",
+  "sample_uta": "#U$# Locate MCL4CEDBackbone in src/mcl4_coe/backbone.py and explain how recurrent depth pondering refines latent representations.\n#T$# I need to solve this problem about a function that's a function that's a good function. The function is \"the function of the function f(x) is \"the function\". The function f is \"x\" function. The function f(x) = \"f\". The function is 'x', 'x', f''. The function function is 'x.', 'x.\n#A$# ## 'x: 'xx', \"x\": \"x.x\", \"x: \"x.\", \"y\": \"y\", 'y': \"y', \"yx\" (x, y) { \"x: 'x\", 'yx': 'y', ('x'), '': 'y, 'x': \"'x', '':'x', y': ('x''), 'x' 'x: 'xx', 'f': (''x'), y'': 1, 'f', \"x\": \"x\", \"x: \"x, \"y\":",
+  "step": 1000,
+  "timestamp": 1792173059.0923276,
+  "total_steps": 4000,
+  "use_nvfp4": false
+}

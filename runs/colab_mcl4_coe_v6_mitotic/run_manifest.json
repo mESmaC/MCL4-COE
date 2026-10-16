@@ -1,0 +1,436 @@
+{
+  "config": {
+    "batch_size": 16,
+    "checkpoint_every": 250,
+    "corpora_root": "/content/MCL4-COE/corpora",
+    "cpu_offload_optimizer": false,
+    "curriculum_mode": "cosine",
+    "d_model": 512,
+    "decision_batch_size": 4,
+    "deep_supervision_weight": 0.2,
+    "depth_ponder": true,
+    "dream_every": 10,
+    "dream_max_calls": 4,
+    "dream_max_rounds": 3,
+    "dream_revisions": 3,
+    "dream_workers": 2,
+    "enable_dream_rsi": true,
+    "enable_gist_conditioning": true,
+    "enable_mitosis": true,
+    "enable_ornith_rl": true,
+    "end_weights": {
+      "pretrain_lm": 0.25,
+      "typed_decision": 0.2,
+      "uta_trace": 0.55
+    },
+    "eval_every": 200,
+    "expert_hidden_dim": 1024,
+    "gist_conditioning_prob": 0.35,
+    "grad_clip": 1.0,
+    "latent_prior_scale": 0.35,
+    "lr": 0.0012,
+    "max_experts": 56,
+    "max_seq_len": 1024,
+    "micro_batch_size": 16,
+    "min_lr_ratio": 0.25,
+    "mitosis_every": 800,
+    "mitosis_step_size": 8,
+    "n_decoder_layers": 4,
+    "n_encoder_layers": 4,
+    "n_heads": 8,
+    "num_experts": 56,
+    "nvfp4_sparsity_mode": "2to4_transposable",
+    "nvfp4_sr_ste_decay": 0.0001,
+    "ornith_every": 8,
+    "ornith_warmup_ratio": 0.65,
+    "ornith_weight": 0.2,
+    "ple_dim": 128,
+    "projection_dim": 128,
+    "recurrence_steps": 2,
+    "recurrent_kv": true,
+    "resume_checkpoint": "/content/runs/colab_mcl4_coe_v6_mitotic/checkpoints/step_06000.pt",
+    "run_id": "colab_mcl4_coe_v6_mitotic",
+    "runs_root": "/content/runs",
+    "sample_every": 200,
+    "sample_prompt": "Locate MCL4CEDBackbone in src/mcl4_coe/backbone.py and explain how recurrent depth pondering refines latent representations.",
+    "seed": 43,
+    "shards_root": "/content/data_shards_morph16k",
+    "start_weights": {
+      "pretrain_lm": 0.5,
+      "typed_decision": 0.15,
+      "uta_trace": 0.35
+    },
+    "top_k": 2,
+    "total_steps": 8000,
+    "use_nvfp4": false,
+    "val_max_batches_per_track": 8,
+    "vocab_size": 16384,
+    "warmup_ratio": 0.06,
+    "weight_decay": 0.01
+  },
+  "created_at": 1792181377.0339994,
+  "current_step": 8000,
+  "dataset_seq_len": 1024,
+  "dataset_total_blocks": 289692,
+  "device": "cuda",
+  "gpu_name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+  "latest_metrics": {
+    "abstraction_loss": 0.00898,
+    "cumulative_tokens": 89954147,
+    "decision_loss": 1.06634,
+    "deduction_loss": 0.83795,
+    "dream_accepted_revisions": 2,
+    "dream_active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+    "dream_cycle": 70,
+    "dream_initial_score": 0.70293,
+    "dream_replay_score": 0.70293,
+    "dream_replays_dreamed": 44640,
+    "dream_worlds_archived": 48,
+    "evaluation_loss": 0.46059,
+    "expert_load": [
+      0.0082,
+      0.0206,
+      0.0169,
+      0.0055,
+      0.0195,
+      0.0294,
+      0.0094,
+      0.0142,
+      0.0139,
+      0.0233,
+      0.0118,
+      0.0158,
+      0.0162,
+      0.0206,
+      0.0124,
+      0.0189,
+      0.0219,
+      0.0179,
+      0.0341,
+      0.0222,
+      0.0248,
+      0.0148,
+      0.0156,
+      0.0153,
+      0.0219,
+      0.0141,
+      0.0238,
+      0.0143,
+      0.0192,
+      0.0253,
+      0.0211,
+      0.0221,
+      0.0134,
+      0.0224,
+      0.0139,
+      0.0171,
+      0.0118,
+      0.017,
+      0.0248,
+      0.0314,
+      0.0263,
+      0.0171,
+      0.0215,
+      0.0084,
+      0.0233,
+      0.0174,
+      0.0136,
+      0.0181,
+      0.0143,
+      0.0191,
+      0.0124,
+      0.015,
+      0.01,
+      0.0083,
+      0.0181,
+      0.0204
+    ],
+    "lm_loss": 1.59924,
+    "loss_pretrain_lm": 2.29581,
+    "loss_typed_decision": 1.40785,
+    "loss_uta_trace": 1.156,
+    "lr": 0.000195,
+    "metacognition_loss": 0.49101,
+    "mitosis_event": {
+      "action": "bounded_steady_state",
+      "min_expert_load": 0.0064,
+      "mitotic_pairs": [
+        [
+          2,
+          13
+        ],
+        [
+          4,
+          17
+        ],
+        [
+          1,
+          25
+        ],
+        [
+          20,
+          30
+        ],
+        [
+          9,
+          31
+        ],
+        [
+          7,
+          33
+        ],
+        [
+          14,
+          34
+        ],
+        [
+          8,
+          35
+        ],
+        [
+          16,
+          37
+        ],
+        [
+          21,
+          38
+        ],
+        [
+          26,
+          39
+        ],
+        [
+          18,
+          40
+        ],
+        [
+          11,
+          41
+        ],
+        [
+          0,
+          42
+        ],
+        [
+          12,
+          43
+        ],
+        [
+          23,
+          45
+        ],
+        [
+          24,
+          46
+        ],
+        [
+          10,
+          47
+        ],
+        [
+          32,
+          48
+        ],
+        [
+          3,
+          49
+        ],
+        [
+          27,
+          50
+        ],
+        [
+          36,
+          51
+        ],
+        [
+          6,
+          52
+        ],
+        [
+          19,
+          53
+        ],
+        [
+          15,
+          54
+        ],
+        [
+          22,
+          55
+        ]
+      ],
+      "num_experts": 56,
+      "parameter_count": 732827915,
+      "step": 8000
+    },
+    "mitotic_pairs": [
+      [
+        2,
+        13
+      ],
+      [
+        4,
+        17
+      ],
+      [
+        1,
+        25
+      ],
+      [
+        20,
+        30
+      ],
+      [
+        9,
+        31
+      ],
+      [
+        7,
+        33
+      ],
+      [
+        14,
+        34
+      ],
+      [
+        8,
+        35
+      ],
+      [
+        16,
+        37
+      ],
+      [
+        21,
+        38
+      ],
+      [
+        26,
+        39
+      ],
+      [
+        18,
+        40
+      ],
+      [
+        11,
+        41
+      ],
+      [
+        0,
+        42
+      ],
+      [
+        12,
+        43
+      ],
+      [
+        23,
+        45
+      ],
+      [
+        24,
+        46
+      ],
+      [
+        10,
+        47
+      ],
+      [
+        32,
+        48
+      ],
+      [
+        3,
+        49
+      ],
+      [
+        27,
+        50
+      ],
+      [
+        36,
+        51
+      ],
+      [
+        6,
+        52
+      ],
+      [
+        19,
+        53
+      ],
+      [
+        15,
+        54
+      ],
+      [
+        22,
+        55
+      ]
+    ],
+    "novelty_buffer_size": 500,
+    "num_experts": 56,
+    "nvfp4_gemms": 0,
+    "nvfp4_sparse_2to4_gemms": 0,
+    "ornith_harness_reward": 0.5833,
+    "ornith_loss": 0.65781,
+    "ornith_novelty": 0.0078,
+    "ornith_pass_rate": 0.9993,
+    "ornith_rollout_reward": 0.9995,
+    "ornith_task_reward": 0.0,
+    "progress": 1.0,
+    "quotas": {
+      "pretrain_lm": 4,
+      "typed_decision": 3,
+      "uta_trace": 9
+    },
+    "scaffolds_cached": 500,
+    "step": 8000,
+    "step_time_s": 1.736,
+    "step_tokens": 11163,
+    "tok_per_s": 6428.8,
+    "total_loss": 2.38661,
+    "total_steps": 8000,
+    "train_bpb": 0.8475,
+    "train_bpt": 2.30721,
+    "val_bpb": 1.00815,
+    "val_bpb_pretrain_lm": 0.92799,
+    "val_bpb_typed_decision": 0.88441,
+    "val_bpb_uta_trace": 1.28404,
+    "val_bpt": 3.04361,
+    "val_bpt_pretrain_lm": 2.64215,
+    "val_bpt_typed_decision": 3.24804,
+    "val_bpt_uta_trace": 3.62496,
+    "val_bytes_evaluated": 778025,
+    "val_lm_loss": 2.10967,
+    "val_loss_pretrain_lm": 1.8314,
+    "val_loss_typed_decision": 2.25137,
+    "val_loss_uta_trace": 2.51263,
+    "val_mcqa_acc": 0.3308,
+    "val_mcqa_ce_loss": 1.90576,
+    "val_mcqa_n": 263,
+    "val_tokens_evaluated": 257710,
+    "vram_allocated_mb": 11225.1,
+    "vram_reserved_mb": 46732.0,
+    "wall_time_s": 4830.32,
+    "weights": {
+      "pretrain_lm": 0.25,
+      "typed_decision": 0.2,
+      "uta_trace": 0.55
+    }
+  },
+  "num_experts": 56,
+  "nvfp4_layers": 0,
+  "parameter_count": 732827915,
+  "run_id": "colab_mcl4_coe_v6_mitotic",
+  "status": "completed",
+  "total_steps": 8000,
+  "track_blocks": {
+    "pretrain_lm": 148605,
+    "typed_decision": 29890,
+    "uta_trace": 111197
+  },
+  "updated_at": 1792183808.1689177
+}

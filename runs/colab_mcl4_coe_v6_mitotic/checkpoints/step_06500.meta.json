@@ -1,0 +1,293 @@
+{
+  "checkpoint_id": "colab_mcl4_coe_v6_mitotic/step_06500",
+  "config": {
+    "batch_size": 16,
+    "checkpoint_every": 250,
+    "corpora_root": "/content/MCL4-COE/corpora",
+    "cpu_offload_optimizer": false,
+    "curriculum_mode": "cosine",
+    "d_model": 512,
+    "decision_batch_size": 4,
+    "deep_supervision_weight": 0.2,
+    "depth_ponder": true,
+    "dream_every": 10,
+    "dream_max_calls": 4,
+    "dream_max_rounds": 3,
+    "dream_revisions": 3,
+    "dream_workers": 2,
+    "enable_dream_rsi": true,
+    "enable_gist_conditioning": true,
+    "enable_mitosis": true,
+    "enable_ornith_rl": true,
+    "end_weights": {
+      "pretrain_lm": 0.25,
+      "typed_decision": 0.2,
+      "uta_trace": 0.55
+    },
+    "eval_every": 200,
+    "expert_hidden_dim": 1024,
+    "gist_conditioning_prob": 0.35,
+    "grad_clip": 1.0,
+    "latent_prior_scale": 0.35,
+    "lr": 0.0012,
+    "max_experts": 56,
+    "max_seq_len": 1024,
+    "micro_batch_size": 16,
+    "min_lr_ratio": 0.25,
+    "mitosis_every": 800,
+    "mitosis_step_size": 8,
+    "n_decoder_layers": 4,
+    "n_encoder_layers": 4,
+    "n_heads": 8,
+    "num_experts": 48,
+    "nvfp4_sparsity_mode": "2to4_transposable",
+    "nvfp4_sr_ste_decay": 0.0001,
+    "ornith_every": 8,
+    "ornith_warmup_ratio": 0.65,
+    "ornith_weight": 0.2,
+    "ple_dim": 128,
+    "projection_dim": 128,
+    "recurrence_steps": 2,
+    "recurrent_kv": true,
+    "resume_checkpoint": "/content/runs/colab_mcl4_coe_v6_mitotic/checkpoints/step_06000.pt",
+    "run_id": "colab_mcl4_coe_v6_mitotic",
+    "runs_root": "/content/runs",
+    "sample_every": 200,
+    "sample_prompt": "Locate MCL4CEDBackbone in src/mcl4_coe/backbone.py and explain how recurrent depth pondering refines latent representations.",
+    "seed": 43,
+    "shards_root": "/content/data_shards_morph16k",
+    "start_weights": {
+      "pretrain_lm": 0.5,
+      "typed_decision": 0.15,
+      "uta_trace": 0.35
+    },
+    "top_k": 2,
+    "total_steps": 8000,
+    "use_nvfp4": false,
+    "val_max_batches_per_track": 8,
+    "vocab_size": 16384,
+    "warmup_ratio": 0.06,
+    "weight_decay": 0.01
+  },
+  "meta_file": "/content/runs/colab_mcl4_coe_v6_mitotic/checkpoints/step_06500.meta.json",
+  "metrics": {
+    "abstraction_loss": 0.02419,
+    "cumulative_tokens": 74344341,
+    "decision_loss": 1.3879,
+    "deduction_loss": 0.97392,
+    "dream_accepted_revisions": 2,
+    "dream_active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+    "dream_cycle": 51,
+    "dream_initial_score": 0.70294,
+    "dream_replay_score": 0.70294,
+    "dream_replays_dreamed": 26400,
+    "dream_worlds_archived": 48,
+    "evaluation_loss": 0.57226,
+    "expert_load": [
+      0.015,
+      0.0201,
+      0.0301,
+      0.0218,
+      0.0271,
+      0.02,
+      0.0086,
+      0.0141,
+      0.0139,
+      0.0207,
+      0.0147,
+      0.0092,
+      0.0055,
+      0.0211,
+      0.0163,
+      0.0312,
+      0.02,
+      0.022,
+      0.0073,
+      0.0273,
+      0.0177,
+      0.0146,
+      0.0279,
+      0.0371,
+      0.0167,
+      0.0112,
+      0.0177,
+      0.0209,
+      0.0208,
+      0.0283,
+      0.0254,
+      0.0214,
+      0.0413,
+      0.0125,
+      0.0226,
+      0.0226,
+      0.0278,
+      0.0349,
+      0.0251,
+      0.0164,
+      0.0387,
+      0.0181,
+      0.0209,
+      0.0098,
+      0.0313,
+      0.0076,
+      0.0301,
+      0.0147
+    ],
+    "lm_loss": 2.34095,
+    "loss_pretrain_lm": 3.3411,
+    "loss_typed_decision": 1.28886,
+    "loss_uta_trace": 1.78377,
+    "lr": 0.000306,
+    "metacognition_loss": 0.53848,
+    "mitotic_pairs": [
+      [
+        2,
+        13
+      ],
+      [
+        4,
+        17
+      ],
+      [
+        5,
+        22
+      ],
+      [
+        1,
+        25
+      ],
+      [
+        19,
+        28
+      ],
+      [
+        15,
+        29
+      ],
+      [
+        20,
+        30
+      ],
+      [
+        9,
+        31
+      ],
+      [
+        7,
+        33
+      ],
+      [
+        14,
+        34
+      ],
+      [
+        8,
+        35
+      ],
+      [
+        16,
+        37
+      ],
+      [
+        21,
+        38
+      ],
+      [
+        26,
+        39
+      ],
+      [
+        18,
+        40
+      ],
+      [
+        11,
+        41
+      ],
+      [
+        0,
+        42
+      ],
+      [
+        12,
+        43
+      ],
+      [
+        6,
+        44
+      ],
+      [
+        23,
+        45
+      ],
+      [
+        24,
+        46
+      ],
+      [
+        10,
+        47
+      ]
+    ],
+    "novelty_buffer_size": 124,
+    "num_experts": 48,
+    "nvfp4_gemms": 0,
+    "nvfp4_sparse_2to4_gemms": 0,
+    "ornith_harness_reward": 0.4775,
+    "ornith_loss": 0.61998,
+    "ornith_novelty": 0.0156,
+    "ornith_pass_rate": 0.9983,
+    "ornith_rollout_reward": 0.9984,
+    "ornith_task_reward": 0.0001,
+    "progress": 0.8125,
+    "quotas": {
+      "pretrain_lm": 4,
+      "typed_decision": 3,
+      "uta_trace": 9
+    },
+    "scaffolds_cached": 124,
+    "step": 6500,
+    "step_time_s": 0.598,
+    "step_tokens": 10786,
+    "tok_per_s": 18036.5,
+    "total_loss": 3.21853,
+    "total_steps": 8000,
+    "train_bpb": 1.04016,
+    "train_bpt": 3.37727,
+    "val_bpb": 1.05315,
+    "val_bpb_pretrain_lm": 0.97208,
+    "val_bpb_typed_decision": 0.92566,
+    "val_bpb_uta_trace": 1.33458,
+    "val_bpt": 3.17946,
+    "val_bpt_pretrain_lm": 2.76766,
+    "val_bpt_typed_decision": 3.39953,
+    "val_bpt_uta_trace": 3.76764,
+    "val_bytes_evaluated": 778025,
+    "val_lm_loss": 2.20383,
+    "val_loss_pretrain_lm": 1.9184,
+    "val_loss_typed_decision": 2.35638,
+    "val_loss_uta_trace": 2.61153,
+    "val_mcqa_acc": 0.3346,
+    "val_mcqa_ce_loss": 1.81243,
+    "val_mcqa_n": 263,
+    "val_tokens_evaluated": 257710,
+    "vram_allocated_mb": 9688.3,
+    "vram_reserved_mb": 44862.0,
+    "wall_time_s": 3796.51,
+    "weights": {
+      "pretrain_lm": 0.2711,
+      "typed_decision": 0.1958,
+      "uta_trace": 0.5331
+    }
+  },
+  "num_experts": 48,
+  "parameter_count": 632131851,
+  "pt_file": "/content/runs/colab_mcl4_coe_v6_mitotic/checkpoints/step_06500.pt",
+  "run_id": "colab_mcl4_coe_v6_mitotic",
+  "sample_prompt": "Locate MCL4CEDBackbone in src/mcl4_coe/backbone.py and explain how recurrent depth pondering refines latent representations.",
+  "sample_uta": "#U$# Locate MCL4CEDBackbone in src/mcl4_coe/backbone.py and explain how recurrent depth pondering refines latent representations.\n#T$# The problem is a classic Python solution. The problem is a classic solution. The solution is a simple Python solution.\n\n\n#A$# ```python\nimport numpy as np\n\ndef generate_palindrome():\n    # Define the `numpy",
+  "step": 6500,
+  "timestamp": 1792181945.1718853,
+  "total_steps": 8000,
+  "use_nvfp4": false
+}

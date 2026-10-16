@@ -1,0 +1,269 @@
+{
+  "checkpoint_id": "colab_mcl4_coe_v6_mitotic/step_06250",
+  "config": {
+    "batch_size": 16,
+    "checkpoint_every": 250,
+    "corpora_root": "/content/MCL4-COE/corpora",
+    "cpu_offload_optimizer": false,
+    "curriculum_mode": "cosine",
+    "d_model": 512,
+    "decision_batch_size": 4,
+    "deep_supervision_weight": 0.2,
+    "depth_ponder": true,
+    "dream_every": 10,
+    "dream_max_calls": 4,
+    "dream_max_rounds": 3,
+    "dream_revisions": 3,
+    "dream_workers": 2,
+    "enable_dream_rsi": true,
+    "enable_gist_conditioning": true,
+    "enable_mitosis": true,
+    "enable_ornith_rl": true,
+    "end_weights": {
+      "pretrain_lm": 0.25,
+      "typed_decision": 0.2,
+      "uta_trace": 0.55
+    },
+    "eval_every": 200,
+    "expert_hidden_dim": 1024,
+    "gist_conditioning_prob": 0.35,
+    "grad_clip": 1.0,
+    "latent_prior_scale": 0.35,
+    "lr": 0.0012,
+    "max_experts": 56,
+    "max_seq_len": 1024,
+    "micro_batch_size": 16,
+    "min_lr_ratio": 0.25,
+    "mitosis_every": 800,
+    "mitosis_step_size": 8,
+    "n_decoder_layers": 4,
+    "n_encoder_layers": 4,
+    "n_heads": 8,
+    "num_experts": 40,
+    "nvfp4_sparsity_mode": "2to4_transposable",
+    "nvfp4_sr_ste_decay": 0.0001,
+    "ornith_every": 8,
+    "ornith_warmup_ratio": 0.65,
+    "ornith_weight": 0.2,
+    "ple_dim": 128,
+    "projection_dim": 128,
+    "recurrence_steps": 2,
+    "recurrent_kv": true,
+    "resume_checkpoint": "/content/runs/colab_mcl4_coe_v6_mitotic/checkpoints/step_06000.pt",
+    "run_id": "colab_mcl4_coe_v6_mitotic",
+    "runs_root": "/content/runs",
+    "sample_every": 200,
+    "sample_prompt": "Locate MCL4CEDBackbone in src/mcl4_coe/backbone.py and explain how recurrent depth pondering refines latent representations.",
+    "seed": 43,
+    "shards_root": "/content/data_shards_morph16k",
+    "start_weights": {
+      "pretrain_lm": 0.5,
+      "typed_decision": 0.15,
+      "uta_trace": 0.35
+    },
+    "top_k": 2,
+    "total_steps": 8000,
+    "use_nvfp4": false,
+    "val_max_batches_per_track": 8,
+    "vocab_size": 16384,
+    "warmup_ratio": 0.06,
+    "weight_decay": 0.01
+  },
+  "meta_file": "/content/runs/colab_mcl4_coe_v6_mitotic/checkpoints/step_06250.meta.json",
+  "metrics": {
+    "abstraction_loss": 0.02489,
+    "cumulative_tokens": 71720208,
+    "decision_loss": 1.45552,
+    "deduction_loss": 1.01829,
+    "dream_accepted_revisions": 2,
+    "dream_active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+    "dream_cycle": 48,
+    "dream_initial_score": 0.70166,
+    "dream_replay_score": 0.70166,
+    "dream_replays_dreamed": 23520,
+    "dream_worlds_archived": 48,
+    "evaluation_loss": 0.60941,
+    "expert_load": [
+      0.0252,
+      0.0159,
+      0.0265,
+      0.0131,
+      0.0193,
+      0.0231,
+      0.035,
+      0.0103,
+      0.0171,
+      0.0332,
+      0.0312,
+      0.0272,
+      0.0201,
+      0.0337,
+      0.0151,
+      0.0315,
+      0.0219,
+      0.0257,
+      0.0487,
+      0.0301,
+      0.0292,
+      0.0192,
+      0.0296,
+      0.0318,
+      0.0405,
+      0.0163,
+      0.0257,
+      0.0227,
+      0.0236,
+      0.0267,
+      0.0258,
+      0.0207,
+      0.0311,
+      0.0188,
+      0.016,
+      0.021,
+      0.0272,
+      0.0296,
+      0.025,
+      0.0155
+    ],
+    "lm_loss": 2.57977,
+    "loss_pretrain_lm": 3.82602,
+    "loss_typed_decision": 1.19569,
+    "loss_uta_trace": 1.64413,
+    "lr": 0.00034,
+    "metacognition_loss": 0.58438,
+    "mitotic_pairs": [
+      [
+        2,
+        13
+      ],
+      [
+        4,
+        17
+      ],
+      [
+        5,
+        22
+      ],
+      [
+        3,
+        24
+      ],
+      [
+        1,
+        25
+      ],
+      [
+        10,
+        27
+      ],
+      [
+        19,
+        28
+      ],
+      [
+        15,
+        29
+      ],
+      [
+        20,
+        30
+      ],
+      [
+        9,
+        31
+      ],
+      [
+        6,
+        32
+      ],
+      [
+        7,
+        33
+      ],
+      [
+        14,
+        34
+      ],
+      [
+        8,
+        35
+      ],
+      [
+        23,
+        36
+      ],
+      [
+        16,
+        37
+      ],
+      [
+        21,
+        38
+      ],
+      [
+        26,
+        39
+      ]
+    ],
+    "novelty_buffer_size": 62,
+    "num_experts": 40,
+    "nvfp4_gemms": 0,
+    "nvfp4_sparse_2to4_gemms": 0,
+    "ornith_harness_reward": 0.3914,
+    "ornith_loss": 0.62234,
+    "ornith_novelty": 0.0195,
+    "ornith_pass_rate": 0.9978,
+    "ornith_rollout_reward": 0.9983,
+    "ornith_task_reward": 0.0001,
+    "progress": 0.7812,
+    "quotas": {
+      "pretrain_lm": 5,
+      "typed_decision": 3,
+      "uta_trace": 8
+    },
+    "scaffolds_cached": 62,
+    "step": 6250,
+    "step_time_s": 0.621,
+    "step_tokens": 11391,
+    "tok_per_s": 18348.6,
+    "total_loss": 3.52113,
+    "total_steps": 8000,
+    "train_bpb": 1.21969,
+    "train_bpt": 3.72181,
+    "val_bpb": 1.06243,
+    "val_bpb_pretrain_lm": 0.98369,
+    "val_bpb_typed_decision": 0.92929,
+    "val_bpb_uta_trace": 1.34528,
+    "val_bpt": 3.20748,
+    "val_bpt_pretrain_lm": 2.80073,
+    "val_bpt_typed_decision": 3.41289,
+    "val_bpt_uta_trace": 3.79786,
+    "val_bytes_evaluated": 778025,
+    "val_lm_loss": 2.22326,
+    "val_loss_pretrain_lm": 1.94132,
+    "val_loss_typed_decision": 2.36564,
+    "val_loss_uta_trace": 2.63247,
+    "val_mcqa_acc": 0.3042,
+    "val_mcqa_ce_loss": 1.86413,
+    "val_mcqa_n": 263,
+    "val_tokens_evaluated": 257710,
+    "vram_allocated_mb": 8150.6,
+    "vram_reserved_mb": 43142.0,
+    "wall_time_s": 3625.87,
+    "weights": {
+      "pretrain_lm": 0.2784,
+      "typed_decision": 0.1943,
+      "uta_trace": 0.5273
+    }
+  },
+  "num_experts": 40,
+  "parameter_count": 531435787,
+  "pt_file": "/content/runs/colab_mcl4_coe_v6_mitotic/checkpoints/step_06250.pt",
+  "run_id": "colab_mcl4_coe_v6_mitotic",
+  "sample_prompt": "Locate MCL4CEDBackbone in src/mcl4_coe/backbone.py and explain how recurrent depth pondering refines latent representations.",
+  "sample_uta": "#U$# Locate MCL4CEDBackbone in src/mcl4_coe/backbone.py and explain how recurrent depth pondering refines latent representations.\n#T$# The problem is a simple Python script that uses the `re` module to generate a list of `re` and `re.\n#A$# ```python\nimport re\nimport os\nimport os\nimport sys\nimport os\n\ndef generate",
+  "step": 6250,
+  "timestamp": 1792181578.5643566,
+  "total_steps": 8000,
+  "use_nvfp4": false
+}

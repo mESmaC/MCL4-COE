@@ -1,0 +1,256 @@
+{
+  "checkpoint_id": "colab_mcl4_coe_v6_mitotic/step_03000",
+  "config": {
+    "batch_size": 16,
+    "checkpoint_every": 250,
+    "corpora_root": "/content/MCL4-COE/corpora",
+    "cpu_offload_optimizer": false,
+    "curriculum_mode": "cosine",
+    "d_model": 512,
+    "decision_batch_size": 4,
+    "deep_supervision_weight": 0.2,
+    "depth_ponder": true,
+    "dream_every": 10,
+    "dream_max_calls": 4,
+    "dream_max_rounds": 3,
+    "dream_revisions": 3,
+    "dream_workers": 2,
+    "enable_dream_rsi": true,
+    "enable_gist_conditioning": true,
+    "enable_mitosis": true,
+    "enable_ornith_rl": true,
+    "end_weights": {
+      "pretrain_lm": 0.25,
+      "typed_decision": 0.2,
+      "uta_trace": 0.55
+    },
+    "eval_every": 200,
+    "expert_hidden_dim": 1024,
+    "gist_conditioning_prob": 0.35,
+    "grad_clip": 1.0,
+    "latent_prior_scale": 0.35,
+    "lr": 0.0012,
+    "max_experts": 16,
+    "max_seq_len": 1024,
+    "micro_batch_size": 16,
+    "min_lr_ratio": 0.1,
+    "mitosis_every": 1000,
+    "mitosis_step_size": 4,
+    "n_decoder_layers": 4,
+    "n_encoder_layers": 4,
+    "n_heads": 8,
+    "num_experts": 16,
+    "nvfp4_sparsity_mode": "2to4_transposable",
+    "nvfp4_sr_ste_decay": 0.0001,
+    "ornith_every": 8,
+    "ornith_warmup_ratio": 0.65,
+    "ornith_weight": 0.2,
+    "ple_dim": 128,
+    "projection_dim": 128,
+    "recurrence_steps": 2,
+    "recurrent_kv": true,
+    "resume_checkpoint": null,
+    "run_id": "colab_mcl4_coe_v6_mitotic",
+    "runs_root": "/content/runs",
+    "sample_every": 200,
+    "sample_prompt": "Locate MCL4CEDBackbone in src/mcl4_coe/backbone.py and explain how recurrent depth pondering refines latent representations.",
+    "seed": 42,
+    "shards_root": "/content/data_shards_morph16k",
+    "start_weights": {
+      "pretrain_lm": 0.5,
+      "typed_decision": 0.15,
+      "uta_trace": 0.35
+    },
+    "top_k": 2,
+    "total_steps": 4000,
+    "use_nvfp4": false,
+    "val_max_batches_per_track": 8,
+    "vocab_size": 16384,
+    "warmup_ratio": 0.06,
+    "weight_decay": 0.01
+  },
+  "meta_file": "/content/runs/colab_mcl4_coe_v6_mitotic/checkpoints/step_03000.meta.json",
+  "metrics": {
+    "abstraction_loss": 0.04223,
+    "cumulative_tokens": 36084007,
+    "decision_loss": 0.48794,
+    "deduction_loss": 0.90883,
+    "dream_accepted_revisions": 1,
+    "dream_active_policy": "WIDTH 2\nROOT 2\nRANK UTILITY CONFIDENCE SCORE GAIN\nSTOP 0.82\nPATIENCE 2\nROUNDS 3",
+    "dream_cycle": 6,
+    "dream_initial_score": 0.69493,
+    "dream_replay_score": 0.69493,
+    "dream_replays_dreamed": 420,
+    "dream_worlds_archived": 6,
+    "evaluation_loss": 0.41513,
+    "expert_load": [
+      0.1112,
+      0.0465,
+      0.0456,
+      0.0516,
+      0.0741,
+      0.0584,
+      0.0639,
+      0.0858,
+      0.0517,
+      0.0571,
+      0.0741,
+      0.0695,
+      0.0645,
+      0.0435,
+      0.0633,
+      0.039
+    ],
+    "lm_loss": 2.41182,
+    "loss_pretrain_lm": 3.15763,
+    "loss_typed_decision": 1.4956,
+    "loss_uta_trace": 1.82809,
+    "lr": 0.000298,
+    "metacognition_loss": 0.57564,
+    "mitosis_event": {
+      "action": "expand",
+      "added_pairs": [
+        [
+          3,
+          12
+        ],
+        [
+          2,
+          13
+        ],
+        [
+          8,
+          14
+        ],
+        [
+          9,
+          15
+        ]
+      ],
+      "mitotic_pairs": [
+        [
+          1,
+          7
+        ],
+        [
+          6,
+          10
+        ],
+        [
+          5,
+          11
+        ],
+        [
+          3,
+          12
+        ],
+        [
+          2,
+          13
+        ],
+        [
+          8,
+          14
+        ],
+        [
+          9,
+          15
+        ]
+      ],
+      "new_experts": 16,
+      "old_experts": 12,
+      "parameter_count": 229347595,
+      "step": 3000
+    },
+    "mitotic_pairs": [
+      [
+        1,
+        7
+      ],
+      [
+        6,
+        10
+      ],
+      [
+        5,
+        11
+      ],
+      [
+        3,
+        12
+      ],
+      [
+        2,
+        13
+      ],
+      [
+        8,
+        14
+      ],
+      [
+        9,
+        15
+      ]
+    ],
+    "novelty_buffer_size": 102,
+    "num_experts": 16,
+    "nvfp4_gemms": 0,
+    "nvfp4_sparse_2to4_gemms": 0,
+    "ornith_harness_reward": 0.4961,
+    "ornith_loss": 0.70809,
+    "ornith_novelty": 0.0078,
+    "ornith_pass_rate": 0.9994,
+    "ornith_rollout_reward": 0.9995,
+    "ornith_task_reward": 0.0,
+    "progress": 0.75,
+    "quotas": {
+      "pretrain_lm": 5,
+      "typed_decision": 3,
+      "uta_trace": 8
+    },
+    "scaffolds_cached": 102,
+    "step": 3000,
+    "step_time_s": 3.488,
+    "step_tokens": 11151,
+    "tok_per_s": 3197.4,
+    "total_loss": 3.25185,
+    "total_steps": 4000,
+    "train_bpb": 1.16945,
+    "train_bpt": 3.47952,
+    "val_bpb": 1.1791,
+    "val_bpb_pretrain_lm": 1.08896,
+    "val_bpb_typed_decision": 1.0264,
+    "val_bpb_uta_trace": 1.50319,
+    "val_bpt": 3.5597,
+    "val_bpt_pretrain_lm": 3.10044,
+    "val_bpt_typed_decision": 3.76951,
+    "val_bpt_uta_trace": 4.24365,
+    "val_bytes_evaluated": 778025,
+    "val_lm_loss": 2.4674,
+    "val_loss_pretrain_lm": 2.14906,
+    "val_loss_typed_decision": 2.61283,
+    "val_loss_uta_trace": 2.94147,
+    "val_mcqa_acc": 0.3232,
+    "val_mcqa_ce_loss": 1.97923,
+    "val_mcqa_n": 263,
+    "val_tokens_evaluated": 257710,
+    "vram_allocated_mb": 3541.9,
+    "vram_reserved_mb": 37878.0,
+    "wall_time_s": 1613.25,
+    "weights": {
+      "pretrain_lm": 0.2866,
+      "typed_decision": 0.1927,
+      "uta_trace": 0.5207
+    }
+  },
+  "num_experts": 16,
+  "parameter_count": 229347595,
+  "pt_file": "/content/runs/colab_mcl4_coe_v6_mitotic/checkpoints/step_03000.pt",
+  "run_id": "colab_mcl4_coe_v6_mitotic",
+  "sample_prompt": "Locate MCL4CEDBackbone in src/mcl4_coe/backbone.py and explain how recurrent depth pondering refines latent representations.",
+  "sample_uta": "#U$# Locate MCL4CEDBackbone in src/mcl4_coe/backbone.py and explain how recurrent depth pondering refines latent representations.\n#T$# Okay, let's see. The user is asking about the \"Luclidean\" of the \"Luclidean,\" which is \"Loglidean\". The question is asking for the \"GCD4\" of the \"GCD\" of the same\". \n\nFirst, I need to understand what the \"HCD4\" means that the \"HCD\" of the same type is \"Logram\".\n#A$# is a \"Given\" of the given option. \n\n**Step-by-Step Explanation:**\n\n1. **Horizontal**: The \"Given\" is \"Gamma\", and the \"Luclidean\" means that the same type is (H, H, H, H, I).\n2. **Horizrodean**: The \"Horizrodean\" means \"GCD4\" means that the \"GCD\" of the same type is \"Gamma.\"\n\n3. **Hmmzrode (HCD):**  \n   The \"Given\" of the \"Gila\" of the \"Lucridean\" is \"Given\".",
+  "step": 3000,
+  "timestamp": 1792174771.4335544,
+  "total_steps": 4000,
+  "use_nvfp4": false
+}

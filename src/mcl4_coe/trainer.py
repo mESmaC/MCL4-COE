@@ -957,13 +957,30 @@ class MCL4COETrainer:
         if not self.config.enable_mitosis or self.config.mitosis_every <= 0:
             return None
         base_step = getattr(self, "initial_step", 0)
-        local_step = step - base_step
-        if local_step <= 1 or (local_step % self.config.mitosis_every != 0):
-            return None
-
         old_e = int(self.model.backbone.config.num_experts)
         max_e = max(old_e, int(self.config.max_experts))
         existing_pairs = self._get_model_mitotic_pairs()
+
+        in_place_resume = bool(
+            getattr(self, "_optimizer_restored", False)
+            and getattr(self, "_parent_total_steps", 0) == self.config.total_steps
+        )
+        if in_place_resume:
+            expected_splits = (base_step // self.config.mitosis_every) * max(
+                1, int(self.config.mitosis_step_size)
+            )
+            catch_up_due = (
+                step == base_step + 1
+                and base_step >= self.config.mitosis_every
+                and old_e < max_e
+                and len(existing_pairs) < expected_splits
+            )
+            if not catch_up_due and (step <= 1 or (step % self.config.mitosis_every != 0)):
+                return None
+        else:
+            local_step = step - base_step
+            if local_step <= 1 or (local_step % self.config.mitosis_every != 0):
+                return None
         loads_for_split = list(
             getattr(self, "_ema_expert_loads", None)
             or self.latest_metrics.get("expert_load")

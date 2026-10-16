@@ -65,6 +65,8 @@ def _extract_kodcode_tasks(parquet_path: Path, max_tasks: int = 1200) -> list[Or
         sol_text = str(row.get("solution") or "").strip()
         test_text = str(row.get("test") or "").strip()
         t_info = row.get("test_info") or {}
+        if isinstance(t_info, list):
+            t_info = t_info[0] if t_info and isinstance(t_info[0], dict) else {}
         fn_name = str(t_info.get("function_name") or "").strip()
         if not q_text or not sol_text or not test_text or not fn_name:
             continue
@@ -449,6 +451,7 @@ def append_rlvr_uta_shard(
         return {"appended_blocks": 0}
 
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    seq_len = int(receipt.get("seq_len", seq_len))
     # Avoid duplicate append if an rlvr shard is already registered
     for s in receipt.get("shards", []):
         if "rlvr_env_pool" in str(s.get("provenance", [])):
@@ -461,7 +464,10 @@ def append_rlvr_uta_shard(
 
     for t in tasks:
         u_clean = t.prompt_q.split("\n#Q$#")[0].replace("#U$#", "").strip()
-        ep_ids = tok.encode_masked_turn(u_clean, t.gold_thought, t.gold_answer, seq_len=seq_len)
+        try:
+            ep_ids = tok.encode_masked_turn(u_clean, t.gold_thought, t.gold_answer, seq_len=seq_len)
+        except ValueError:
+            continue
         token_buf.extend(ep_ids)
         while len(token_buf) >= block_len:
             blk = np.asarray(token_buf[:block_len], dtype=np.uint16)

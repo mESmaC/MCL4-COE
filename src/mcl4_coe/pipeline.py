@@ -727,8 +727,12 @@ def extract_uta_episodes(
             t_clean, a_clean = _split_thought_and_answer(parts[1].strip())
             return [_pack(parts[0].strip(), t_clean, a_clean)]
 
-    # Case 8: `codeparrot/github-code` (`repo_name`, `path`, `code`/`content`, `language`)
-    if "repo_name" in record and "path" in record and ("code" in record or "content" in record):
+    # Case 8: `codeparrot/github-code` or `arxiv_cplusplus_research_code` (`repo_name`/`repo`, `path`/`file`, `code`/`content`)
+    if (
+        ("repo_name" in record or "repo" in record)
+        and ("path" in record or "file" in record)
+        and ("code" in record or "content" in record)
+    ):
         norm_rec = normalize_github_code_record(record)
         code_path = str(norm_rec.get("path") or "").strip()
         repo_name = str(norm_rec.get("repo_name") or "").strip()
@@ -742,7 +746,7 @@ def extract_uta_episodes(
                 import_lines: list[str] = []
                 for ln in clean_code.splitlines():
                     s_ln = ln.strip()
-                    if not s_ln or s_ln.startswith(("#", "//", "/*", "*")):
+                    if not s_ln or s_ln.startswith(("#", "//", "/*", "*")) and not s_ln.startswith("#include"):
                         continue
                     if s_ln.startswith(("import ", "from ", "#include", "using ", "require(", "package ", "use ")):
                         if len(import_lines) < 3:
@@ -760,6 +764,16 @@ def extract_uta_episodes(
                             "fn ",
                             "func ",
                             "struct ",
+                            "template",
+                            "namespace ",
+                            "void ",
+                            "int ",
+                            "double ",
+                            "float ",
+                            "bool ",
+                            "auto ",
+                            "inline ",
+                            "static ",
                             "interface ",
                             "type ",
                             "public ",
@@ -786,7 +800,7 @@ _GITHUB_CODE_LANG_TO_EXT: dict[str, tuple[str, ...]] = {
     "Batchfile": (".bat", ".cmd"),
     "C": (".c", ".h"),
     "C#": (".cs",),
-    "C++": (".cpp", ".hpp", ".c++", ".h++", ".cc", ".hh", ".C", ".H"),
+    "C++": (".cpp", ".hpp", ".c++", ".h++", ".cc", ".hh", ".cxx", ".hxx", ".C", ".H"),
     "CMake": (".cmake",),
     "CSS": (".css",),
     "Dockerfile": (".dockerfile", "Dockerfile"),
@@ -856,25 +870,30 @@ def _is_noisy_code_path(path: str) -> bool:
 
 
 def normalize_github_code_record(record: dict[str, Any]) -> dict[str, Any]:
-    """Normalize raw Parquet or dataset rows from `codeparrot/github-code` into canonical schema.
+    """Normalize raw Parquet or dataset rows from `codeparrot/github-code` or `arxiv_cplusplus_research_code`.
 
     Canonical fields: `code`, `repo_name`, `path`, `language`, `license`, `size`.
     """
     code_val = record.get("code")
     if not isinstance(code_val, str) or not code_val:
         code_val = record.get("content") or ""
-    path_val = str(record.get("path") or "")
+    path_val = str(record.get("path") or record.get("file") or "")
+    repo_val = str(record.get("repo_name") or record.get("repo") or "")
     lang_val = str(record.get("language") or "").strip()
     if not lang_val:
-        lang_val = infer_github_code_language(path_val)
-    size_raw = record.get("size")
+        ext_type = str(record.get("extension_type") or "").strip().lower().lstrip(".")
+        if ext_type in ("cpp", "cxx", "cc", "hpp", "hxx", "h"):
+            lang_val = "C++"
+        else:
+            lang_val = infer_github_code_language(path_val)
+    size_raw = record.get("size") if record.get("size") is not None else record.get("file_length")
     try:
         size_val = int(size_raw) if size_raw is not None else len(str(code_val))
     except (TypeError, ValueError):
         size_val = len(str(code_val))
     return {
         "code": str(code_val),
-        "repo_name": str(record.get("repo_name") or ""),
+        "repo_name": repo_val,
         "path": path_val,
         "language": lang_val,
         "license": str(record.get("license") or ""),

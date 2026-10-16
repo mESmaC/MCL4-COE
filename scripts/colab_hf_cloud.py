@@ -61,11 +61,12 @@ from mcl4_coe import (
 )
 from mcl4_coe.curation import sanitize_trace_markers
 
-# Default "Nemotron-Core" + "GitHub-Code" 3-Track Hugging Face streaming recipe (`gated: false`)
+# Default "Nemotron-Core" + "GitHub-Code" + "ArXiv-C++" 3-Track Hugging Face streaming recipe (`gated: false`)
 DEFAULT_HF_TRACK_SOURCES: dict[str, list[dict[str, Any]]] = {
     "pretrain_lm": [
         {"path": "nvidia/Nemotron-ClimbMix", "name": None, "split": "train"},
-        {"path": "codeparrot/github-code", "name": "all-all", "split": "train"},
+        {"path": "codeparrot/github-code", "name": "C+Rust+C+++Python-all", "split": "train"},
+        {"path": "AlgorithmicResearchGroup/arxiv_cplusplus_research_code", "name": "default", "split": "train"},
         {
             "path": "nvidia/Nemotron-Pretraining-Specialized-v1.1",
             "name": "Nemotron-Pretraining-Code-Concepts",
@@ -102,7 +103,8 @@ DEFAULT_HF_TRACK_SOURCES: dict[str, list[dict[str, Any]]] = {
         {"path": "nvidia/Nemotron-Post-Training-Dataset-v1", "name": "default", "split": "stem"},
         {"path": "nvidia/Nemotron-Pretraining-Dataset-sample", "name": "Nemotron-SFT-MATH", "split": "train"},
         {"path": "nvidia/Nemotron-Pretraining-Dataset-sample", "name": "Nemotron-SFT-Code", "split": "train"},
-        {"path": "codeparrot/github-code", "name": "all-all", "split": "train"},
+        {"path": "codeparrot/github-code", "name": "C+Rust+C+++Python-all", "split": "train"},
+        {"path": "AlgorithmicResearchGroup/arxiv_cplusplus_research_code", "name": "default", "split": "train"},
     ],
     "typed_decision": [
         {"path": "nvidia/Nemotron-RL-knowledge-mcqa", "name": "default", "split": "train"},

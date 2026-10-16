@@ -55,7 +55,7 @@ class MCL4CEDConfig:
     markov_local_tokens: int = 8
     markov_beam_size: int = 8
     markov_restart: float = 0.1
-    markov_query_chunk_size: int = 512
+    markov_query_chunk_size: int = 1024
 
     def __post_init__(self) -> None:
         for name in (
@@ -209,6 +209,103 @@ class SparseMoE(nn.Module):
         self, x: Tensor, valid: Tensor | None = None
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         flat = x.reshape(-1, x.shape[-1])
+        use_grouped = (
+            flat.is_cuda
+            and hasattr(torch, "_grouped_mm")
+            and flat.shape[0] > 0
+            and all(
+                type(e.up_proj) is nn.Linear and type(e.down_proj) is nn.Linear
+                for e in self.experts
+            )
+            and (flat.dtype == torch.bfloat16 or torch.is_autocast_enabled())
+        )
+        if use_grouped:
+            with torch.autocast(device_type=x.device.type, enabled=False):
+                router_logits = F.linear(flat.float(), self.router.weight.float())
+                probabilities = F.softmax(router_logits, dim=-1)
+                routed_probs = probabilities
+                if self.mitotic_pairs:
+                    valid_pairs = [
+                        (p_idx, c_idx)
+                        for p_idx, c_idx in self.mitotic_pairs
+                        if 0 <= p_idx < self.num_experts
+                        and 0 <= c_idx < self.num_experts
+                        and p_idx != c_idx
+                    ]
+                    if valid_pairs:
+                        routed_probs = probabilities.clone()
+                        p_t = torch.tensor(
+                            [p for p, _ in valid_pairs], dtype=torch.long, device=x.device
+                        )
+                        c_t = torch.tensor(
+                            [c for _, c in valid_pairs], dtype=torch.long, device=x.device
+                        )
+                        p_wins = router_logits.index_select(1, p_t) >= router_logits.index_select(
+                            1, c_t
+                        )
+                        routed_probs[:, c_t] = torch.where(
+                            p_wins,
+                            torch.zeros_like(p_wins, dtype=routed_probs.dtype),
+                            probabilities.index_select(1, c_t),
+                        )
+                        routed_probs[:, p_t] = torch.where(
+                            p_wins,
+                            probabilities.index_select(1, p_t),
+                            torch.zeros_like(p_wins, dtype=routed_probs.dtype),
+                        )
+                weights, selected = routed_probs.topk(self.top_k, dim=-1)
+                weights = weights / weights.sum(dim=-1, keepdim=True)
+                one_hot_all = F.one_hot(selected, num_classes=self.num_experts)
+                counts_int_all = one_hot_all.sum(dim=(0, 1))
+                if valid is not None:
+                    flat_valid = valid.reshape(-1)
+                    f_mask = flat_valid.unsqueeze(-1)
+                    f_mask_f = f_mask.float()
+                    n_valid_raw = flat_valid.sum()
+                    has_valid = (n_valid_raw > 0).float()
+                    n_valid = n_valid_raw.clamp_min(1).float()
+                    weights = weights * f_mask_f
+                    one_hot_valid = one_hot_all * f_mask.unsqueeze(-1).long()
+                    counts_valid = one_hot_valid.sum(dim=(0, 1)).float() / (n_valid * self.top_k)
+                    mean_probs = (probabilities * f_mask_f).sum(dim=0) / n_valid
+                    aux_loss = self.num_experts * (counts_valid * mean_probs).sum() * has_valid
+                    z_sq = torch.logsumexp(router_logits, dim=-1).square()
+                    router_z_loss = ((z_sq * flat_valid.float()).sum() / n_valid) * has_valid
+                    counts = counts_valid * has_valid
+                else:
+                    counts = counts_int_all.float() / max(1, selected.numel())
+                    aux_loss = self.num_experts * (counts * probabilities.mean(dim=0)).sum()
+                    router_z_loss = torch.logsumexp(router_logits, dim=-1).square().mean()
+
+            flat_selected = selected.reshape(-1)
+            perm = flat_selected.argsort(stable=True)
+            sorted_tokens = torch.div(perm, self.top_k, rounding_mode="floor")
+            sorted_weights = weights.reshape(-1).index_select(0, perm).unsqueeze(-1)
+            gathered_x = flat.index_select(0, sorted_tokens)
+            offs = counts_int_all.to(torch.int32).cumsum(0, dtype=torch.int32)
+            gx_bf = gathered_x.to(torch.bfloat16)
+            w_up = (
+                torch.stack([e.up_proj.weight for e in self.experts], dim=0)
+                .to(torch.bfloat16)
+                .transpose(-1, -2)
+            )
+            w_down = (
+                torch.stack([e.down_proj.weight for e in self.experts], dim=0)
+                .to(torch.bfloat16)
+                .transpose(-1, -2)
+            )
+            gate, val = torch._grouped_mm(gx_bf, w_up, offs=offs).chunk(2, dim=-1)
+            all_expert_out = torch._grouped_mm(F.silu(gate) * val, w_down, offs=offs)
+            weighted = (all_expert_out * sorted_weights.to(all_expert_out.dtype)).to(flat.dtype)
+            unpermed = torch.empty_like(weighted)
+            unpermed.index_copy_(0, perm, weighted)
+            out = (
+                unpermed.view(flat.shape[0], self.top_k, flat.shape[-1])
+                .sum(dim=1)
+                .to(flat.dtype)
+            )
+            return out.view_as(x), aux_loss, router_z_loss, counts.detach()
+
         flat_valid = (
             torch.ones(flat.shape[0], dtype=torch.bool, device=x.device)
             if valid is None

@@ -1837,8 +1837,22 @@ def test_pre_scaling_housekeeping_gist_conditioning_and_repo_uta_traces(tmp_path
     assert _is_clean_uta_episode("Score Candidate 1 now.", "Evaluate step-by-step: [0]", "[0]") is False
     assert _is_clean_uta_episode("{'messages': []}", "TRUE", "{'messages': []}") is False
 
+    # 7. Verify multi-generation progressive mitotic upcycling (4 -> 8 -> 16) keeps mitotic_pairs pairwise disjoint
+    from mcl4_coe.trainer import upcycle_state_dict_experts
 
+    sd4 = coe.state_dict()
+    sd8 = upcycle_state_dict_experts(sd4, 4, 8, expert_loads=[0.35, 0.25, 0.22, 0.18])
+    mp8 = sd8["backbone.encoder_layers.0.moe.mitotic_pairs_tensor"].tolist()
+    assert len(mp8) == 4
+    assert len({idx for pair in mp8 for idx in pair}) == 8
 
-
-
+    sd16 = upcycle_state_dict_experts(
+        sd8,
+        8,
+        16,
+        expert_loads=[0.18, 0.14, 0.13, 0.12, 0.12, 0.11, 0.10, 0.10],
+    )
+    mp16 = sd16["backbone.encoder_layers.0.moe.mitotic_pairs_tensor"].tolist()
+    assert len(mp16) == 8
+    assert len({idx for pair in mp16 for idx in pair}) == 16
 

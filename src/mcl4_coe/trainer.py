@@ -278,7 +278,13 @@ def upcycle_state_dict_experts(
         expert_loads=expert_loads,
         existing_pairs=existing_pairs,
     )
-    all_pairs = list(existing_pairs or []) + added_pairs
+    newly_split = {idx for pair in added_pairs for idx in pair}
+    active_existing = [
+        (p, c)
+        for p, c in (existing_pairs or [])
+        if p not in newly_split and c not in newly_split
+    ]
+    all_pairs = active_existing + added_pairs
 
     gen = torch.Generator(device="cpu")
     gen.manual_seed(seed)
@@ -1106,7 +1112,13 @@ class MCL4COETrainer:
         with torch.no_grad():
             self.model.log_scale.data.clamp_(math.log(0.5), math.log(3.5))
         if existing_pairs and not self._get_model_mitotic_pairs():
-            self._set_model_mitotic_pairs(existing_pairs + added_pairs)
+            newly_split = {idx for pair in added_pairs for idx in pair}
+            active_existing = [
+                (p, c)
+                for p, c in existing_pairs
+                if p not in newly_split and c not in newly_split
+            ]
+            self._set_model_mitotic_pairs(active_existing + added_pairs)
         if self.config.cpu_offload_optimizer:
             prepare_model(
                 self.model,

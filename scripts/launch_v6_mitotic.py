@@ -102,20 +102,60 @@ def build_v6_mitotic_config(
     )
 
 
+def build_v6_mitotic_stage2_config(
+    *,
+    run_id: str = "colab_mcl4_coe_v6_mitotic",
+    runs_root: str = "/content/runs",
+    shards_root: str = "/content/data_shards_morph16k",
+    corpora_root: str = "/content/MCL4-COE/corpora",
+    resume_checkpoint: str = "/content/runs/colab_mcl4_coe_v6_mitotic/checkpoints/step_04000.pt",
+    num_experts: int = 24,
+    max_experts: int = 56,
+    mitosis_every: int = 800,
+    mitosis_step_size: int = 8,
+    total_steps: int = 8000,
+    lr: float = 1.2e-3,
+) -> TrainingRunConfig:
+    cfg = build_v6_mitotic_config(
+        run_id=run_id,
+        runs_root=runs_root,
+        shards_root=shards_root,
+        corpora_root=corpora_root,
+        resume_checkpoint=resume_checkpoint,
+        num_experts=num_experts,
+        max_experts=max_experts,
+        mitosis_every=mitosis_every,
+        mitosis_step_size=mitosis_step_size,
+        total_steps=total_steps,
+        lr=lr,
+    )
+    cfg.min_lr_ratio = 0.25
+    cfg.seed = 43
+    return cfg
+
+
 def main() -> None:
-    cfg = build_v6_mitotic_config()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Launch Progressive Mitotic v6 training")
+    parser.add_argument("--stage", type=int, choices=[1, 2], default=2)
+    args = parser.parse_args()
+
+    cfg = build_v6_mitotic_stage2_config() if args.stage == 2 else build_v6_mitotic_config()
     print(
-        f"[v6-Mitotic] Starting {cfg.run_id} (E={cfg.num_experts} -> {cfg.max_experts}) "
+        f"[v6-Mitotic Stage {args.stage}] Starting {cfg.run_id} (E={cfg.num_experts} -> {cfg.max_experts}) "
         f"on {cfg.shards_root} for {cfg.total_steps} steps...",
         flush=True,
     )
     manifest = run_cloud_training(
         cfg,
         hf_run_repo="mESmaC/mcl4-coe-runs",
+        drive_root=None,
         resume_from_cloud=True,
     )
-    print("[v6-Mitotic] Run complete!", manifest.get("step"), flush=True)
+    print(f"[v6-Mitotic Stage {args.stage}] Run complete!", manifest.get("step"), flush=True)
 
 
 if __name__ == "__main__":
     main()
+

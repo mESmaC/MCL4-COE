@@ -107,27 +107,31 @@ def _extract_kodcode_tasks(parquet_path: Path, max_tasks: int = 1200) -> list[Or
             continue
 
         # Build 3 hard negatives with length-matched #T$# thoughts and full-body code mutations
-        if " + " in gold_a:
-            mut1_a = gold_a.replace(" + ", " - ", 1)
-        elif " - " in gold_a:
-            mut1_a = gold_a.replace(" - ", " + ", 1)
-        elif " * " in gold_a:
-            mut1_a = gold_a.replace(" * ", " // ", 1)
-        elif "return " in gold_a:
+        if "return " in gold_a and "while " in gold_a:
             mut1_a = re.sub(r"return\s+([^\n]+)", r"return (\1) + 1", gold_a, count=1)
-        else:
-            mut1_a = gold_a + "\n    return None"
-
-        if " == " in gold_a:
-            mut2_a = gold_a.replace(" == ", " != ", 1)
-        elif " < " in gold_a:
-            mut2_a = gold_a.replace(" < ", " <= ", 1)
-        elif " > " in gold_a:
-            mut2_a = gold_a.replace(" > ", " >= ", 1)
-        elif "return " in gold_a:
             mut2_a = re.sub(r"return\s+([^\n]+)", r"return -(\1)", gold_a, count=1)
         else:
-            mut2_a = f"def {fn_name}(*args):\n    return -1"
+            if " + " in gold_a:
+                mut1_a = gold_a.replace(" + ", " - ", 1)
+            elif " - " in gold_a:
+                mut1_a = gold_a.replace(" - ", " + ", 1)
+            elif " * " in gold_a:
+                mut1_a = gold_a.replace(" * ", " // ", 1)
+            elif "return " in gold_a:
+                mut1_a = re.sub(r"return\s+([^\n]+)", r"return (\1) + 1", gold_a, count=1)
+            else:
+                mut1_a = gold_a + "\n    return None"
+
+            if " == " in gold_a:
+                mut2_a = gold_a.replace(" == ", " != ", 1)
+            elif " < " in gold_a:
+                mut2_a = gold_a.replace(" < ", " <= ", 1)
+            elif " > " in gold_a:
+                mut2_a = gold_a.replace(" > ", " >= ", 1)
+            elif "return " in gold_a:
+                mut2_a = re.sub(r"return\s+([^\n]+)", r"return -(\1)", gold_a, count=1)
+            else:
+                mut2_a = f"def {fn_name}(*args):\n    return -1"
 
         hack_a = f"def {fn_name}(*args):\n    return 0"
         base_cands = (
@@ -136,6 +140,10 @@ def _extract_kodcode_tasks(parquet_path: Path, max_tasks: int = 1200) -> list[Or
             f"#T$# {gold_t}\n#A$# {mut2_a}",
             f"#T$# Constant stub.\n#A$# {hack_a}",
         )
+        # Verify all 3 distractors terminate cleanly and score < 1.0
+        d_scores = [verify_python_rollout(c, harness_h, gold_a) for c in base_cands[1:]]
+        if any(s >= 0.99 for s in d_scores):
+            continue
         base_scores = (1.0, 0.20, 0.10, 0.0)
         p_cands, p_scores, g_idx = _permute_candidates(base_cands, base_scores, idx)
 

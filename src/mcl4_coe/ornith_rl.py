@@ -954,7 +954,21 @@ def verify_python_rollout(
                     if isinstance(node.func, ast.Attribute) and node.func.attr in _SAFE_METHOD_ATTRS:
                         continue
                     return 0.0
-            env: dict[str, Any] = {"__builtins__": dict(_SAFE_BUILTINS)}
+            tick_stmt = ast.Expr(
+                value=ast.Call(func=ast.Name(id="_tick", ctx=ast.Load()), args=[], keywords=[])
+            )
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.While, ast.For)):
+                    node.body.insert(0, tick_stmt)
+            ast.fix_missing_locations(tree)
+            steps = [0]
+
+            def _tick() -> None:
+                steps[0] += 1
+                if steps[0] > 4096:
+                    raise RuntimeError("Loop iteration limit exceeded")
+
+            env: dict[str, Any] = {"__builtins__": dict(_SAFE_BUILTINS), "_tick": _tick}
             exec(compile(tree, "<ornith_verifier>", "exec"), env, env)
             return 1.0 * thought_consistency
         except AssertionError:

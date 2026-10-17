@@ -786,7 +786,15 @@ class MultiPassController(nn.Module):
                                 next_logits[trig_b] -= 4.5 * cnt
 
                 # Prevent XML/HTML tag openers ('<') or markdown headers ('#') at start of #T$# or #A$#, 3x identical token repeats, or 2x punctuation
-                if not is_morph and (
+                if is_hf_donor and (
+                    step == 0
+                    or (has_emitted_a and len(tokens) == a_start_token_idx)
+                    or (len(tokens) >= len(a_tag_tokens) and tokens[-len(a_tag_tokens) :] == a_tag_tokens)
+                ):
+                    for bad_start_id in (203, 21, 46):
+                        if bad_start_id < logit_bound:
+                            next_logits[bad_start_id] = -torch.inf
+                elif not is_morph and (
                     step == 0
                     or (has_emitted_a and len(tokens) == a_start_token_idx)
                     or (len(tokens) >= len(a_tag_tokens) and tokens[-len(a_tag_tokens) :] == a_tag_tokens)
@@ -859,10 +867,13 @@ class MultiPassController(nn.Module):
                     break
 
             decoded = self.tokenizer.decode(tokens).rstrip()
-            if is_morph:
+            if is_hf_donor:
+                decoded = re.sub(r"#T\$#[ \n]*", "#T$# ", decoded)
+                decoded = re.sub(r"#A\$#[ \n]*", "#A$# ", decoded)
+            elif is_morph:
                 decoded = re.sub(r"#T\$#(?![ \n])", "#T$# ", decoded)
                 decoded = re.sub(r"#A\$#(?![ \n])", "#A$# ", decoded)
-            if "\n#A$# " not in decoded:
+            if "\n#A$#" not in decoded:
                 decoded = decoded + "\n#A$# "
             return decoded
         finally:

@@ -133,18 +133,21 @@ class CausalLMOutput:
 
 
 class RecurrentFeedback(nn.Module):
-    """Token-local recurrent state refinement adapter (`anchor + sigmoid(gate) * LN(state)`)."""
+    """Token-local recurrent state refinement adapter (`anchor + gate * LN(state)`)."""
 
-    def __init__(self, dim: int) -> None:
+    def __init__(self, dim: int, *, zero_init_tanh: bool = False) -> None:
         super().__init__()
         self.norm = nn.LayerNorm(dim)
         self.gate = nn.Parameter(torch.zeros(()))
+        self.zero_init_tanh = bool(zero_init_tanh)
 
     def forward(self, anchor: Tensor, state: Tensor, valid: Tensor | None = None) -> Tensor:
         if anchor.shape != state.shape or anchor.device != state.device:
             raise ValueError("anchor and state must match in shape and device")
         normed = self.norm(state.to(self.norm.weight.dtype)).to(anchor.dtype)
-        updated = anchor + self.gate.to(anchor.dtype).sigmoid() * normed
+        g = self.gate.to(anchor.dtype)
+        gate_val = torch.tanh(g) if self.zero_init_tanh else g.sigmoid()
+        updated = anchor + gate_val * normed
         if valid is not None:
             updated = updated.masked_fill(~valid.unsqueeze(-1), 0)
         return updated
@@ -420,6 +423,7 @@ class LocalAttentionBlock(nn.Module):
         )
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.markov_router: MarkovLocal4Router | None = None
+        self.markov_gate: nn.Parameter | None = None
         if config.attention_type == "markov_local4":
             self.markov_router = MarkovLocal4Router(
                 config.d_model,
@@ -434,6 +438,8 @@ class LocalAttentionBlock(nn.Module):
                 restart=config.markov_restart,
                 query_chunk_size=config.markov_query_chunk_size,
             )
+            if config.preserve_residual_across_stacks:
+                self.markov_gate = nn.Parameter(torch.zeros(()))
 
     def _apply_rope(self, x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
         even, odd = x[..., 0::2], x[..., 1::2]
@@ -450,6 +456,33 @@ class LocalAttentionBlock(nn.Module):
             )
         )
 
+    def _sdpa_attend(self, q: Tensor, k: Tensor, v: Tensor, valid: Tensor, *, causal: bool) -> Tensor:
+        b, _, n, _ = q.shape
+        if causal and bool(valid.all()):
+            return F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                attn_mask=None,
+                dropout_p=self.config.dropout if self.training else 0.0,
+                is_causal=True,
+                scale=self.attention_multiplier,
+            )
+        allowed = valid[:, None, None, :].expand(b, 1, n, n)
+        if causal:
+            causal_mask = torch.ones(n, n, dtype=torch.bool, device=q.device).tril()
+            allowed = allowed & causal_mask[None, None]
+        fallback = torch.eye(n, dtype=torch.bool, device=q.device)[None, None]
+        allowed = allowed | (~allowed.any(-1, keepdim=True) & fallback)
+        return F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=allowed,
+            dropout_p=self.config.dropout if self.training else 0.0,
+            scale=self.attention_multiplier,
+        )
+
     def forward(self, x_norm: Tensor, valid: Tensor, *, causal: bool = True) -> Tensor:
         b, n, width = x_norm.shape
         qkv = self.qkv(x_norm).view(b, n, 3, self.n_heads, self.head_dim)
@@ -462,7 +495,30 @@ class LocalAttentionBlock(nn.Module):
         cos, sin = angles.cos().to(q.dtype), angles.sin().to(q.dtype)
         q, k = self._apply_rope(q, cos, sin), self._apply_rope(k, cos, sin)
 
-        if self.markov_router is not None:
+        if self.markov_router is not None and self.markov_gate is not None:
+            sdpa_attended = self._sdpa_attend(q, k, v, valid, causal=causal)
+            if (
+                self.training
+                or torch.is_grad_enabled()
+                or float(self.markov_gate.detach().abs().item()) > 1e-6
+            ):
+                markov_attended = self.markov_router(
+                    q,
+                    k,
+                    v,
+                    x_norm,
+                    valid,
+                    causal=causal,
+                    dropout_p=self.config.dropout,
+                    attn_scale=self.attention_multiplier,
+                )
+                attended = (
+                    sdpa_attended
+                    + torch.tanh(self.markov_gate.to(sdpa_attended.dtype)) * markov_attended
+                )
+            else:
+                attended = sdpa_attended
+        elif self.markov_router is not None:
             attended = self.markov_router(
                 q,
                 k,
@@ -474,20 +530,7 @@ class LocalAttentionBlock(nn.Module):
                 attn_scale=self.attention_multiplier,
             )
         else:
-            allowed = valid[:, None, None, :].expand(b, 1, n, n)
-            if causal:
-                causal_mask = torch.ones(n, n, dtype=torch.bool, device=x_norm.device).tril()
-                allowed = allowed & causal_mask[None, None]
-            fallback = torch.eye(n, dtype=torch.bool, device=x_norm.device)[None, None]
-            allowed = allowed | (~allowed.any(-1, keepdim=True) & fallback)
-            attended = F.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                attn_mask=allowed,
-                dropout_p=self.config.dropout if self.training else 0.0,
-                scale=self.attention_multiplier,
-            )
+            attended = self._sdpa_attend(q, k, v, valid, causal=causal)
         out = self.out_proj(attended.transpose(1, 2).contiguous().view(b, n, width))
         return out.masked_fill(~valid.unsqueeze(-1), 0)
 
@@ -735,7 +778,9 @@ class MCL4CEDBackbone(nn.Module):
             CEDDecoderLayer(config) for _ in range(config.n_decoder_layers)
         )
         self.final_norm = RMSNorm(config.d_model, eps=config.rms_norm_eps)
-        self.feedback = RecurrentFeedback(config.d_model)
+        self.feedback = RecurrentFeedback(
+            config.d_model, zero_init_tanh=config.preserve_residual_across_stacks
+        )
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
 
         self.apply(self._initialize)
@@ -872,6 +917,7 @@ class MCL4CEDBackbone(nn.Module):
 
         state = anchor
         step_states: list[Tensor] = []
+        raw_step_states: list[Tensor] = []
         aux_losses = [candidate_encoded.aux_loss]
         z_losses = [candidate_encoded.router_z_loss]
         loads = [candidate_encoded.expert_load]
@@ -920,6 +966,7 @@ class MCL4CEDBackbone(nn.Module):
                 aux_losses.append(aux)
                 z_losses.append(z)
                 loads.append(load.unsqueeze(0))
+            raw_step_states.append(x)
             state = self.final_norm(x).masked_fill(~candidate_valid.unsqueeze(-1), 0)
             step_states.append(state)
 
@@ -940,7 +987,35 @@ class MCL4CEDBackbone(nn.Module):
                 w_decay = (w_decay / w_decay.sum()).view(-1, 1, 1, 1)
                 s_deep = (deep_stack * w_decay).sum(dim=0)
 
-            if causal_cross:
+            if self.config.preserve_residual_across_stacks:
+                r1 = raw_step_states[0]
+                if len(raw_step_states) == 2:
+                    r_deep = raw_step_states[1]
+                else:
+                    r_stack = torch.stack(raw_step_states[1:], dim=0)
+                    w_decay = torch.pow(
+                        0.65,
+                        torch.arange(
+                            len(raw_step_states) - 1,
+                            device=r1.device,
+                            dtype=r1.dtype,
+                        ),
+                    )
+                    w_decay = (w_decay / w_decay.sum()).view(-1, 1, 1, 1)
+                    r_deep = (r_stack * w_decay).sum(dim=0)
+                if causal_cross:
+                    with torch.no_grad():
+                        l1 = self.lm_head(s1).float()
+                        if self.config.logits_scaling != 1.0:
+                            l1 = l1 / float(self.config.logits_scaling)
+                        p1 = F.softmax(l1, dim=-1)
+                        ent1 = -(p1 * p1.clamp_min(1e-9).log()).sum(dim=-1, keepdim=True)
+                        gate_ent = (0.50 + 0.35 * torch.sigmoid((ent1 - 1.5) / 0.6)).to(r1.dtype)
+                    blended = self.final_norm(r1 + gate_ent * (r_deep - r1))
+                else:
+                    blended = self.final_norm(0.40 * r1 + 0.60 * r_deep)
+                state = blended.masked_fill(~candidate_valid.unsqueeze(-1), 0)
+            elif causal_cross:
                 with torch.no_grad():
                     l1 = self.lm_head(s1).float()
                     if self.config.logits_scaling != 1.0:

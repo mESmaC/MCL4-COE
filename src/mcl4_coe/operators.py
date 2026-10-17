@@ -277,6 +277,41 @@ class AttentiveMatchedFilterPool(nn.Module):
         positions = torch.arange(t, device=state_ids.device)[None, :]
         trimmed = mask.clone()
 
+        if bos_id == 0:
+            # DonorHFTokenizer (Granite BPE): `#Q$#` is [21, 67, 22, 21], `#U$#` is [21, 71, 22, 21]
+            if t >= 5:
+                is_gq = (
+                    (state_ids[:, :-3] == 21)
+                    & (state_ids[:, 1:-2] == 67)
+                    & (state_ids[:, 2:-1] == 22)
+                    & (state_ids[:, 3:] == 21)
+                    & state_valid[:, :-3]
+                )
+                if is_gq.any():
+                    has_gq = is_gq.any(dim=-1, keepdim=True)
+                    first_gq = torch.where(
+                        has_gq,
+                        is_gq.int().argmax(dim=-1, keepdim=True),
+                        torch.full((b, 1), t, device=state_ids.device, dtype=torch.long),
+                    )
+                    trimmed = trimmed & (positions < first_gq)
+                is_gu = (
+                    (state_ids[:, :-3] == 21)
+                    & (state_ids[:, 1:-2] == 71)
+                    & (state_ids[:, 2:-1] == 22)
+                    & (state_ids[:, 3:] == 21)
+                    & state_valid[:, :-3]
+                )
+                if is_gu.any():
+                    has_gu = is_gu.any(dim=-1, keepdim=True)
+                    first_gu_end = torch.where(
+                        has_gu,
+                        is_gu.int().argmax(dim=-1, keepdim=True) + 4,
+                        torch.zeros((b, 1), device=state_ids.device, dtype=torch.long),
+                    )
+                    trimmed = trimmed & (positions >= first_gu_end)
+            return torch.where(trimmed.any(dim=-1, keepdim=True), trimmed, mask)
+
         # 1. MorphCode-16K atomic `#Q$#` / `#S$#` / `#H$#` / `#T$#` / `#A$#` marker tokens:
         #    261..265 ("#Q$#".."#A$#"), 267..271 ("\n#Q$#".."\n#A$#"), 273..275 ("#Q$# ".."#A$# ")
         is_morph_q = (
@@ -1458,7 +1493,11 @@ class CognitiveOperatorEnsemble(nn.Module):
         eff_scale = latent_prior_scale
         eff_start = prior_start_pos
         if condition_on_prefix_gist and input_ids.shape[1] >= 12 and eff_gist is None:
-            first_ep_mask = (input_ids == self.backbone.config.eos_id).cumsum(dim=1) == 0
+            eos_hits = input_ids == self.backbone.config.eos_id
+            if eos_hits.shape[1] > 0:
+                eos_hits = eos_hits.clone()
+                eos_hits[:, 0] = False
+            first_ep_mask = eos_hits.cumsum(dim=1) == 0
             min_ep_len = int(first_ep_mask.sum(dim=1).min().item())
             pref_len = max(
                 4,

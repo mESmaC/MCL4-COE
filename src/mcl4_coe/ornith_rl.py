@@ -2182,20 +2182,22 @@ class OrnithSelfImprover:
         lbl_rows: list[list[int]] = []
         prompt_lens: list[int] = []
         has_genuine_lm_target = False
+        val_mask = int(getattr(self.tokenizer, "value_mask", 0x7FFF))
+        is_hf_donor = bool(getattr(self.tokenizer, "is_hf_donor", False))
         for t in tasks:
             u_clean = t.prompt_q.split("\n#Q$#")[0].replace("#U$#", "").strip()
             raw_turn = self.tokenizer.encode_masked_turn(u_clean, t.gold_thought, t.gold_answer)
             if len(raw_turn) > max_lm_len + 1:
                 raw_turn = raw_turn[: max_lm_len + 1]
-            inp_rows.append([tok & 0x7FFF for tok in raw_turn[:-1]])
+            inp_rows.append([tok & val_mask for tok in raw_turn[:-1]])
             p_len = sum(1 for tok in raw_turn[1:] if (tok & self.tokenizer.prompt_mask_bit))
             prompt_lens.append(p_len)
             if use_compact or _is_genuine_natural_cot(t.gold_thought, t.gold_answer):
                 row_lbl = [
                     -100
                     if (tok & self.tokenizer.prompt_mask_bit)
-                    or (tok & 0x7FFF) == self.tokenizer.pad_id
-                    else (tok & 0x7FFF)
+                    or (tok & val_mask) == self.tokenizer.pad_id
+                    else (tok & val_mask)
                     for tok in raw_turn[1:]
                 ]
                 if any(x != -100 for x in row_lbl):
@@ -2209,8 +2211,8 @@ class OrnithSelfImprover:
                     -100
                     if (idx_tok + 1 < ut_len)
                     or (tok & self.tokenizer.prompt_mask_bit)
-                    or (tok & 0x7FFF) == self.tokenizer.pad_id
-                    else (tok & 0x7FFF)
+                    or (tok & val_mask) == self.tokenizer.pad_id
+                    else (tok & val_mask)
                     for idx_tok, tok in enumerate(raw_turn[1:])
                 ]
                 if any(x != -100 for x in row_lbl):
@@ -2237,13 +2239,19 @@ class OrnithSelfImprover:
             lm_distill_out = coe.forward_inference(inp_tensor, targets=None)
             self_distill_loss = decision_distill_loss
 
-        # LiquidAI Antidoom FTPO (supports both ByteTokenizer & MorphCode-16K):
+        # LiquidAI Antidoom FTPO (supports ByteTokenizer, MorphCode-16K, and DonorHFTokenizer):
         # Strictly target inner repetition triggers (`loop_hit is not None`) during full-length training.
         ftpo_pos_logits: list[Tensor] = []
         ftpo_rej_ids: list[int] = []
         ftpo_cho_ids: list[list[int]] = []
         with torch.no_grad():
-            if vocab_size > 1024:
+            if is_hf_donor:
+                masked_l = lm_distill_out.logits.detach().clone()
+                masked_l[:, :, 1:19] = -torch.inf
+                if vocab_size > 49152:
+                    masked_l[:, :, 49152:] = -torch.inf
+                pred_ids = masked_l.argmax(dim=-1)
+            elif vocab_size > 1024:
                 masked_l = lm_distill_out.logits.detach().clone()
                 masked_l[:, :, :10] = -torch.inf
                 masked_l[:, :, 11:32] = -torch.inf
@@ -2279,7 +2287,14 @@ class OrnithSelfImprover:
                 continue
             if rej_tok == gold_tok:
                 continue
-            if vocab_size > 1024:
+            if is_hf_donor:
+                row_cand = lm_distill_out.logits[b_i, pos_idx].detach().clone()
+                row_cand[:19] = -torch.inf
+                if vocab_size > 49152:
+                    row_cand[49152:] = -torch.inf
+                row_cand[rej_tok] = -torch.inf
+                top_alts = row_cand.topk(4).indices.tolist()
+            elif vocab_size > 1024:
                 row_cand = lm_distill_out.logits[b_i, pos_idx].detach().clone()
                 row_cand[:32] = -torch.inf
                 row_cand[127:260] = -torch.inf

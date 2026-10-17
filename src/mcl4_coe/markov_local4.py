@@ -1572,9 +1572,11 @@ class MarkovLocal4Router(nn.Module):
         *,
         causal: bool = True,
         dropout_p: float = 0.0,
+        attn_scale: float | None = None,
     ) -> Tensor:
         """Route and compute sparse QKV attention over 4 local anchors + 12 Markov walkers."""
         b, h, n, head_dim = q.shape
+        scale_val = float(attn_scale) if attn_scale is not None else (1.0 / math.sqrt(head_dim))
         queries, states, keys, starts = self.project_routes(x_norm)
         indices, valid = self.build_graph(keys, key_valid)
         ext = _get_mcl4_cuda_ext() if keys.is_cuda else None
@@ -1633,7 +1635,7 @@ class MarkovLocal4Router(nn.Module):
                 scores = torch.matmul(q_chunk.unsqueeze(-2), selected_k.transpose(-1, -2)).squeeze(
                     -2
                 )
-            scores = scores.float() / math.sqrt(head_dim)
+            scores = scores.float() * scale_val
             hard_mask = self.select_subset(ids, mass, positions, allowed)
             with torch.autocast(device_type=q.device.type, enabled=False):
                 hard_weights = scores.masked_fill(~hard_mask, -torch.inf).softmax(-1)

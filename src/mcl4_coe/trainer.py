@@ -117,6 +117,8 @@ class TrainingRunConfig:
 
     # Model architecture
     vocab_size: int = 260
+    pad_id: int = 256
+    eos_token_id: int | None = None
     d_model: int = 128
     n_heads: int = 4
     n_encoder_layers: int = 2
@@ -125,6 +127,14 @@ class TrainingRunConfig:
     expert_hidden_dim: int = 256
     num_experts: int = 4
     top_k: int = 2
+    rms_norm_eps: float = 1e-5
+    rope_theta: float = 10_000.0
+    use_qk_norm: bool = True
+    attention_multiplier: float | None = None
+    embedding_multiplier: float = 1.0
+    residual_multiplier: float = 1.0
+    logits_scaling: float = 1.0
+    preserve_residual_across_stacks: bool = False
     enable_mitosis: bool = False
     release_mitotic_pairs: bool = False
     max_experts: int = 12
@@ -378,6 +388,7 @@ class MCL4COETrainer:
         b_cfg = payload.get("backbone_config", {})
         for key in (
             "vocab_size",
+            "pad_id",
             "d_model",
             "n_heads",
             "n_encoder_layers",
@@ -385,8 +396,30 @@ class MCL4COETrainer:
             "ple_dim",
             "expert_hidden_dim",
         ):
-            if key in b_cfg:
+            if key in b_cfg and b_cfg[key] is not None:
                 setattr(self.config, key, int(b_cfg[key]))
+        if "eos_token_id" in b_cfg:
+            self.config.eos_token_id = (
+                int(b_cfg["eos_token_id"]) if b_cfg["eos_token_id"] is not None else None
+            )
+        for f_key in (
+            "rms_norm_eps",
+            "rope_theta",
+            "embedding_multiplier",
+            "residual_multiplier",
+            "logits_scaling",
+        ):
+            if f_key in b_cfg and b_cfg[f_key] is not None:
+                setattr(self.config, f_key, float(b_cfg[f_key]))
+        if "attention_multiplier" in b_cfg:
+            self.config.attention_multiplier = (
+                float(b_cfg["attention_multiplier"])
+                if b_cfg["attention_multiplier"] is not None
+                else None
+            )
+        for b_key in ("use_qk_norm", "preserve_residual_across_stacks"):
+            if b_key in b_cfg and b_cfg[b_key] is not None:
+                setattr(self.config, b_key, bool(b_cfg[b_key]))
         c_cfg = payload.get("coe_config", {})
         for key in ("projection_dim", "recurrence_steps"):
             if key in c_cfg:
@@ -628,8 +661,20 @@ class MCL4COETrainer:
         return val_metrics
 
     def _build_model_and_optimizer(self) -> None:
+        eff_pad_id = (
+            int(getattr(self.tokenizer, "pad_id", self.config.pad_id))
+            if self.config.pad_id == 256 and self.config.vocab_size > 16384
+            else int(self.config.pad_id)
+        )
+        eff_eos_id = (
+            int(getattr(self.tokenizer, "eos_id", 0))
+            if self.config.eos_token_id is None and self.config.vocab_size > 16384
+            else self.config.eos_token_id
+        )
         self.backbone_cfg = MCL4CEDConfig(
             vocab_size=self.config.vocab_size,
+            pad_id=eff_pad_id,
+            eos_token_id=eff_eos_id,
             d_model=self.config.d_model,
             n_heads=self.config.n_heads,
             n_encoder_layers=self.config.n_encoder_layers,
@@ -639,6 +684,14 @@ class MCL4COETrainer:
             num_experts=self.config.num_experts,
             top_k=self.config.top_k,
             max_seq_len=self.config.max_seq_len,
+            rms_norm_eps=self.config.rms_norm_eps,
+            rope_theta=self.config.rope_theta,
+            use_qk_norm=self.config.use_qk_norm,
+            attention_multiplier=self.config.attention_multiplier,
+            embedding_multiplier=self.config.embedding_multiplier,
+            residual_multiplier=self.config.residual_multiplier,
+            logits_scaling=self.config.logits_scaling,
+            preserve_residual_across_stacks=self.config.preserve_residual_across_stacks,
         )
         self.coe_cfg = COEConfig(
             projection_dim=self.config.projection_dim,
@@ -646,6 +699,8 @@ class MCL4COETrainer:
             recurrence_steps=self.config.recurrence_steps,
             recurrent_kv=self.config.recurrent_kv,
             depth_ponder=self.config.depth_ponder,
+            bos_id=int(getattr(self.tokenizer, "bos_id", 257)),
+            eos_id=int(getattr(self.tokenizer, "eos_id", 258)),
         )
         self.model = CognitiveOperatorEnsemble(
             MCL4CEDBackbone(self.backbone_cfg),

@@ -1226,12 +1226,15 @@ class BlockAlignedShardWriter:
         self.max_blocks_per_shard = max_blocks_per_shard
         self.vocab_size = vocab_size
         self.tokenizer = get_tokenizer(vocab_size)
+        self.shard_dtype = "uint32" if vocab_size > 32768 else "uint16"
+        self._np_dtype = "<u4" if vocab_size > 32768 else "<u2"
 
         self.index_path = self.output_dir / "index_receipt.json"
         if self.index_path.exists():
             self.index_receipt = IndexReceipt.from_file(self.index_path)
         else:
             self.index_receipt = IndexReceipt(
+                dtype=self.shard_dtype,
                 seq_len=seq_len,
                 max_tokens_per_shard=max_blocks_per_shard * seq_len,
             )
@@ -1242,12 +1245,13 @@ class BlockAlignedShardWriter:
         self._current_unmasked_targets = 0
         self._current_provenance: list[ShardProvenance] = []
 
-    @staticmethod
-    def _count_unmasked_targets(block_tokens: np.ndarray) -> int:
+    def _count_unmasked_targets(self, block_tokens: np.ndarray) -> int:
         # In a block of length seq_len, causal targets come from positions 1..seq_len-1
-        # plus the boundary token. Any token with bit 0x8000 == 0 and != pad_id (256) is supervised.
+        # plus the boundary token. Any token with prompt_mask_bit == 0 and != pad_id is supervised.
         nxt = block_tokens[1:]
-        unmasked = (nxt != ByteTokenizer.pad_id) & ((nxt & ByteTokenizer.prompt_mask_bit) == 0)
+        pad_id = int(getattr(self.tokenizer, "pad_id", ByteTokenizer.pad_id))
+        mask_bit = int(getattr(self.tokenizer, "prompt_mask_bit", ByteTokenizer.prompt_mask_bit))
+        unmasked = (nxt != pad_id) & ((nxt & mask_bit) == 0)
         return int(np.count_nonzero(unmasked))
 
     def _flush_block_buffer(self) -> None:
@@ -1256,7 +1260,7 @@ class BlockAlignedShardWriter:
         pad_needed = self.seq_len - len(self._current_block_buf)
         if pad_needed > 0:
             self._current_block_buf.extend([self.tokenizer.pad_id] * pad_needed)
-        arr = np.asarray(self._current_block_buf, dtype="<u2")
+        arr = np.asarray(self._current_block_buf, dtype=self._np_dtype)
         self._current_unmasked_targets += self._count_unmasked_targets(arr)
         self._current_blocks.append(arr)
         self._current_block_buf = []
@@ -1280,6 +1284,8 @@ class BlockAlignedShardWriter:
     def add_pretrain_document(self, text: str) -> int:
         """Pack an expository pretraining document (`<bos> + UTF-8 + <eos>`) into blocks."""
         tokens = self.tokenizer.encode(text, add_bos=True, add_eos=True)
+        if tokens and getattr(self.tokenizer, "is_hf_donor", False):
+            tokens[0] = int(tokens[0]) | int(self.tokenizer.prompt_mask_bit)
         blocks_added = 0
         offset = 0
         n = len(tokens)
@@ -1344,8 +1350,8 @@ class BlockAlignedShardWriter:
         bin_path = self.output_dir / bin_name
         receipt_path = self.output_dir / receipt_name
 
-        # Append 1 trailing pad_id uint16 token so TokenBlockDataset sees `num_blocks` full causal windows
-        trailing = np.asarray([self.tokenizer.pad_id], dtype="<u2")
+        # Append 1 trailing pad_id token so TokenBlockDataset sees `num_blocks` full causal windows
+        trailing = np.asarray([self.tokenizer.pad_id], dtype=self._np_dtype)
         flat = np.concatenate([*self._current_blocks, trailing], axis=0)
         payload_bytes = flat.tobytes()
         digest = hashlib.sha256(payload_bytes).hexdigest()
@@ -1365,7 +1371,7 @@ class BlockAlignedShardWriter:
             receipt_file=receipt_name,
             track=self.track,
             split=self.split,
-            dtype="uint16",
+            dtype=self.shard_dtype,
             byte_order="little",
             seq_len=self.seq_len,
             num_tokens=num_tokens,
@@ -1400,7 +1406,7 @@ class BlockAlignedShardWriter:
 
 
 class ShardedTokenBlockDataset(Dataset):
-    """Multi-shard zero-copy `uint16` dataset driven by `index_receipt.json`.
+    """Multi-shard zero-copy `uint16`/`uint32` dataset driven by `index_receipt.json`.
 
     Drop-in replacement for `TokenBlockDataset` that maps global block indices
     across arbitrarily many `.bin` shards in $O(\\log N_{\\text{shards}})$ time using
@@ -1448,7 +1454,12 @@ class ShardedTokenBlockDataset(Dataset):
 
         ds = self._datasets[shard_idx]
         if ds is None:
-            ds = TokenBlockDataset(self._shard_paths[shard_idx], seq_len=self.seq_len)
+            shard_dtype = str(self.shards[shard_idx].get("dtype", self.receipt.dtype))
+            ds = TokenBlockDataset(
+                self._shard_paths[shard_idx],
+                seq_len=self.seq_len,
+                dtype=shard_dtype,
+            )
             self._datasets[shard_idx] = ds
         return ds
 

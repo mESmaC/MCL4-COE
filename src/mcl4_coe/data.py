@@ -116,8 +116,145 @@ class ByteTokenizer:
         return int(valid_mask.sum().item())
 
 
+class DonorHFTokenizer:
+    """HuggingFace BPE donor tokenizer wrapper (default: `ibm-granite/granite-3.1-1b-a400m-instruct`)."""
+
+    _CACHE: dict[str, tuple[Any, np.ndarray]] = {}
+
+    def __init__(
+        self,
+        model_id: str = "ibm-granite/granite-3.1-1b-a400m-instruct",
+        *,
+        vocab_size: int = 49155,
+        pad_id: int = 4,
+        bos_id: int = 0,
+        eos_id: int = 0,
+        unk_id: int = 4,
+    ) -> None:
+        self.model_id = model_id
+        self.vocab_size = int(vocab_size)
+        self.pad_id = int(pad_id)
+        self.bos_id = int(bos_id)
+        self.eos_id = int(eos_id)
+        self.unk_id = int(unk_id)
+        self.is_hf_donor = True
+        self.prompt_mask_bit = 0x80000000
+        self.value_mask = 0x7FFFFFFF
+        if model_id not in self._CACHE:
+            from transformers import AutoTokenizer  # type: ignore[import-not-found]
+
+            hf_tok = AutoTokenizer.from_pretrained(model_id)
+            decoded_pieces = hf_tok.batch_decode(
+                [[i] for i in range(self.vocab_size)],
+                skip_special_tokens=False,
+                clean_up_tokenization_spaces=False,
+            )
+            byte_lens = np.zeros(self.vocab_size, dtype=np.int32)
+            special_ids = set(getattr(hf_tok, "all_special_ids", []) or [])
+            special_ids.update({self.pad_id, self.bos_id, self.eos_id, self.unk_id})
+            for idx, piece in enumerate(decoded_pieces):
+                if idx in special_ids:
+                    byte_lens[idx] = 0
+                else:
+                    byte_lens[idx] = max(1, len(piece.encode("utf-8")))
+            self._CACHE[model_id] = (hf_tok, byte_lens)
+        self.hf_tok, self._token_byte_lens = self._CACHE[model_id]
+
+    def encode(
+        self,
+        text: str,
+        *,
+        add_bos: bool = True,
+        add_eos: bool = True,
+    ) -> list[int]:
+        if not isinstance(text, str):
+            raise TypeError("text must be a string")
+        tokens: list[int] = []
+        if add_bos:
+            tokens.append(self.bos_id)
+        tokens.extend(int(t) for t in self.hf_tok.encode(text, add_special_tokens=False))
+        if add_eos:
+            tokens.append(self.eos_id)
+        return tokens
+
+    def encode_masked_turn(
+        self,
+        prompt: str,
+        thought: str,
+        answer: str,
+        *,
+        seq_len: int | None = None,
+    ) -> list[int]:
+        if not prompt.strip():
+            raise ValueError("prompt (#U$#) must be non-empty")
+        if not thought.strip():
+            raise ValueError("thought (#T$#) scratchpad is mandatory in MCL4-COE micro-traces")
+        if not answer.strip():
+            raise ValueError("answer (#A$#) must be non-empty")
+
+        prefix_str = f"#U$# {prompt.strip()}\n"
+        completion_str = f"#T$# {thought.strip()}\n#A$# {answer.strip()}"
+
+        prefix_ids = [
+            self.bos_id,
+            *(int(t) for t in self.hf_tok.encode(prefix_str, add_special_tokens=False)),
+        ]
+        masked_prefix = [tok | self.prompt_mask_bit for tok in prefix_ids]
+        completion_ids = [
+            *(int(t) for t in self.hf_tok.encode(completion_str, add_special_tokens=False)),
+            self.eos_id,
+        ]
+        full = masked_prefix + completion_ids
+
+        if seq_len is not None:
+            if len(full) > seq_len:
+                raise ValueError(
+                    f"Micro-trace length ({len(full)}) exceeds block seq_len={seq_len}; "
+                    "never sever traces mid-thought across blocks"
+                )
+            full.extend([self.pad_id] * (seq_len - len(full)))
+        return full
+
+    def decode(self, token_ids: list[int] | torch.Tensor) -> str:
+        if isinstance(token_ids, torch.Tensor):
+            token_ids = token_ids.detach().cpu().tolist()
+        clean_ids: list[int] = []
+        for tid in token_ids:
+            if int(tid) < 0 and (int(tid) & self.prompt_mask_bit) == 0:
+                continue
+            clean = int(tid) & self.value_mask
+            if clean in (self.pad_id, self.eos_id):
+                continue
+            if 0 < clean < self.vocab_size:
+                clean_ids.append(clean)
+        if not clean_ids:
+            return ""
+        return str(
+            self.hf_tok.decode(
+                clean_ids,
+                skip_special_tokens=False,
+                clean_up_tokenization_spaces=False,
+            )
+        )
+
+    def count_utf8_bytes(self, token_ids: list[int] | torch.Tensor) -> int:
+        arr = (
+            token_ids.detach().cpu().numpy().reshape(-1)
+            if isinstance(token_ids, torch.Tensor)
+            else np.asarray(list(token_ids), dtype=np.int64).reshape(-1)
+        )
+        valid = arr >= 0
+        if not np.any(valid):
+            return 0
+        clean = arr[valid] & self.value_mask
+        in_range = (clean >= 0) & (clean < self.vocab_size)
+        return int(self._token_byte_lens[clean[in_range]].sum())
+
+
 def get_tokenizer(vocab_size: int = 260) -> Any:
-    """Return `MorphCodeTokenizer` (`vocab_size = 16,384`) when `vocab_size > 1024`, else `ByteTokenizer` (`260`)."""
+    """Return `DonorHFTokenizer` when `vocab_size > 16384`, `MorphCodeTokenizer` when `vocab_size > 1024`, else `ByteTokenizer`."""
+    if vocab_size > 16384:
+        return DonorHFTokenizer(vocab_size=vocab_size)
     if vocab_size > 1024:
         from .morph_tokenizer import MorphCodeTokenizer
 
@@ -126,18 +263,57 @@ def get_tokenizer(vocab_size: int = 260) -> Any:
 
 
 class TokenBlockDataset(Dataset):
-    """Memory-mapped uint16 block dataset with 0x8000 high-bit prompt masking."""
+    """Memory-mapped uint16/uint32 block dataset with high-bit prompt masking."""
 
-    def __init__(self, path: str | Path, seq_len: int, *, include_partial: bool = False) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        seq_len: int,
+        *,
+        include_partial: bool = False,
+        dtype: str | None = None,
+        pad_id: int | None = None,
+    ) -> None:
         if isinstance(seq_len, bool) or not isinstance(seq_len, int) or seq_len <= 0:
             raise ValueError("seq_len must be a positive integer")
         self.path = Path(path).expanduser().resolve(strict=True)
         self.seq_len = seq_len
         self.include_partial = include_partial
+
+        resolved_dtype = dtype
+        if resolved_dtype is None:
+            receipt_candidate = self.path.with_suffix(".receipt.json")
+            if receipt_candidate.is_file():
+                try:
+                    r_data = json.loads(receipt_candidate.read_text(encoding="utf-8"))
+                    resolved_dtype = str(r_data.get("dtype", "uint16"))
+                except Exception:
+                    resolved_dtype = None
+            if resolved_dtype is None:
+                idx_candidate = self.path.parent / "index_receipt.json"
+                if idx_candidate.is_file():
+                    try:
+                        i_data = json.loads(idx_candidate.read_text(encoding="utf-8"))
+                        resolved_dtype = str(i_data.get("dtype", "uint16"))
+                    except Exception:
+                        resolved_dtype = None
+
+        if resolved_dtype in ("uint32", "<u4", "u4"):
+            self._dtype_str = "<u4"
+            self.prompt_mask_bit = 0x80000000
+            self.value_mask = 0x7FFFFFFF
+            self.pad_id = 4 if pad_id is None else int(pad_id)
+        else:
+            self._dtype_str = "<u2"
+            self.prompt_mask_bit = 0x8000
+            self.value_mask = 0x7FFF
+            self.pad_id = ByteTokenizer.pad_id if pad_id is None else int(pad_id)
+
+        itemsize = np.dtype(self._dtype_str).itemsize
         size = self.path.stat().st_size
-        if size % np.dtype("<u2").itemsize:
-            raise ValueError(f"Malformed uint16 token file (odd byte length): {self.path}")
-        self.token_count = size // np.dtype("<u2").itemsize
+        if size % itemsize:
+            raise ValueError(f"Malformed {self._dtype_str} token file: {self.path}")
+        self.token_count = size // itemsize
         minimum_tokens = 2 if include_partial else self.seq_len + 1
         if self.token_count < minimum_tokens:
             raise ValueError(
@@ -169,22 +345,22 @@ class TokenBlockDataset(Dataset):
         if np.any(indices < 0) or np.any(indices >= len(self)):
             raise IndexError("Block index out of range")
         if self._tokens is None:
-            self._tokens = np.memmap(self.path, mode="r", dtype="<u2")
+            self._tokens = np.memmap(self.path, mode="r", dtype=self._dtype_str)
         offsets = indices[:, None] * self.seq_len + np.arange(self.seq_len + 1)
         valid = offsets < self.token_count
         raw_block = np.asarray(
             self._tokens[np.minimum(offsets, self.token_count - 1)], dtype=np.int64
         )
-        masked_targets = (raw_block[:, 1:] & 0x8000) != 0
-        block = raw_block & 0x7FFF
+        masked_targets = (raw_block[:, 1:] & self.prompt_mask_bit) != 0
+        block = raw_block & self.value_mask
         inputs = np.array(block[:, :-1], copy=True)
         labels = np.array(block[:, 1:], copy=True)
-        inputs[~valid[:, :-1]] = ByteTokenizer.pad_id
+        inputs[~valid[:, :-1]] = self.pad_id
         labels[
             (~valid[:, 1:])
             | masked_targets
-            | (labels == ByteTokenizer.pad_id)
-            | (inputs == ByteTokenizer.pad_id)
+            | (labels == self.pad_id)
+            | (inputs == self.pad_id)
         ] = -100
         result = {"input_ids": torch.from_numpy(inputs), "labels": torch.from_numpy(labels)}
         return (

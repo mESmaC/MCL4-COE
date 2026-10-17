@@ -56,6 +56,13 @@ class MCL4CEDConfig:
     markov_beam_size: int = 8
     markov_restart: float = 0.1
     markov_query_chunk_size: int = 1024
+    eos_token_id: int | None = None
+    use_qk_norm: bool = True
+    attention_multiplier: float | None = None
+    embedding_multiplier: float = 1.0
+    residual_multiplier: float = 1.0
+    logits_scaling: float = 1.0
+    preserve_residual_across_stacks: bool = False
 
     def __post_init__(self) -> None:
         for name in (
@@ -83,6 +90,8 @@ class MCL4CEDConfig:
 
     @property
     def eos_id(self) -> int:
+        if self.eos_token_id is not None:
+            return int(self.eos_token_id)
         return int(self.pad_id) + 2
 
 
@@ -96,6 +105,7 @@ class EncodedState:
     router_z_loss: Tensor
     expert_load: Tensor
     gist_prefix_len: int = 0
+    raw_hidden: Tensor | None = None
 
 
 @dataclass
@@ -391,9 +401,19 @@ class LocalAttentionBlock(nn.Module):
         self.config = config
         self.n_heads = config.n_heads
         self.head_dim = config.d_model // config.n_heads
+        self.use_qk_norm = bool(config.use_qk_norm)
+        self.attention_multiplier = config.attention_multiplier
         self.qkv = nn.Linear(config.d_model, 3 * config.d_model, bias=False)
-        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.q_norm = (
+            RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+            if self.use_qk_norm
+            else nn.Identity()
+        )
+        self.k_norm = (
+            RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+            if self.use_qk_norm
+            else nn.Identity()
+        )
         self.out_proj = nn.Linear(config.d_model, config.d_model, bias=False)
         inv_freq = 1.0 / (
             config.rope_theta ** (torch.arange(0, self.head_dim, 2).float() / self.head_dim)
@@ -419,13 +439,26 @@ class LocalAttentionBlock(nn.Module):
         even, odd = x[..., 0::2], x[..., 1::2]
         return torch.stack((even * cos - odd * sin, even * sin + odd * cos), dim=-1).flatten(-2)
 
+    def _get_inv_freq(self, device: torch.device) -> Tensor:
+        if self.inv_freq.dtype == torch.float32:
+            return self.inv_freq
+        return 1.0 / (
+            self.config.rope_theta
+            ** (
+                torch.arange(0, self.head_dim, 2, device=device, dtype=torch.float32)
+                / self.head_dim
+            )
+        )
+
     def forward(self, x_norm: Tensor, valid: Tensor, *, causal: bool = True) -> Tensor:
         b, n, width = x_norm.shape
         qkv = self.qkv(x_norm).view(b, n, 3, self.n_heads, self.head_dim)
         q, k, v = (part.transpose(1, 2) for part in qkv.unbind(dim=2))
-        q, k = self.q_norm(q), self.k_norm(k)
+        if self.use_qk_norm:
+            q, k = self.q_norm(q), self.k_norm(k)
         positions = torch.arange(n, device=x_norm.device, dtype=torch.float32)
-        angles = positions[:, None] * self.inv_freq.float()[None, :]
+        inv_freq = self._get_inv_freq(x_norm.device)
+        angles = positions[:, None] * inv_freq[None, :]
         cos, sin = angles.cos().to(q.dtype), angles.sin().to(q.dtype)
         q, k = self._apply_rope(q, cos, sin), self._apply_rope(k, cos, sin)
 
@@ -438,6 +471,7 @@ class LocalAttentionBlock(nn.Module):
                 valid,
                 causal=causal,
                 dropout_p=self.config.dropout,
+                attn_scale=self.attention_multiplier,
             )
         else:
             allowed = valid[:, None, None, :].expand(b, 1, n, n)
@@ -452,6 +486,7 @@ class LocalAttentionBlock(nn.Module):
                 v,
                 attn_mask=allowed,
                 dropout_p=self.config.dropout if self.training else 0.0,
+                scale=self.attention_multiplier,
             )
         out = self.out_proj(attended.transpose(1, 2).contiguous().view(b, n, width))
         return out.masked_fill(~valid.unsqueeze(-1), 0)
@@ -462,6 +497,7 @@ class CEDEncoderLayer(nn.Module):
 
     def __init__(self, config: MCL4CEDConfig) -> None:
         super().__init__()
+        self.residual_multiplier = float(config.residual_multiplier)
         self.ple = (
             PerLayerEmbedding(
                 config.d_model,
@@ -490,10 +526,11 @@ class CEDEncoderLayer(nn.Module):
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         if self.ple is not None:
             x = self.ple(x, original_inputs, token_ids=token_ids, valid=valid)
-        x = x + self.dropout(self.attention(self.attn_norm(x), valid, causal=causal))
+        res_scale = self.residual_multiplier
+        x = x + res_scale * self.dropout(self.attention(self.attn_norm(x), valid, causal=causal))
         x = x.masked_fill(~valid.unsqueeze(-1), 0)
         moe_out, aux_loss, z_loss, load = self.moe(self.moe_norm(x), valid=valid)
-        x = (x + self.dropout(moe_out)).masked_fill(~valid.unsqueeze(-1), 0)
+        x = (x + res_scale * self.dropout(moe_out)).masked_fill(~valid.unsqueeze(-1), 0)
         return x, aux_loss, z_loss, load
 
 
@@ -509,6 +546,7 @@ class CEDDecoderLayer(nn.Module):
         self.config = config
         self.n_heads = config.n_heads
         self.head_dim = config.d_model // config.n_heads
+        self.residual_multiplier = float(config.residual_multiplier)
         self.ple = (
             PerLayerEmbedding(
                 config.d_model,
@@ -544,6 +582,17 @@ class CEDDecoderLayer(nn.Module):
         even, odd = x[..., 0::2], x[..., 1::2]
         return torch.stack((even * cos - odd * sin, even * sin + odd * cos), dim=-1).flatten(-2)
 
+    def _get_inv_freq(self, device: torch.device) -> Tensor:
+        if self.inv_freq.dtype == torch.float32:
+            return self.inv_freq
+        return 1.0 / (
+            self.config.rope_theta
+            ** (
+                torch.arange(0, self.head_dim, 2, device=device, dtype=torch.float32)
+                / self.head_dim
+            )
+        )
+
     def project_global_kv(
         self,
         encoded_state: Tensor,
@@ -561,7 +610,8 @@ class CEDDecoderLayer(nn.Module):
             torch.arange(t_state, device=encoded_state.device, dtype=torch.float32)
             - float(max(0, int(n_prefix)))
         ).clamp_min(0.0)
-        angles = positions[:, None] * self.inv_freq.float()[None, :]
+        inv_freq = self._get_inv_freq(encoded_state.device)
+        angles = positions[:, None] * inv_freq[None, :]
         cos, sin = angles.cos().to(k_normed.dtype), angles.sin().to(k_normed.dtype)
         return self._apply_rope(k_normed, cos, sin), v_global
 
@@ -580,7 +630,8 @@ class CEDDecoderLayer(nn.Module):
         q = self.global_q_proj(q_norm).view(r, t_cand, self.n_heads, self.head_dim).transpose(1, 2)
         q = self.global_q_norm(q)
         positions = torch.arange(t_cand, device=q_norm.device, dtype=torch.float32)
-        angles = positions[:, None] * self.inv_freq.float()[None, :]
+        inv_freq = self._get_inv_freq(q_norm.device)
+        angles = positions[:, None] * inv_freq[None, :]
         cos, sin = angles.cos().to(q.dtype), angles.sin().to(q.dtype)
         q = self._apply_rope(q, cos, sin)
         if owner_rows is not None:
@@ -656,11 +707,14 @@ class CEDDecoderLayer(nn.Module):
             causal_cross_mask=causal_cross_mask,
             causal_cross=causal_cross,
         )
-        x = (x + self.dropout(local_out) + self.dropout(global_out)).masked_fill(
-            ~cand_valid.unsqueeze(-1), 0
-        )
+        res_scale = self.residual_multiplier
+        x = (
+            x
+            + res_scale * self.dropout(local_out)
+            + res_scale * self.dropout(global_out)
+        ).masked_fill(~cand_valid.unsqueeze(-1), 0)
         moe_out, aux_loss, z_loss, load = self.moe(self.moe_norm(x), valid=cand_valid)
-        x = (x + self.dropout(moe_out)).masked_fill(~cand_valid.unsqueeze(-1), 0)
+        x = (x + res_scale * self.dropout(moe_out)).masked_fill(~cand_valid.unsqueeze(-1), 0)
         return x, aux_loss, z_loss, load
 
 
@@ -743,7 +797,10 @@ class MCL4CEDBackbone(nn.Module):
             state_valid = state_ids != self.config.pad_id
         if not state_valid.any(dim=-1).all():
             raise ValueError("Every state row must have at least one valid token")
-        x = self.token_embedding(state_ids.long()).masked_fill(~state_valid.unsqueeze(-1), 0)
+        x = self.token_embedding(state_ids.long())
+        if self.config.embedding_multiplier != 1.0:
+            x = x * float(self.config.embedding_multiplier)
+        x = x.masked_fill(~state_valid.unsqueeze(-1), 0)
         original_inputs = x
         aux_losses, z_losses, loads = [], [], []
         for layer in self.encoder_layers:
@@ -758,6 +815,7 @@ class MCL4CEDBackbone(nn.Module):
             aux_loss=torch.stack(aux_losses).mean(),
             router_z_loss=torch.stack(z_losses).mean(),
             expert_load=torch.stack(loads),
+            raw_hidden=x,
         )
 
     def decode_candidates(
@@ -785,14 +843,22 @@ class MCL4CEDBackbone(nn.Module):
         if not candidate_valid.any(dim=-1).all():
             raise ValueError("Every decoded candidate row must have at least one valid token")
 
-        original_inputs = self.token_embedding(candidate_ids.long()).masked_fill(
-            ~candidate_valid.unsqueeze(-1), 0
-        )
+        original_inputs = self.token_embedding(candidate_ids.long())
+        if self.config.embedding_multiplier != 1.0:
+            original_inputs = original_inputs * float(self.config.embedding_multiplier)
+        original_inputs = original_inputs.masked_fill(~candidate_valid.unsqueeze(-1), 0)
         if candidate_encoded is None:
             candidate_encoded = self.encode_state(
                 candidate_ids, candidate_valid, causal=causal_local
             )
-        anchor = candidate_encoded.hidden
+        anchor = (
+            candidate_encoded.raw_hidden
+            if (
+                self.config.preserve_residual_across_stacks
+                and candidate_encoded.raw_hidden is not None
+            )
+            else candidate_encoded.hidden
+        )
         n_prefix_kv = (
             max(0, int(encoded_state.hidden.shape[1] - candidate_ids.shape[1]))
             if (causal_cross and owner_rows is None)
@@ -877,6 +943,8 @@ class MCL4CEDBackbone(nn.Module):
             if causal_cross:
                 with torch.no_grad():
                     l1 = self.lm_head(s1).float()
+                    if self.config.logits_scaling != 1.0:
+                        l1 = l1 / float(self.config.logits_scaling)
                     p1 = F.softmax(l1, dim=-1)
                     ent1 = -(p1 * p1.clamp_min(1e-9).log()).sum(dim=-1, keepdim=True)
                     gate_ent = (0.50 + 0.35 * torch.sigmoid((ent1 - 1.5) / 0.6)).to(s1.dtype)
@@ -916,7 +984,11 @@ class MCL4CEDBackbone(nn.Module):
             valid[:, 0] = True
         encoded = self.encode_state(input_ids, valid, causal=True)
         state_for_kv = encoded
-        first_episode_mask = (input_ids == self.config.eos_id).cumsum(dim=1) == 0
+        eos_hits = input_ids == self.config.eos_id
+        if eos_hits.shape[1] > 0:
+            eos_hits = eos_hits.clone()
+            eos_hits[:, 0] = False
+        first_episode_mask = eos_hits.cumsum(dim=1) == 0
         if latent_prior is not None and latent_prior_scale != 0.0:
             prior = latent_prior.to(device=encoded.hidden.device, dtype=encoded.hidden.dtype)
             if prior.ndim == 1:
@@ -947,6 +1019,7 @@ class MCL4CEDBackbone(nn.Module):
                 router_z_loss=encoded.router_z_loss,
                 expert_load=encoded.expert_load,
                 gist_prefix_len=int(prior_start_pos),
+                raw_hidden=encoded.raw_hidden,
             )
 
         causal_cross_mask: Tensor | None = None
@@ -988,6 +1061,7 @@ class MCL4CEDBackbone(nn.Module):
                 ),
                 expert_load=state_for_kv.expert_load,
                 gist_prefix_len=eff_prefix_len,
+                raw_hidden=state_for_kv.raw_hidden,
             )
 
         decoded = self.decode_candidates(
@@ -1040,6 +1114,8 @@ class MCL4CEDBackbone(nn.Module):
             prior_start_pos=prior_start_pos,
         )
         logits = self.lm_head(encoded.hidden)
+        if self.config.logits_scaling != 1.0:
+            logits = logits / float(self.config.logits_scaling)
         ce_loss, loss = None, None
         if targets is not None:
             valid_tok_count = targets.ne(-100).sum().clamp_min(1)
@@ -1059,6 +1135,8 @@ class MCL4CEDBackbone(nn.Module):
                 step_ces: list[Tensor] = []
                 for s_r in encoded.step_states:
                     l_r = self.lm_head(s_r)
+                    if self.config.logits_scaling != 1.0:
+                        l_r = l_r / float(self.config.logits_scaling)
                     s_sum = F.cross_entropy(
                         l_r.float().reshape(-1, self.config.vocab_size),
                         targets.reshape(-1),

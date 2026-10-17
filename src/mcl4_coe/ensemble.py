@@ -421,9 +421,11 @@ class MultiPassController(nn.Module):
             device = next(self.coe.parameters()).device
             vocab_size = int(getattr(self.coe.backbone.config, "vocab_size", 260))
             is_morph = vocab_size > 1024
+            is_hf_donor = bool(getattr(self.tokenizer, "is_hf_donor", False))
+            period_id = 32 if is_hf_donor else ord(".")
             if is_morph:
                 # Match encode_masked_turn exact token sequence: <bos> #U$# {prompt}\n #T$#
-                # without a trailing standalone space token (since MorphCode-16K words carry their own leading space)
+                # without a trailing standalone space token (since MorphCode-16K / BPE words carry their own leading space)
                 tokens = self.tokenizer.encode(
                     f"#U$# {user_prompt.strip()}\n", add_bos=True, add_eos=False
                 ) + self.tokenizer.encode("#T$#", add_bos=False, add_eos=False)
@@ -432,6 +434,11 @@ class MultiPassController(nn.Module):
                 prefix = f"#U$# {user_prompt.strip()}\n#T$# "
                 tokens = self.tokenizer.encode(prefix, add_bos=True, add_eos=False)
                 a_tag_tokens = self.tokenizer.encode("\n#A$# ", add_bos=False, add_eos=False)
+            a_tag_bare = (
+                self.tokenizer.encode("#A$#", add_bos=False, add_eos=False)
+                if is_hf_donor
+                else a_tag_tokens
+            )
             prompt_len = len(tokens)
             max_seq = self.coe.backbone.config.max_seq_len
             has_emitted_a = False
@@ -458,11 +465,14 @@ class MultiPassController(nn.Module):
             grace_tokens = 32 if max_new_tokens >= 64 else 0
             hard_max_steps = max_new_tokens + grace_tokens
             use_amp = device.type == "cuda"
-            sent_end_ids = getattr(
-                self.tokenizer,
-                "_sentence_end_ids",
-                frozenset({ord("."), ord("!"), ord("?"), 10}),
-            )
+            if is_hf_donor:
+                sent_end_ids = frozenset({32, 19, 49, 203})
+            else:
+                sent_end_ids = getattr(
+                    self.tokenizer,
+                    "_sentence_end_ids",
+                    frozenset({ord("."), ord("!"), ord("?"), 10}),
+                )
 
             ap_toks: list[int] = []
             if answer_prefix is not None and answer_prefix.strip():
@@ -494,7 +504,7 @@ class MultiPassController(nn.Module):
                 tokens.extend(tp_toks)
                 if lock_thought:
                     if tokens[-1] not in sent_end_ids:
-                        tokens.append(ord("."))
+                        tokens.append(period_id)
                     tokens.extend(a_tag_tokens)
                     if ap_toks and len(tokens) + len(ap_toks) < max_seq:
                         tokens.extend(ap_toks)
@@ -508,12 +518,20 @@ class MultiPassController(nn.Module):
                 "_clause_end_ids",
                 frozenset({32, 10, ord("."), ord("!"), ord("?"), ord(","), ord(";"), ord(":")}),
             )
-            newline_ids = getattr(self.tokenizer, "_newline_ids", frozenset({10}))
+            newline_ids = (
+                frozenset({203})
+                if is_hf_donor
+                else getattr(self.tokenizer, "_newline_ids", frozenset({10}))
+            )
             hash_start_ids = getattr(self.tokenizer, "_hash_start_ids", frozenset({ord("#")}))
             xml_open_ids = getattr(self.tokenizer, "_xml_open_ids", frozenset({ord("<")}))
             str_to_id = getattr(self.tokenizer, "_str_to_id", {})
-            pure_newline_ids = frozenset(
-                {10} | {str_to_id[m] for m in ("\n", "\n\n") if m in str_to_id}
+            pure_newline_ids = (
+                frozenset({203})
+                if is_hf_donor
+                else frozenset(
+                    {10} | {str_to_id[m] for m in ("\n", "\n\n") if m in str_to_id}
+                )
             )
             punct_sent_end_ids = sent_end_ids - newline_ids
             forbidden_marker_ids = [
@@ -591,12 +609,12 @@ class MultiPassController(nn.Module):
                         )
                     if at_boundary or force_transition:
                         if len(tokens) + len(a_tag_tokens) + 1 < max_seq:
-                            if tokens[-1] in (32, ord(","), ord(";")) and max_new_tokens >= 64:
+                            if not is_hf_donor and tokens[-1] in (32, ord(","), ord(";")) and max_new_tokens >= 64:
                                 tokens.pop()
                                 if tokens[-1] not in sent_end_ids:
-                                    tokens.append(ord("."))
+                                    tokens.append(period_id)
                             elif is_morph and tokens[-1] not in sent_end_ids and max_new_tokens >= 64:
-                                tokens.append(ord("."))
+                                tokens.append(period_id)
                             tokens.extend(a_tag_tokens)
                             if ap_toks and len(tokens) + len(ap_toks) < max_seq:
                                 tokens.extend(ap_toks)
@@ -647,29 +665,41 @@ class MultiPassController(nn.Module):
                         )
                 next_logits = out.logits[0, -1, :logit_bound].float()
 
-                # Mask control bytes (<32 except newline=10), DEL..0xFF (127..255), pad_id (256), bos_id (257), unk_id (259)
-                next_logits[:10] = -torch.inf
-                next_logits[11:32] = -torch.inf
-                next_logits[127:256] = -torch.inf
-                next_logits[self.tokenizer.pad_id] = -torch.inf
-                next_logits[self.tokenizer.bos_id] = -torch.inf
-                if is_morph:
-                    next_logits[self.tokenizer.unk_id] = -torch.inf
-                    for tid in tab_ids:
-                        next_logits[tid] = -torch.inf
-                    for fid in forbidden_marker_ids:
-                        next_logits[fid] = -torch.inf
-                    if not has_emitted_a and step < 4:
-                        for f_id in fence_ids:
-                            next_logits[f_id] = -torch.inf
-                    min_t_steps = (
-                        min(16, max(4, thought_budget // 2))
-                        if max_new_tokens >= 64
-                        else min(4, thought_budget // 2)
-                    )
-                    if has_emitted_a or step < min_t_steps:
-                        for aid in a_marker_ids:
-                            next_logits[aid] = -torch.inf
+                min_t_steps = (
+                    min(16, max(4, thought_budget // 2))
+                    if max_new_tokens >= 64
+                    else min(4, thought_budget // 2)
+                )
+                if is_hf_donor:
+                    # Mask unused special/FIM tokens 1..18 (including pad_id=4) and trailing special IDs >= 49152
+                    next_logits[1:19] = -torch.inf
+                    if vocab_size > 49152:
+                        next_logits[49152:] = -torch.inf
+                    if len(tokens) >= 2 and tokens[-1] == 21:
+                        # Prevent emitting `#U$#`, `#T$#`, `#Q$#` mid-trace, or `#A$#` when disallowed
+                        for ch_id in (71, 70, 67, 69, 58):
+                            next_logits[ch_id] = -torch.inf
+                        if has_emitted_a or step < min_t_steps:
+                            next_logits[51] = -torch.inf
+                else:
+                    # Mask control bytes (<32 except newline=10), DEL..0xFF (127..255), pad_id (256), bos_id (257), unk_id (259)
+                    next_logits[:10] = -torch.inf
+                    next_logits[11:32] = -torch.inf
+                    next_logits[127:256] = -torch.inf
+                    next_logits[self.tokenizer.pad_id] = -torch.inf
+                    next_logits[self.tokenizer.bos_id] = -torch.inf
+                    if is_morph:
+                        next_logits[self.tokenizer.unk_id] = -torch.inf
+                        for tid in tab_ids:
+                            next_logits[tid] = -torch.inf
+                        for fid in forbidden_marker_ids:
+                            next_logits[fid] = -torch.inf
+                        if not has_emitted_a and step < 4:
+                            for f_id in fence_ids:
+                                next_logits[f_id] = -torch.inf
+                        if has_emitted_a or step < min_t_steps:
+                            for aid in a_marker_ids:
+                                next_logits[aid] = -torch.inf
 
                 min_a_steps = (
                     min(12, max(4, (max_new_tokens - thought_budget) // 3))
@@ -724,7 +754,7 @@ class MultiPassController(nn.Module):
                         for i in range(len(gen_window) - 6):
                             if gen_window[i : i + 6] == ctx6:
                                 trig_b = gen_window[i + 6]
-                                if (32 <= trig_b < 127) or trig_b >= 260:
+                                if is_hf_donor or (32 <= trig_b < 127) or trig_b >= 260:
                                     next_logits[trig_b] -= 5.0
                     if len(gen_window) >= 5:
                         ctx4 = gen_window[-4:]
@@ -734,7 +764,7 @@ class MultiPassController(nn.Module):
                                 trig_b = gen_window[i + 4]
                                 hits_4[trig_b] = hits_4.get(trig_b, 0) + 1
                         for trig_b, cnt in hits_4.items():
-                            if cnt >= 2 and ((32 <= trig_b < 127) or trig_b >= 260):
+                            if cnt >= 2 and (is_hf_donor or (32 <= trig_b < 127) or trig_b >= 260):
                                 next_logits[trig_b] -= 4.5 * cnt
                 else:
                     if len(gen_window) >= 6:
@@ -816,6 +846,11 @@ class MultiPassController(nn.Module):
                         has_emitted_a = True
                         a_start_token_idx = len(tokens)
                     elif len(tokens) >= len(a_tag_tokens) and tokens[-len(a_tag_tokens) :] == a_tag_tokens:
+                        if ap_toks and len(tokens) + len(ap_toks) < max_seq:
+                            tokens.extend(ap_toks)
+                        has_emitted_a = True
+                        a_start_token_idx = len(tokens)
+                    elif is_hf_donor and len(tokens) >= len(a_tag_bare) and tokens[-len(a_tag_bare) :] == a_tag_bare:
                         if ap_toks and len(tokens) + len(ap_toks) < max_seq:
                             tokens.extend(ap_toks)
                         has_emitted_a = True

@@ -443,7 +443,13 @@ class MultiPassController(nn.Module):
             max_seq = self.coe.backbone.config.max_seq_len
             has_emitted_a = False
             a_start_token_idx = -1
-            if is_morph:
+            if is_hf_donor:
+                thought_budget = (
+                    min(56, max(28, int(max_new_tokens * 0.30)))
+                    if max_new_tokens >= 64
+                    else max(10, max_new_tokens // 3)
+                )
+            elif is_morph:
                 if answer_prefix is not None and answer_prefix.strip():
                     thought_budget = (
                         min(96, max(36, int(max_new_tokens * 0.38)))
@@ -486,6 +492,12 @@ class MultiPassController(nn.Module):
                         ap_clean + " ", add_bos=False, add_eos=False
                     )
                 ap_toks = ap_toks[: max(8, min(len(ap_toks), max_seq // 3))]
+            elif is_hf_donor and "python function" in user_prompt.lower():
+                m_fn = re.search(r"`([a-zA-Z_]\w*\([^`]*\))`", user_prompt)
+                if m_fn:
+                    ap_toks = self.tokenizer.encode(
+                        f" def {m_fn.group(1)}:\n    ", add_bos=False, add_eos=False
+                    )
 
             if thought_prefix is not None and thought_prefix.strip():
                 tp_clean = thought_prefix.strip()
@@ -566,6 +578,17 @@ class MultiPassController(nn.Module):
                 for m in ("\t", "\n\t", "\n\t\t")
                 if m in str_to_id
             ]
+            donor_code_start_ids: set[int] = set()
+            donor_return_ids: set[int] = set()
+            if is_hf_donor:
+                for tok_str in (" def", "def", "```", " ```", '"""', ' """'):
+                    enc_ids = self.tokenizer.encode(tok_str, add_bos=False, add_eos=False)
+                    if len(enc_ids) == 1:
+                        donor_code_start_ids.add(int(enc_ids[0]))
+                for ret_str in (" return", "return"):
+                    enc_ids = self.tokenizer.encode(ret_str, add_bos=False, add_eos=False)
+                    if len(enc_ids) == 1:
+                        donor_return_ids.add(int(enc_ids[0]))
 
             step = 0
             while step < hard_max_steps and len(tokens) < max_seq:
@@ -675,6 +698,20 @@ class MultiPassController(nn.Module):
                     next_logits[1:19] = -torch.inf
                     if vocab_size > 49152:
                         next_logits[49152:] = -torch.inf
+                    if not has_emitted_a:
+                        for cid in donor_code_start_ids:
+                            if cid < logit_bound:
+                                next_logits[cid] = -torch.inf
+                        if tokens[-1] in pure_newline_ids and step < min_t_steps:
+                            next_logits[21] = -torch.inf
+                    elif a_start_token_idx > 0:
+                        a_slice = tokens[a_start_token_idx:]
+                        is_code_a = any(t in donor_code_start_ids for t in a_slice[:3])
+                        if is_code_a and tokens[-1] in pure_newline_ids:
+                            next_logits[21] = -torch.inf
+                            for cid in donor_code_start_ids:
+                                if cid < logit_bound:
+                                    next_logits[cid] = -torch.inf
                     if len(tokens) >= 2 and tokens[-1] == 21:
                         # Prevent emitting `#U$#`, `#T$#`, `#Q$#` mid-trace, or `#A$#` when disallowed
                         for ch_id in (71, 70, 67, 69, 58):
@@ -819,6 +856,27 @@ class MultiPassController(nn.Module):
 
                 # Cleanly terminate if #A$# is complete and the model attempts to open a new episode marker after newline
                 if (
+                    is_hf_donor
+                    and has_emitted_a
+                    and a_start_token_idx > 0
+                    and len(tokens) - a_start_token_idx >= 6
+                ):
+                    a_slice = tokens[a_start_token_idx:]
+                    is_code_a = any(t in donor_code_start_ids for t in a_slice[:3])
+                    if tokens[-1] in pure_newline_ids:
+                        if next_id in (21, 46):
+                            break
+                        if is_code_a and any(t in donor_return_ids for t in a_slice):
+                            if next_id in pure_newline_ids or not self.tokenizer.decode([next_id]).startswith(" "):
+                                break
+                    elif (
+                        not is_code_a
+                        and tokens[-1] in punct_sent_end_ids
+                        and next_id in pure_newline_ids
+                        and len(a_slice) >= 12
+                    ):
+                        break
+                elif (
                     not is_morph
                     and has_emitted_a
                     and a_start_token_idx > 0
@@ -836,6 +894,7 @@ class MultiPassController(nn.Module):
                     and (
                         (
                             bool(ap_toks)
+                            and not is_hf_donor
                             and len(tokens) - a_start_token_idx >= (6 if is_morph else 18)
                             and (next_id in newline_ids or len(tokens) - a_start_token_idx >= (12 if is_morph else 36))
                         )

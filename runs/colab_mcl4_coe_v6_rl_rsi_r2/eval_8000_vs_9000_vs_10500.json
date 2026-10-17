@@ -1,0 +1,50 @@
+{
+  "step_08000": {
+    "overall_acc": 40.62,
+    "tier8_combo192_acc": 50.0,
+    "adversarial_rlvr_acc": 31.25,
+    "mean_gold_prob": 0.3193,
+    "op_losses": {
+      "total": 2.31632,
+      "decision": 1.31933,
+      "deduction": 1.57037,
+      "evaluation": 1.09617,
+      "metacognition": 0.64825,
+      "abstraction": 0.70831
+    },
+    "mitotic_twin_divergence_pct": 2.88,
+    "sample_uta": "#U$# Stage 1 filters [3, 8, 11] >= 5 and scales by 2. Stage 2 adds 4. What is the sum?\n#T$# The sum of 3, 8, 11, and 5 is 2 + 1 + 4 = 10.\nThe sum of 3, 8, and 11 is 2\n#A$# 2 + 1 + 2 + 4 = 18"
+  },
+  "step_09000": {
+    "overall_acc": 34.38,
+    "tier8_combo192_acc": 40.62,
+    "adversarial_rlvr_acc": 28.12,
+    "mean_gold_prob": 0.3456,
+    "op_losses": {
+      "total": 2.41393,
+      "decision": 1.21374,
+      "deduction": 1.94812,
+      "evaluation": 1.62426,
+      "metacognition": 0.6774,
+      "abstraction": 0.22811
+    },
+    "mitotic_twin_divergence_pct": 3.08,
+    "sample_uta": "#U$# Stage 1 filters [3, 8, 11] >= 5 and scales by 2. Stage 2 adds 4. What is the sum?\n#T$# Execute procedural rules for `multiply_by_2` to obtain `1000`.\n#A$# 1000"
+  },
+  "step_10500": {
+    "overall_acc": 79.69,
+    "tier8_combo192_acc": 93.75,
+    "adversarial_rlvr_acc": 65.62,
+    "mean_gold_prob": 0.6457,
+    "op_losses": {
+      "total": 1.11892,
+      "decision": 0.54555,
+      "deduction": 0.88752,
+      "evaluation": 0.54076,
+      "metacognition": 0.5839,
+      "abstraction": 0.08496
+    },
+    "mitotic_twin_divergence_pct": 3.12,
+    "sample_uta": "#U$# Stage 1 filters [3, 8, 11] >= 5 and scales by 2. Stage 2 adds 4. What is the sum?\n#T$# Execute procedural rules for `to_dict` to derive 6.\n#A$# 6. **Testing 1:**  \n   Cross-multiply: \\( 6 \\times 11 = 81 \\),  \n   Divid"
+  }
+}

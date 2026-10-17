@@ -114,6 +114,10 @@ class TrainingRunConfig:
         self.corpora_root = str(resolve_corpora_root(self.corpora_root))
         if self.projection_dim == 32 and self.d_model > 128 and not self.resume_checkpoint:
             self.projection_dim = max(32, self.d_model // 4)
+        if self.hf_backup_repo is None:
+            env_repo = os.environ.get("MCL4_HF_BACKUP_REPO", "").strip()
+            if env_repo:
+                self.hf_backup_repo = env_repo
 
     # Model architecture
     vocab_size: int = 260
@@ -199,6 +203,8 @@ class TrainingRunConfig:
     # Checkpointing, held-out validation & live telemetry
     checkpoint_every: int = 10
     max_keep_checkpoints: int = 0
+    hf_backup_repo: str | None = None
+    hf_keep_checkpoints: int = 2
     eval_every: int = 0
     val_max_batches_per_track: int = 8
     sample_every: int = 10
@@ -948,7 +954,87 @@ class MCL4COETrainer:
                         old_pt.unlink(missing_ok=True)
             except Exception:
                 pass
+        if self.config.hf_backup_repo:
+            self._async_backup_to_hf(step_name, pt_path)
         return meta_path
+
+    def _async_backup_to_hf(self, step_name: str, pt_path: Path) -> None:
+        """Asynchronously upload run telemetry and a compact `bfloat16` checkpoint to Hugging Face Hub."""
+        repo_id = (self.config.hf_backup_repo or "").strip()
+        hf_token = os.environ.get("HF_TOKEN", "").strip()
+        if not repo_id or not hf_token:
+            return
+        run_dir = self.run_dir
+        run_id = self.config.run_id
+        keep_remote = max(1, int(self.config.hf_keep_checkpoints))
+
+        def _worker() -> None:
+            try:
+                from huggingface_hub import HfApi
+
+                api = HfApi(token=hf_token)
+                for rel_f in (
+                    "run_manifest.json",
+                    "metrics.jsonl",
+                    "samples.jsonl",
+                    "dream/dream_state.json",
+                    f"checkpoints/{step_name}.meta.json",
+                ):
+                    local_f = run_dir / rel_f
+                    if local_f.is_file():
+                        api.upload_file(
+                            path_or_fileobj=str(local_f),
+                            path_in_repo=f"{run_id}/{rel_f}",
+                            repo_id=repo_id,
+                            repo_type="model",
+                            commit_message=f"[{run_id}] Sync {rel_f} ({step_name})",
+                        )
+                if pt_path.is_file():
+                    raw = torch.load(pt_path, map_location="cpu", weights_only=False)
+                    raw.pop("optimizer_state", None)
+                    if "model_state" in raw and isinstance(raw["model_state"], dict):
+                        raw["model_state"] = {
+                            k: (
+                                v.to(dtype=torch.bfloat16)
+                                if torch.is_tensor(v) and torch.is_floating_point(v)
+                                else v
+                            )
+                            for k, v in raw["model_state"].items()
+                        }
+                    tmp_cloud_pt = pt_path.with_name(f".hf_sync_{step_name}.pt")
+                    torch.save(raw, tmp_cloud_pt)
+                    del raw
+                    gc.collect()
+                    api.upload_file(
+                        path_or_fileobj=str(tmp_cloud_pt),
+                        path_in_repo=f"{run_id}/checkpoints/{step_name}.pt",
+                        repo_id=repo_id,
+                        repo_type="model",
+                        commit_message=f"[{run_id}] Backup checkpoint {step_name}.pt (bf16)",
+                    )
+                    tmp_cloud_pt.unlink(missing_ok=True)
+                    repo_files = api.list_repo_files(repo_id, repo_type="model")
+                    remote_pts = sorted(
+                        f
+                        for f in repo_files
+                        if f.startswith(f"{run_id}/checkpoints/step_") and f.endswith(".pt")
+                    )
+                    if len(remote_pts) > keep_remote:
+                        for old_remote in remote_pts[:-keep_remote]:
+                            try:
+                                api.delete_file(
+                                    path_in_repo=old_remote,
+                                    repo_id=repo_id,
+                                    repo_type="model",
+                                    commit_message=f"[{run_id}] Prune old remote checkpoint {old_remote}",
+                                )
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_worker, name=f"hf_backup_{step_name}", daemon=True)
+        t.start()
 
     def _get_model_mitotic_pairs(self) -> list[tuple[int, int]]:
         if self.model.backbone.encoder_layers:

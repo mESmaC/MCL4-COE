@@ -135,6 +135,7 @@ class TrainingRunConfig:
     residual_multiplier: float = 1.0
     logits_scaling: float = 1.0
     preserve_residual_across_stacks: bool = False
+    donor_backbone_lr_scale: float = 0.08
     enable_mitosis: bool = False
     release_mitotic_pairs: bool = False
     max_experts: int = 12
@@ -728,12 +729,48 @@ class MCL4COETrainer:
         else:
             self.model.to(self.device)
 
-        decay_params = [p for p in self.model.parameters() if p.requires_grad and p.ndim >= 2]
-        nodecay_params = [p for p in self.model.parameters() if p.requires_grad and p.ndim < 2]
-        param_groups = [
-            {"params": decay_params, "weight_decay": self.config.weight_decay},
-            {"params": nodecay_params, "weight_decay": 0.0},
-        ]
+        if self.config.preserve_residual_across_stacks and float(self.config.donor_backbone_lr_scale) != 1.0:
+            new_adapter_markers = (
+                ".ple.",
+                ".markov_router.",
+                ".markov_gate",
+                ".global_",
+                ".feedback.",
+                ".q_norm.",
+                ".k_norm.",
+            )
+            adapter_decay, adapter_nodecay = [], []
+            donor_decay, donor_nodecay = [], []
+            embed_params = []
+            for name, p in self.model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                is_new_adapter = (not name.startswith("backbone.")) or any(
+                    m in name for m in new_adapter_markers
+                )
+                if is_new_adapter:
+                    (adapter_decay if p.ndim >= 2 else adapter_nodecay).append(p)
+                elif "token_embedding" in name or "lm_head" in name:
+                    embed_params.append(p)
+                else:
+                    (donor_decay if p.ndim >= 2 else donor_nodecay).append(p)
+            d_scale = float(self.config.donor_backbone_lr_scale)
+            emb_scale = d_scale / max(1.0, float(self.config.embedding_multiplier) * 0.5)
+            param_groups = [
+                {"params": adapter_decay, "weight_decay": self.config.weight_decay, "lr_scale": 1.0},
+                {"params": adapter_nodecay, "weight_decay": 0.0, "lr_scale": 1.0},
+                {"params": donor_decay, "weight_decay": self.config.weight_decay, "lr_scale": d_scale},
+                {"params": donor_nodecay, "weight_decay": 0.0, "lr_scale": d_scale},
+                {"params": embed_params, "weight_decay": self.config.weight_decay, "lr_scale": emb_scale},
+            ]
+            param_groups = [g for g in param_groups if g["params"]]
+        else:
+            decay_params = [p for p in self.model.parameters() if p.requires_grad and p.ndim >= 2]
+            nodecay_params = [p for p in self.model.parameters() if p.requires_grad and p.ndim < 2]
+            param_groups = [
+                {"params": decay_params, "weight_decay": self.config.weight_decay, "lr_scale": 1.0},
+                {"params": nodecay_params, "weight_decay": 0.0, "lr_scale": 1.0},
+            ]
 
         if self.config.cpu_offload_optimizer:
             self.optimizer: Any = CPUOffloadAdamW(
@@ -1366,7 +1403,7 @@ class MCL4COETrainer:
 
                 lr = self._compute_lr(step)
                 for group in self.optimizer.param_groups:
-                    group["lr"] = lr
+                    group["lr"] = lr * float(group.get("lr_scale", 1.0))
 
                 cur_indices = next_indices
                 quotas = self.sampler.allocate_quotas(self.config.batch_size, progress=progress)

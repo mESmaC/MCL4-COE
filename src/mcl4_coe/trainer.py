@@ -198,6 +198,7 @@ class TrainingRunConfig:
 
     # Checkpointing, held-out validation & live telemetry
     checkpoint_every: int = 10
+    max_keep_checkpoints: int = 0
     eval_every: int = 0
     val_max_batches_per_track: int = 8
     sample_every: int = 10
@@ -935,6 +936,18 @@ class MCL4COETrainer:
         torch.save(state_payload, tmp_pt)
         _safe_replace(tmp_pt, pt_path)
         _atomic_json(meta_path, meta)
+        if int(self.config.max_keep_checkpoints) > 0:
+            try:
+                pt_files = sorted(
+                    self.ckpt_dir.glob("step_*.pt"),
+                    key=lambda p: p.stat().st_mtime,
+                )
+                keep_n = max(1, int(self.config.max_keep_checkpoints))
+                for old_pt in pt_files[:-keep_n]:
+                    if old_pt != pt_path:
+                        old_pt.unlink(missing_ok=True)
+            except Exception:
+                pass
         return meta_path
 
     def _get_model_mitotic_pairs(self) -> list[tuple[int, int]]:
@@ -949,6 +962,42 @@ class MCL4COETrainer:
         ):
             layer.moe.mitotic_pairs = list(clean)
 
+    def _ordered_trainable_param_names(self) -> list[str]:
+        """Return trainable parameter names in the exact order they appear across `optimizer.param_groups`."""
+        if self.config.preserve_residual_across_stacks and float(self.config.donor_backbone_lr_scale) != 1.0:
+            new_adapter_markers = (
+                ".ple.",
+                ".markov_router.",
+                ".markov_gate",
+                ".global_",
+                ".feedback.",
+                ".q_norm.",
+                ".k_norm.",
+            )
+            adapter_decay, adapter_nodecay = [], []
+            donor_decay, donor_nodecay = [], []
+            embed_params = []
+            for name, p in self.model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                is_new_adapter = (not name.startswith("backbone.")) or any(
+                    m in name for m in new_adapter_markers
+                )
+                if is_new_adapter:
+                    (adapter_decay if p.ndim >= 2 else adapter_nodecay).append(name)
+                elif "token_embedding" in name or "lm_head" in name:
+                    embed_params.append(name)
+                else:
+                    (donor_decay if p.ndim >= 2 else donor_nodecay).append(name)
+            return adapter_decay + adapter_nodecay + donor_decay + donor_nodecay + embed_params
+        new_decay_names = [
+            name for name, p in self.model.named_parameters() if p.requires_grad and p.ndim >= 2
+        ]
+        new_nodecay_names = [
+            name for name, p in self.model.named_parameters() if p.requires_grad and p.ndim < 2
+        ]
+        return new_decay_names + new_nodecay_names
+
     def _upcycle_optimizer_state_dict(
         self,
         raw_opt_state: dict[str, Any],
@@ -960,13 +1009,7 @@ class MCL4COETrainer:
         if not raw_opt_state or not raw_opt_state.get("state"):
             return False
         try:
-            new_decay_names = [
-                name for name, p in self.model.named_parameters() if p.requires_grad and p.ndim >= 2
-            ]
-            new_nodecay_names = [
-                name for name, p in self.model.named_parameters() if p.requires_grad and p.ndim < 2
-            ]
-            new_ordered_names = new_decay_names + new_nodecay_names
+            new_ordered_names = self._ordered_trainable_param_names()
             new_expert_tokens = tuple(
                 f".moe.experts.{e}." for e in range(old_num_experts, new_num_experts)
             )
@@ -1114,6 +1157,13 @@ class MCL4COETrainer:
                     for k, v in raw_opt.get("state", {}).items()
                 },
             }
+            del raw_opt
+            self.model.cpu()
+            self.optimizer.state.clear()
+            if self.device.type == "cuda":
+                gc.collect()
+                torch.cuda.empty_cache()
+
             upcycled_state = upcycle_state_dict_experts(
                 cur_model_state,
                 old_e,
@@ -1122,11 +1172,22 @@ class MCL4COETrainer:
                 existing_pairs=existing_pairs,
                 seed=self.config.seed + step,
             )
+            del cur_model_state
             saved_ornith = self.ornith_improver
             self.config.num_experts = new_e
             self._build_model_and_optimizer()
             self.ornith_improver = saved_ornith
             self.model.load_state_dict(upcycled_state, strict=False)
+            del upcycled_state
+            with torch.no_grad():
+                self.model.log_scale.data.clamp_(math.log(0.5), math.log(3.5))
+            newly_split = {idx for pair in added_pairs for idx in pair}
+            active_existing = [
+                (p, c)
+                for p, c in existing_pairs
+                if p not in newly_split and c not in newly_split
+            ]
+            self._set_model_mitotic_pairs(active_existing + added_pairs)
             if self.config.cpu_offload_optimizer:
                 prepare_model(
                     self.model,
@@ -1136,7 +1197,13 @@ class MCL4COETrainer:
                 )
             else:
                 self.model.to(self.device)
-                self._upcycle_optimizer_state_dict(cur_opt_state, old_e, new_e, added_pairs)
+                self._optimizer_restored = self._upcycle_optimizer_state_dict(
+                    cur_opt_state, old_e, new_e, added_pairs
+                )
+            del cur_opt_state
+            if self.device.type == "cuda":
+                gc.collect()
+                torch.cuda.empty_cache()
 
             new_ema = list(loads_for_split) + [0.0] * (new_e - old_e)
             for p_e, c_e in added_pairs:

@@ -579,17 +579,12 @@ class MultiPassController(nn.Module):
                 if m in str_to_id
             ]
             donor_code_start_ids: set[int] = set()
-            donor_thought_ban_ids: set[int] = set()
             donor_return_ids: set[int] = set()
             if is_hf_donor:
                 for tok_str in (" def", "def", "```", " ```", '"""', ' """'):
                     enc_ids = self.tokenizer.encode(tok_str, add_bos=False, add_eos=False)
                     if len(enc_ids) == 1:
                         donor_code_start_ids.add(int(enc_ids[0]))
-                for ban_str in (" Here", "Here", " Sure", "Sure", " Below", "Below"):
-                    enc_ids = self.tokenizer.encode(ban_str, add_bos=False, add_eos=False)
-                    if len(enc_ids) == 1:
-                        donor_thought_ban_ids.add(int(enc_ids[0]))
                 for ret_str in (" return", "return"):
                     enc_ids = self.tokenizer.encode(ret_str, add_bos=False, add_eos=False)
                     if len(enc_ids) == 1:
@@ -597,11 +592,19 @@ class MultiPassController(nn.Module):
 
             step = 0
             while step < hard_max_steps and len(tokens) < max_seq:
-                if not has_emitted_a and step >= thought_budget:
+                donor_colon_intro_ready = (
+                    is_hf_donor
+                    and step >= 6
+                    and len(tokens) >= 2
+                    and tokens[-2] == 44
+                    and tokens[-1] in pure_newline_ids
+                )
+                if not has_emitted_a and (step >= thought_budget or donor_colon_intro_ready):
                     if max_new_tokens >= 64:
                         if is_morph:
                             at_sentence = (
-                                tokens[-1] in punct_sent_end_ids
+                                donor_colon_intro_ready
+                                or tokens[-1] in punct_sent_end_ids
                                 or (
                                     len(tokens) >= 2
                                     and tokens[-2] in punct_sent_end_ids
@@ -641,7 +644,7 @@ class MultiPassController(nn.Module):
                                 tokens.pop()
                                 if tokens[-1] not in sent_end_ids:
                                     tokens.append(period_id)
-                            elif is_morph and tokens[-1] not in sent_end_ids and max_new_tokens >= 64:
+                            elif is_morph and not is_hf_donor and tokens[-1] not in sent_end_ids and max_new_tokens >= 64:
                                 tokens.append(period_id)
                             tokens.extend(a_tag_tokens)
                             if ap_toks and len(tokens) + len(ap_toks) < max_seq:
@@ -704,7 +707,7 @@ class MultiPassController(nn.Module):
                     if vocab_size > 49152:
                         next_logits[49152:] = -torch.inf
                     if not has_emitted_a:
-                        for cid in donor_code_start_ids | donor_thought_ban_ids:
+                        for cid in donor_code_start_ids:
                             if cid < logit_bound:
                                 next_logits[cid] = -torch.inf
                         if tokens[-1] in pure_newline_ids and step < min_t_steps:

@@ -1073,6 +1073,37 @@ class OrnithEnvArchitect:
             self.family_pass_ema[k] = 0.45
 
 
+_SYNTHETIC_THOUGHT_PREFIXES: tuple[str, ...] = (
+    "Analyze ",
+    "Execute procedural",
+    "Stage 1",
+    "Isolate the target",
+    "Apply algebraic",
+    "Evaluate ",
+    "Satisfy the lexical",
+    "Solve the arithmetic",
+    "Implement a clean",
+    "Implement ",
+)
+
+
+def _is_genuine_natural_thought(thought: str) -> bool:
+    """Return True when `thought` is a genuine multi-sentence reasoning trace, not a 1-line RL stub."""
+    t_str = thought.strip()
+    return len(t_str) >= 90 and not t_str.startswith(_SYNTHETIC_THOUGHT_PREFIXES)
+
+
+def _is_genuine_complete_answer(answer: str) -> bool:
+    """Return True when `answer` is a complete natural sentence or Python function, not a bare scalar ('9')."""
+    a_str = answer.strip()
+    return len(a_str) >= 28 and ("def " in a_str or len(a_str.split()) >= 5)
+
+
+def _is_genuine_natural_cot(thought: str, answer: str) -> bool:
+    """Return True only when `(thought, answer)` has both a genuine multi-sentence CoT and complete answer."""
+    return _is_genuine_natural_thought(thought) and _is_genuine_complete_answer(answer)
+
+
 class OrnithSelfImprover:
     """Executes the closed-loop Ornith-1.0/2.0 Self-Scaffolding, Self-Improvement, and Dream-RSI cycle.
 
@@ -2141,26 +2172,52 @@ class OrnithSelfImprover:
             advantages,
             policy_age=0,
         )
-        # Verified gold rollout negative log-likelihood + 0x8000 prompt-masked decoder self-distillation
+        # Verified gold rollout negative log-likelihood + 0x8000 prompt-masked decoder self-distillation.
+        # Guard the autoregressive token decoder (forward_inference) against synthetic 1-line RL placeholder
+        # thoughts ("Analyze science constraints...") and bare scalar answers ("9") so RL sharpens the
+        # 9-operator COE heads without overwriting natural multi-sentence #T$# -> #A$# generation.
         decision_distill_loss = F.nll_loss(log_probs, targets)
         max_lm_len = min(eff_seq_len, int(getattr(coe.backbone.config, "max_seq_len", 256)))
         inp_rows: list[list[int]] = []
         lbl_rows: list[list[int]] = []
+        prompt_lens: list[int] = []
+        has_genuine_lm_target = False
         for t in tasks:
             u_clean = t.prompt_q.split("\n#Q$#")[0].replace("#U$#", "").strip()
             raw_turn = self.tokenizer.encode_masked_turn(u_clean, t.gold_thought, t.gold_answer)
             if len(raw_turn) > max_lm_len + 1:
                 raw_turn = raw_turn[: max_lm_len + 1]
             inp_rows.append([tok & 0x7FFF for tok in raw_turn[:-1]])
-            lbl_rows.append(
-                [
+            p_len = sum(1 for tok in raw_turn[1:] if (tok & self.tokenizer.prompt_mask_bit))
+            prompt_lens.append(p_len)
+            if use_compact or _is_genuine_natural_cot(t.gold_thought, t.gold_answer):
+                row_lbl = [
                     -100
                     if (tok & self.tokenizer.prompt_mask_bit)
                     or (tok & 0x7FFF) == self.tokenizer.pad_id
                     else (tok & 0x7FFF)
                     for tok in raw_turn[1:]
                 ]
-            )
+                if any(x != -100 for x in row_lbl):
+                    has_genuine_lm_target = True
+                lbl_rows.append(row_lbl)
+            elif _is_genuine_complete_answer(t.gold_answer):
+                # Supervise only the verified #A$# code/sentence answer while masking the synthetic #T$# stub
+                ut_prefix = f"#U$# {u_clean}\n#T$# {t.gold_thought.strip()}\n"
+                ut_len = len(self.tokenizer.encode(ut_prefix, add_bos=True, add_eos=False))
+                row_lbl = [
+                    -100
+                    if (idx_tok + 1 < ut_len)
+                    or (tok & self.tokenizer.prompt_mask_bit)
+                    or (tok & 0x7FFF) == self.tokenizer.pad_id
+                    else (tok & 0x7FFF)
+                    for idx_tok, tok in enumerate(raw_turn[1:])
+                ]
+                if any(x != -100 for x in row_lbl):
+                    has_genuine_lm_target = True
+                lbl_rows.append(row_lbl)
+            else:
+                lbl_rows.append([-100] * (len(raw_turn) - 1))
         pad_len = max(len(r) for r in inp_rows)
         inp_tensor = torch.tensor(
             [r + [self.tokenizer.pad_id] * (pad_len - len(r)) for r in inp_rows],
@@ -2172,14 +2229,16 @@ class OrnithSelfImprover:
             dtype=torch.long,
             device=self.device,
         )
-        lm_distill_out = coe.forward_inference(inp_tensor, targets=lbl_tensor)
-        assert lm_distill_out.loss is not None
-        self_distill_loss = 0.70 * decision_distill_loss + 0.30 * lm_distill_out.loss
+        if has_genuine_lm_target:
+            lm_distill_out = coe.forward_inference(inp_tensor, targets=lbl_tensor)
+            assert lm_distill_out.loss is not None
+            self_distill_loss = 0.85 * decision_distill_loss + 0.15 * lm_distill_out.loss
+        else:
+            lm_distill_out = coe.forward_inference(inp_tensor, targets=None)
+            self_distill_loss = decision_distill_loss
 
-        # LiquidAI Antidoom FTPO + Compiler-in-the-Loop Token Targeting (supports both ByteTokenizer & MorphCode-16K):
-        # Strictly target either (a) an inner repetition trigger (`loop_hit is not None`), or
-        # (b) the exact first token where the model's on-policy prediction diverges from the
-        # verified rollout (`pred != gold`). Never penalize second-best tokens when greedy is 100% verified.
+        # LiquidAI Antidoom FTPO (supports both ByteTokenizer & MorphCode-16K):
+        # Strictly target inner repetition triggers (`loop_hit is not None`) during full-length training.
         ftpo_pos_logits: list[Tensor] = []
         ftpo_rej_ids: list[int] = []
         ftpo_cho_ids: list[list[int]] = []
@@ -2195,20 +2254,29 @@ class OrnithSelfImprover:
         for b_i in range(inp_tensor.size(0)):
             valid_pos = (lbl_tensor[b_i] != -100).nonzero(as_tuple=False).squeeze(-1)
             if valid_pos.numel() < 4:
-                continue
+                start_p = min(prompt_lens[b_i], inp_tensor.size(1) - 1)
+                end_p = len(inp_rows[b_i])
+                if end_p - start_p < 4:
+                    continue
+                valid_pos = torch.arange(start_p, end_p, dtype=torch.long, device=self.device)
             seq_preds = pred_ids[b_i, valid_pos].tolist()
             loop_hit = detect_doom_loop(seq_preds, min_period=3, max_period=48, min_repeats=2, min_total_repeated=6)
             if loop_hit is not None:
                 trig_local, rej_tok, _ = loop_hit
                 pos_idx = int(valid_pos[min(trig_local, valid_pos.numel() - 1)].item())
-            else:
+                gold_tok = int(inp_tensor[b_i, min(pos_idx + 1, inp_tensor.size(1) - 1)].item())
+                if lbl_tensor[b_i, pos_idx].item() != -100:
+                    gold_tok = int(lbl_tensor[b_i, pos_idx].item())
+            elif use_compact and (lbl_tensor[b_i, valid_pos] != -100).any():
                 mismatches = (pred_ids[b_i, valid_pos] != lbl_tensor[b_i, valid_pos]).nonzero(as_tuple=False).squeeze(-1)
                 if mismatches.numel() == 0:
                     continue
                 first_err_local = int(mismatches[0].item())
                 pos_idx = int(valid_pos[first_err_local].item())
                 rej_tok = int(pred_ids[b_i, pos_idx].item())
-            gold_tok = int(lbl_tensor[b_i, pos_idx].item())
+                gold_tok = int(lbl_tensor[b_i, pos_idx].item())
+            else:
+                continue
             if rej_tok == gold_tok:
                 continue
             if vocab_size > 1024:

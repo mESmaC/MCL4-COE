@@ -249,6 +249,21 @@ def _score_trace_integrity(user_prompt: str, trace_text: str) -> float:
         if noise_tok.lower() in body_lower and noise_tok.lower() not in p_lower:
             score -= 0.25
 
+    # Penalize synthetic RL placeholder templates and MCQA option-list artifacts in free-form generation
+    for synth_tok in (
+        "analyze science constraints",
+        "analyze math constraints",
+        "execute procedural rules",
+        "solve for the exact value",
+        "energy of the options",
+        "define the options",
+        "options provided:",
+    ):
+        if synth_tok in body_lower and synth_tok not in p_lower:
+            score -= 0.40
+    if len(a_clean.split()) < 4 and "def " not in a_clean:
+        score -= 0.30
+
     # 4. Python AST check when prompt requests Python code or #A$# emits a function/class
     wants_python = "python" in p_lower or "def " in p_lower
     has_def = "def " in a_clean or "class " in a_clean
@@ -440,7 +455,7 @@ class MultiPassController(nn.Module):
                     if max_new_tokens >= 128
                     else max(12, max_new_tokens // 2)
                 )
-            grace_tokens = 32 if max_new_tokens >= 128 else 0
+            grace_tokens = 32 if max_new_tokens >= 64 else 0
             hard_max_steps = max_new_tokens + grace_tokens
             use_amp = device.type == "cuda"
             sent_end_ids = getattr(
@@ -537,7 +552,7 @@ class MultiPassController(nn.Module):
             step = 0
             while step < hard_max_steps and len(tokens) < max_seq:
                 if not has_emitted_a and step >= thought_budget:
-                    if max_new_tokens >= 128:
+                    if max_new_tokens >= 64:
                         if is_morph:
                             at_sentence = (
                                 tokens[-1] in punct_sent_end_ids
@@ -549,7 +564,7 @@ class MultiPassController(nn.Module):
                             )
                             at_boundary = at_sentence
                             force_transition = step >= max(
-                                thought_budget + 36, max_new_tokens - 48
+                                thought_budget + 24, max_new_tokens - 36
                             )
                         else:
                             at_sentence = (
@@ -576,11 +591,11 @@ class MultiPassController(nn.Module):
                         )
                     if at_boundary or force_transition:
                         if len(tokens) + len(a_tag_tokens) + 1 < max_seq:
-                            if tokens[-1] in (32, ord(","), ord(";")) and max_new_tokens >= 128:
+                            if tokens[-1] in (32, ord(","), ord(";")) and max_new_tokens >= 64:
                                 tokens.pop()
                                 if tokens[-1] not in sent_end_ids:
                                     tokens.append(ord("."))
-                            elif is_morph and tokens[-1] not in sent_end_ids and max_new_tokens >= 128:
+                            elif is_morph and tokens[-1] not in sent_end_ids and max_new_tokens >= 64:
                                 tokens.append(ord("."))
                             tokens.extend(a_tag_tokens)
                             if ap_toks and len(tokens) + len(ap_toks) < max_seq:
@@ -647,12 +662,22 @@ class MultiPassController(nn.Module):
                     if not has_emitted_a and step < 4:
                         for f_id in fence_ids:
                             next_logits[f_id] = -torch.inf
-                    if has_emitted_a or step < min(4, thought_budget // 2):
+                    min_t_steps = (
+                        min(16, max(4, thought_budget // 2))
+                        if max_new_tokens >= 64
+                        else min(4, thought_budget // 2)
+                    )
+                    if has_emitted_a or step < min_t_steps:
                         for aid in a_marker_ids:
                             next_logits[aid] = -torch.inf
 
+                min_a_steps = (
+                    min(12, max(4, (max_new_tokens - thought_budget) // 3))
+                    if (is_morph and max_new_tokens >= 64)
+                    else 4
+                )
                 if not has_emitted_a or (
-                    a_start_token_idx > 0 and len(tokens) - a_start_token_idx < 4
+                    a_start_token_idx > 0 and len(tokens) - a_start_token_idx < min_a_steps
                 ):
                     # Do not terminate with <eos> before emitting a non-empty #A$# answer
                     next_logits[self.tokenizer.eos_id] = -torch.inf

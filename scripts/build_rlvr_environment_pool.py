@@ -515,12 +515,16 @@ def append_rlvr_uta_shard(
         if corpus_tag in str(s.get("provenance", [])):
             return {"appended_blocks": int(s.get("num_blocks", 0)), "already_present": True}
 
+    from mcl4_coe.ornith_rl import _is_genuine_natural_cot
+
     tok = get_tokenizer(vocab_size)
     block_len = seq_len + 1
     token_buf: list[int] = []
     blocks: list[np.ndarray] = []
 
     for t in tasks:
+        if not _is_genuine_natural_cot(t.gold_thought, t.gold_answer):
+            continue
         u_clean = t.prompt_q.split("\n#Q$#")[0].replace("#U$#", "").strip()
         try:
             ep_ids = tok.encode_masked_turn(u_clean, t.gold_thought, t.gold_answer, seq_len=seq_len)

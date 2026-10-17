@@ -1523,6 +1523,7 @@ class CognitiveOperatorEnsemble(nn.Module):
             if eff_prior is None:
                 pref_lengths = pref_valid.sum(dim=-1).clamp_min(1)
                 cached_enc = getattr(self, "_last_gist_encoded_hidden", None)
+                self._last_gist_encoded_hidden = None
                 eff_prior = self.compress_abstraction(
                     pref_ids,
                     pref_lengths,
@@ -1533,6 +1534,7 @@ class CognitiveOperatorEnsemble(nn.Module):
                         else None
                     ),
                 )
+                del cached_enc
                 if eff_scale == 0.0:
                     eff_scale = 0.12
             eff_start = pref_len

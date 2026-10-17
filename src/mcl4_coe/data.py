@@ -388,7 +388,7 @@ class EpochBlockSampler:
     def peek(self, count: int) -> torch.Tensor:
         if count < 1:
             raise ValueError("count must be positive")
-        if self.cursor == self.num_blocks:
+        if self.cursor >= self.num_blocks:
             return torch.empty(0, dtype=torch.int64)
         if self._order is None:
             generator = torch.Generator(device="cpu").manual_seed(self.seed + self.epoch)
@@ -399,7 +399,7 @@ class EpochBlockSampler:
     def take(self, count: int) -> torch.Tensor:
         if count < 1:
             raise ValueError("count must be positive")
-        if self.cursor == self.num_blocks:
+        if self.cursor >= self.num_blocks:
             self.epoch += 1
             self.cursor = 0
             self._order = None

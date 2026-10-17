@@ -1835,7 +1835,11 @@ class CurriculumMixtureSampler:
         for name, s in self.track_samplers.items():
             if name in track_states:
                 s.epoch = int(track_states[name]["epoch"])
-                s.cursor = int(track_states[name]["cursor"])
+                raw_cursor = int(track_states[name]["cursor"])
+                if s.num_blocks > 0 and raw_cursor >= s.num_blocks:
+                    s.epoch += raw_cursor // s.num_blocks
+                    raw_cursor = raw_cursor % s.num_blocks
+                s.cursor = max(0, raw_cursor)
                 s._order = None
                 if s.cursor > 0:
                     _ = s.peek(1)

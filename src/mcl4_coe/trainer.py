@@ -126,6 +126,7 @@ class TrainingRunConfig:
     num_experts: int = 4
     top_k: int = 2
     enable_mitosis: bool = False
+    release_mitotic_pairs: bool = False
     max_experts: int = 12
     mitosis_every: int = 300
     mitosis_step_size: int = 2
@@ -1113,7 +1114,9 @@ class MCL4COETrainer:
         self.model.load_state_dict(model_state, strict=False)
         with torch.no_grad():
             self.model.log_scale.data.clamp_(math.log(0.5), math.log(3.5))
-        if existing_pairs and not self._get_model_mitotic_pairs():
+        if self.config.release_mitotic_pairs:
+            self._set_model_mitotic_pairs([])
+        elif existing_pairs and not self._get_model_mitotic_pairs():
             newly_split = {idx for pair in added_pairs for idx in pair}
             active_existing = [
                 (p, c)

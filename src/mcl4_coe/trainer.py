@@ -152,6 +152,7 @@ class TrainingRunConfig:
     max_experts: int = 12
     mitosis_every: int = 300
     mitosis_step_size: int = 2
+    mitosis_milestones: tuple[tuple[int, int], ...] = ()
     clear_consumed_shards: bool = False
     max_seq_len: int = 2048
     projection_dim: int = 32
@@ -1249,46 +1250,68 @@ class MCL4COETrainer:
 
     def perform_bounded_mitosis(self, step: int) -> dict[str, Any] | None:
         """Perform bounded in-flight expert mitosis (`old_e -> new_e <= max_experts`) or steady-state check."""
-        if not self.config.enable_mitosis or self.config.mitosis_every <= 0:
+        if not self.config.enable_mitosis:
             return None
         base_step = getattr(self, "initial_step", 0)
         old_e = int(self.model.backbone.config.num_experts)
         max_e = max(old_e, int(self.config.max_experts))
         existing_pairs = self._get_model_mitotic_pairs()
 
-        in_place_resume = bool(
-            getattr(self, "_optimizer_restored", False)
-            and getattr(self, "_parent_total_steps", 0) == self.config.total_steps
-        )
-        if in_place_resume:
-            expected_splits = (base_step // self.config.mitosis_every) * max(
-                1, int(self.config.mitosis_step_size)
-            )
-            catch_up_due = (
-                step == base_step + 1
-                and base_step >= self.config.mitosis_every
-                and old_e < max_e
-                and len(existing_pairs) < expected_splits
-            )
-            if not catch_up_due and (step <= 1 or (step % self.config.mitosis_every != 0)):
+        target_new_e: int | None = None
+        milestones = [
+            (int(ms[0]), int(ms[1]))
+            for ms in (self.config.mitosis_milestones or ())
+            if len(ms) == 2
+        ]
+        if milestones:
+            due_targets = [t_e for m_step, t_e in milestones if step >= m_step and t_e > old_e]
+            exact_hit = any(step == m_step for m_step, _ in milestones)
+            if due_targets and (exact_hit or step == base_step + 1):
+                target_new_e = min(max_e, max(due_targets))
+            else:
                 return None
         else:
-            local_step = step - base_step
-            if local_step <= 1 or (local_step % self.config.mitosis_every != 0):
+            if self.config.mitosis_every <= 0:
                 return None
+            in_place_resume = bool(
+                getattr(self, "_optimizer_restored", False)
+                and getattr(self, "_parent_total_steps", 0) == self.config.total_steps
+            )
+            if in_place_resume:
+                expected_splits = (base_step // self.config.mitosis_every) * max(
+                    1, int(self.config.mitosis_step_size)
+                )
+                catch_up_due = (
+                    step == base_step + 1
+                    and base_step >= self.config.mitosis_every
+                    and old_e < max_e
+                    and len(existing_pairs) < expected_splits
+                )
+                if not catch_up_due and (step <= 1 or (step % self.config.mitosis_every != 0)):
+                    return None
+            else:
+                local_step = step - base_step
+                if local_step <= 1 or (local_step % self.config.mitosis_every != 0):
+                    return None
+            if old_e < max_e:
+                target_new_e = min(max_e, old_e + max(1, int(self.config.mitosis_step_size)))
+
         loads_for_split = list(
             getattr(self, "_ema_expert_loads", None)
             or self.latest_metrics.get("expert_load")
             or [1.0 / max(1, old_e)] * old_e
         )
 
-        if old_e < max_e:
-            new_e = min(max_e, old_e + max(1, int(self.config.mitosis_step_size)))
+        if target_new_e is not None and old_e < target_new_e:
+            new_e = target_new_e
+            # When using staged milestones, prior-stage twin pairs have already differentiated over
+            # hundreds of steps, so release prior pairs so any high-load expert can split cleanly.
+            pairs_for_schedule = [] if milestones else existing_pairs
             added_pairs = compute_mitotic_schedule(
                 old_e,
                 new_e,
                 expert_loads=loads_for_split,
-                existing_pairs=existing_pairs,
+                existing_pairs=pairs_for_schedule,
             )
             cur_model_state = model_state_cpu(self.model)
             raw_opt = self.optimizer.state_dict()
@@ -1314,7 +1337,7 @@ class MCL4COETrainer:
                 old_e,
                 new_e,
                 expert_loads=loads_for_split,
-                existing_pairs=existing_pairs,
+                existing_pairs=pairs_for_schedule,
                 seed=self.config.seed + step,
                 orthogonal=self.config.orthogonal_mitosis,
             )
@@ -1330,7 +1353,7 @@ class MCL4COETrainer:
             newly_split = {idx for pair in added_pairs for idx in pair}
             active_existing = [
                 (p, c)
-                for p, c in existing_pairs
+                for p, c in pairs_for_schedule
                 if p not in newly_split and c not in newly_split
             ]
             self._set_model_mitotic_pairs(active_existing + added_pairs)

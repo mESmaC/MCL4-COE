@@ -862,9 +862,13 @@ def run_cloud_training(
                 config.resume_checkpoint = str(ckpt_pt)
                 print(f"[cloud-train] Resuming from checkpoint: {ckpt_pt.name} (step={latest_meta['step']})")
 
-    last_synced_ckpt_count = len(list_checkpoints(run_dir))
+    import threading
 
-    def _sync_run_artifacts(step: int) -> None:
+    existing_list = list_checkpoints(run_dir)
+    last_synced_ckpt_step = int(existing_list[0]["step"]) if existing_list else 0
+    active_sync_thread: threading.Thread | None = None
+
+    def _sync_worker(step: int) -> None:
         if drive_root:
             drive_run = Path(drive_root).expanduser().resolve() / "runs" / config.run_id
             drive_run.mkdir(parents=True, exist_ok=True)
@@ -882,8 +886,20 @@ def run_cloud_training(
             except Exception as exc:
                 print(f"[cloud-train] Warning: HF upload skipped at step {step}: {exc}")
 
+    def _sync_run_artifacts(step: int, *, blocking: bool = False) -> None:
+        nonlocal active_sync_thread
+        if blocking:
+            if active_sync_thread is not None and active_sync_thread.is_alive():
+                active_sync_thread.join(timeout=120)
+            _sync_worker(step)
+            return
+        if active_sync_thread is not None and active_sync_thread.is_alive():
+            return
+        active_sync_thread = threading.Thread(target=_sync_worker, args=(step,), daemon=True)
+        active_sync_thread.start()
+
     def _on_step(metrics: dict[str, Any]) -> None:
-        nonlocal last_synced_ckpt_count
+        nonlocal last_synced_ckpt_step
         step = int(metrics.get("step", 0))
         loss = float(metrics.get("total_loss", 0.0))
         lm = float(metrics.get("lm_loss", 0.0))
@@ -912,15 +928,16 @@ def run_cloud_training(
                 f"  [step {step:>4}/{config.total_steps}] "
                 f"E={n_exp} | total_loss={loss:.4f} | lm_loss={lm:.4f}{val_str} | tok/s={tps:,.0f}"
             )
-        cur_ckpts = len(list_checkpoints(run_dir))
-        if cur_ckpts > last_synced_ckpt_count:
-            last_synced_ckpt_count = cur_ckpts
-            _sync_run_artifacts(step)
+        cur_ckpts = list_checkpoints(run_dir)
+        newest_ckpt_step = int(cur_ckpts[0]["step"]) if cur_ckpts else 0
+        if newest_ckpt_step > last_synced_ckpt_step:
+            last_synced_ckpt_step = newest_ckpt_step
+            _sync_run_artifacts(step, blocking=False)
 
     sanitize_decision_caches(config.shards_root)
     trainer = MCL4COETrainer(config, on_step_callback=_on_step)
     manifest = trainer.train()
-    _sync_run_artifacts(int(manifest.get("step", config.total_steps)))
+    _sync_run_artifacts(int(manifest.get("step", config.total_steps)), blocking=True)
     return manifest
 
 

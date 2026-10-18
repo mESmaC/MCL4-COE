@@ -288,29 +288,44 @@ class SparseMoE(nn.Module):
         the chordal distance to orthogonality (`||u_p - u_c||_2 = sqrt(2)` when `u_p ⊥ u_c`)
         maintains unit-strength repulsive gradients along the Gram-Schmidt split direction right from birth.
         """
-        pair_tensors = self._get_mitotic_pair_tensors(device)
-        if pair_tensors is None:
+        if not self.mitotic_pairs:
             return torch.zeros((), dtype=torch.float32, device=device)
-        p_t, c_t = pair_tensors
+        valid_pairs = [
+            (p_idx, c_idx)
+            for p_idx, c_idx in self.mitotic_pairs
+            if 0 <= p_idx < self.num_experts and 0 <= c_idx < self.num_experts and p_idx != c_idx
+        ]
+        if not valid_pairs:
+            return torch.zeros((), dtype=torch.float32, device=device)
         sqrt2 = 1.4142135623730951
-        pair_losses: list[Tensor] = []
-        for p_idx, c_idx in zip(p_t.tolist(), c_t.tolist()):
-            ep = self.experts[p_idx]
-            ec = self.experts[c_idx]
-            up_p = F.normalize(ep.up_proj.weight.float(), p=2.0, dim=-1, eps=1e-8)
-            up_c = F.normalize(ec.up_proj.weight.float(), p=2.0, dim=-1, eps=1e-8)
-            chord_up = (up_p - up_c).norm(p=2.0, dim=-1, keepdim=False)
-            loss_up = ((sqrt2 - chord_up) / sqrt2).clamp_min(0.0).mean()
+        up_p = F.normalize(
+            torch.stack([self.experts[p].up_proj.weight for p, _ in valid_pairs], dim=0).float(),
+            p=2.0,
+            dim=-1,
+            eps=1e-8,
+        )
+        up_c = F.normalize(
+            torch.stack([self.experts[c].up_proj.weight for _, c in valid_pairs], dim=0).float(),
+            p=2.0,
+            dim=-1,
+            eps=1e-8,
+        )
+        loss_up = ((sqrt2 - (up_p - up_c).norm(p=2.0, dim=-1)) / sqrt2).clamp_min(0.0).mean()
 
-            dn_p = F.normalize(ep.down_proj.weight.float(), p=2.0, dim=0, eps=1e-8)
-            dn_c = F.normalize(ec.down_proj.weight.float(), p=2.0, dim=0, eps=1e-8)
-            chord_dn = (dn_p - dn_c).norm(p=2.0, dim=0, keepdim=False)
-            loss_dn = ((sqrt2 - chord_dn) / sqrt2).clamp_min(0.0).mean()
-
-            pair_losses.append(0.5 * (loss_up + loss_dn))
-        if not pair_losses:
-            return torch.zeros((), dtype=torch.float32, device=device)
-        return torch.stack(pair_losses).mean()
+        dn_p = F.normalize(
+            torch.stack([self.experts[p].down_proj.weight for p, _ in valid_pairs], dim=0).float(),
+            p=2.0,
+            dim=1,
+            eps=1e-8,
+        )
+        dn_c = F.normalize(
+            torch.stack([self.experts[c].down_proj.weight for _, c in valid_pairs], dim=0).float(),
+            p=2.0,
+            dim=1,
+            eps=1e-8,
+        )
+        loss_dn = ((sqrt2 - (dn_p - dn_c).norm(p=2.0, dim=1)) / sqrt2).clamp_min(0.0).mean()
+        return 0.5 * (loss_up + loss_dn)
 
     def _compute_sequence_diversity_loss(
         self,

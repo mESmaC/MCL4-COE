@@ -43,11 +43,25 @@ V7_PRESETS: dict[str, dict[str, Any]] = {
         "n_decoder_layers": 8,
         "ple_dim": 192,
         "expert_hidden_dim": 384,  # 0.5 * d_model -> 884,736 params/expert/layer (14.16M across 16 layers)
-        "num_experts": 16,         # 320.5M starting total params (150.6M active at top_k=4)
+        "num_experts": 8,          # 207.2M starting total params (150.6M active at top_k=4) for max token speed!
         "max_experts": 206,        # 3,010,275,536 (3.01B) terminal total params
         "top_k": 4,
-        "mitosis_step_size": 10,
+        "mitosis_step_size": 8,
         "projection_dim": 192,
+        # (progress_fraction, target_experts): 75% of tokens stay at <=32 experts (207M..547M params),
+        # then geometrically expand 48 -> 64 -> 96 -> 128 -> 164 -> 206 (3.01B) in the final 25%!
+        "milestone_curve": (
+            (0.20, 12),
+            (0.36, 16),
+            (0.51, 24),
+            (0.64, 32),
+            (0.75, 48),
+            (0.82, 64),
+            (0.88, 96),
+            (0.93, 128),
+            (0.965, 164),
+            (0.985, 206),
+        ),
     },
     "ultra_fine_512": {
         "d_model": 512,
@@ -56,16 +70,46 @@ V7_PRESETS: dict[str, dict[str, Any]] = {
         "n_decoder_layers": 6,
         "ple_dim": 128,
         "expert_hidden_dim": 256,  # 0.5 * d_model -> 393,216 params/expert/layer (4.72M across 12 layers)
-        "num_experts": 16,         # 112.1M starting total params (55.5M active at top_k=4)
+        "num_experts": 8,          # 74.3M starting total params (55.5M active at top_k=4)
         "max_experts": 628,        # 3,000,159,280 (3.00B) terminal total params
         "top_k": 4,
-        "mitosis_step_size": 32,
+        "mitosis_step_size": 16,
         "projection_dim": 128,
+        "milestone_curve": (
+            (0.20, 16),
+            (0.36, 24),
+            (0.51, 36),
+            (0.64, 64),
+            (0.75, 112),
+            (0.82, 176),
+            (0.88, 256),
+            (0.93, 368),
+            (0.965, 496),
+            (0.985, 628),
+        ),
     },
 }
 
 
-def compute_v7_parameter_profile(preset_name: str = "balanced_768") -> dict[str, Any]:
+def compute_low_param_geometric_milestones(
+    total_steps: int,
+    preset_name: str = "balanced_768",
+) -> tuple[tuple[int, int], ...]:
+    """Build `(step, target_experts)` milestones that spend 75% of steps at low params before geometric 3B ramp."""
+    p = V7_PRESETS[preset_name]
+    curve = p.get("milestone_curve", ())
+    milestones: list[tuple[int, int]] = []
+    for frac, target_e in curve:
+        m_step = max(2, min(total_steps - 10, int(round(float(frac) * total_steps))))
+        milestones.append((m_step, int(target_e)))
+    return tuple(milestones)
+
+
+def compute_v7_parameter_profile(
+    preset_name: str = "balanced_768",
+    *,
+    total_steps: int = 5500,
+) -> dict[str, Any]:
     """Compute exact parameter counts across mitotic stages and multi-active densities without allocating tensors."""
     if preset_name not in V7_PRESETS:
         raise ValueError(f"Unknown preset {preset_name!r}; choose from {sorted(V7_PRESETS)}")
@@ -119,6 +163,15 @@ def compute_v7_parameter_profile(preset_name: str = "balanced_768") -> dict[str,
                 "pct_of_3b": round(100.0 * act_k / total_at(e_max), 2),
             }
 
+    milestones = compute_low_param_geometric_milestones(total_steps, preset_name)
+    stage_schedule = [
+        {"step": 1, "experts": e_start, "total_millions": round(total_at(e_start) / 1e6, 2)},
+        *[
+            {"step": s, "experts": e, "total_millions": round(total_at(e) / 1e6, 2)}
+            for s, e in milestones
+        ],
+    ]
+
     return {
         "preset": preset_name,
         "d_model": d,
@@ -133,6 +186,7 @@ def compute_v7_parameter_profile(preset_name: str = "balanced_768") -> dict[str,
         "max_experts": e_max,
         "terminal_total_params": total_at(e_max),
         "sparse_active_params": active_sparse,
+        "low_param_geometric_milestones": stage_schedule,
         "multi_active_density_ladder": density_ladder,
     }
 
@@ -140,7 +194,7 @@ def compute_v7_parameter_profile(preset_name: str = "balanced_768") -> dict[str,
 def build_v7_config(
     *,
     preset: str = "balanced_768",
-    run_id: str = "colab_mcl4_coe_v7_mitotic_3b",
+    run_id: str = "colab_mcl4_coe_v7_mitotic_3b_fast",
     runs_root: str = "/content/runs" if Path("/content").is_dir() else r"X:\MCL4-COE\runs",
     shards_root: str = (
         "/content/data_shards_morph16k"
@@ -150,10 +204,10 @@ def build_v7_config(
     corpora_root: str = (
         "/content/MCL4-COE/corpora" if Path("/content").is_dir() else r"X:\corpora"
     ),
-    total_steps: int = 3800,
-    mitosis_every: int = 180,
+    total_steps: int = 5500,
+    mitosis_every: int = 1000,
     batch_size: int = 16,
-    micro_batch_size: int = 8,
+    micro_batch_size: int = 16,
     max_seq_len: int = 1024,
     clear_consumed_shards: bool = True,
     use_nvfp4: bool = False,
@@ -164,6 +218,7 @@ def build_v7_config(
     if preset not in V7_PRESETS:
         raise ValueError(f"Unknown preset {preset!r}; choose from {sorted(V7_PRESETS)}")
     p = V7_PRESETS[preset]
+    milestones = compute_low_param_geometric_milestones(total_steps, preset)
     return TrainingRunConfig(
         run_id=run_id,
         runs_root=runs_root,
@@ -186,6 +241,7 @@ def build_v7_config(
         orthogonal_mitosis=True,
         mitosis_every=mitosis_every,
         mitosis_step_size=int(p["mitosis_step_size"]),
+        mitosis_milestones=milestones,
         clear_consumed_shards=clear_consumed_shards,
         mitotic_ortho_coef=0.02,
         sequence_diversity_coef=0.02,
@@ -215,17 +271,17 @@ def build_v7_config(
         ornith_warmup_ratio=0.50,
         enable_dream_rsi=True,
         dream_every=10,
-        checkpoint_every=200,
-        max_keep_checkpoints=2,
-        eval_every=200,
-        sample_every=200,
+        checkpoint_every=500,
+        max_keep_checkpoints=1,
+        eval_every=250,
+        sample_every=250,
     )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Launch MCL4-COE v7-Mitotic-3B training")
     parser.add_argument("--preset", default="balanced_768", choices=sorted(V7_PRESETS))
-    parser.add_argument("--run-id", default="colab_mcl4_coe_v7_mitotic_3b")
+    parser.add_argument("--run-id", default="colab_mcl4_coe_v7_mitotic_3b_fast")
     parser.add_argument(
         "--runs-root",
         default="/content/runs" if Path("/content").is_dir() else r"X:\MCL4-COE\runs",
@@ -240,17 +296,17 @@ def main() -> None:
         "--corpora-root",
         default="/content/MCL4-COE/corpora" if Path("/content").is_dir() else r"X:\corpora",
     )
-    parser.add_argument("--total-steps", type=int, default=3800)
-    parser.add_argument("--mitosis-every", type=int, default=180)
+    parser.add_argument("--total-steps", type=int, default=5500)
+    parser.add_argument("--mitosis-every", type=int, default=1000)
     parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--micro-batch-size", type=int, default=8)
+    parser.add_argument("--micro-batch-size", type=int, default=16)
     parser.add_argument("--max-seq-len", type=int, default=1024)
     parser.add_argument("--hf-run-repo", default="mESmaC/mcl4-coe-runs")
     parser.add_argument("--no-clear-shards", action="store_true")
     parser.add_argument("--dry-run", action="store_true", help="Print exact parameter profile and exit")
     args = parser.parse_args()
 
-    profile = compute_v7_parameter_profile(args.preset)
+    profile = compute_v7_parameter_profile(args.preset, total_steps=args.total_steps)
     print(json.dumps(profile, indent=2), flush=True)
     if args.dry_run:
         return

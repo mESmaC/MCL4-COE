@@ -2199,10 +2199,13 @@ def _track_shards_complete(index_file: Path) -> bool:
         if not receipt.shards:
             return False
         base_dir = index_file.parent
+        surviving = 0
         for s in receipt.shards:
-            if not (base_dir / s["bin_file"]).is_file():
+            if (base_dir / s["bin_file"]).is_file():
+                surviving += 1
+            elif not s.get("evicted"):
                 return False
-        return True
+        return surviving > 0
     except Exception:
         return False
 

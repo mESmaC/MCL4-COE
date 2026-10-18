@@ -1758,7 +1758,7 @@ class MCL4COETrainer:
                     ]
                 cur_e = int(self.model.backbone.config.num_experts)
                 if cur_e >= 160:
-                    max_mb_cap = 4 if cur_e >= 256 else 8
+                    max_mb_cap = 2 if cur_e >= 256 else 4
                     split_mbs: list[dict[str, torch.Tensor]] = []
                     for mb in micro_batches:
                         n_rows = int(mb["input_ids"].shape[0])
@@ -1778,6 +1778,8 @@ class MCL4COETrainer:
                     or (step % max(1, int(self.config.operator_every)) == 0)
                 )
                 dec_batch = self._next_decision_batch() if run_operators else None
+                if dec_batch is not None and cur_e >= 200:
+                    dec_batch = {k: v[:2] for k, v in dec_batch.items()}
                 self.model.train()
                 self.optimizer.zero_grad(set_to_none=True)
 
@@ -1863,8 +1865,7 @@ class MCL4COETrainer:
 
                 fast_low_param_step = bool(
                     self.config.mitosis_milestones
-                    and (cur_e <= 32 or cur_e >= 256)
-                    and not run_operators
+                    and ((cur_e <= 32 and not run_operators) or cur_e >= 200)
                 )
                 step_rec = 1 if fast_low_param_step else self.config.recurrence_steps
                 step_ponder = False if fast_low_param_step else self.config.depth_ponder

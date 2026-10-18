@@ -2425,11 +2425,14 @@ def test_v7_shard_windowed_streaming_and_eviction(tmp_path) -> None:
     assert batch0["input_ids"].shape == (2, 16)
 
     # Evict consumed shards from disk (`Shard 0` has cum_blocks=2 <= cursor=2)
+    from mcl4_coe.pipeline import _track_shards_complete
+
     cleared = mix_sampler.evict_consumed_shards(delete_from_disk=True)
     assert "pretrain_lm" in cleared
     assert cleared["pretrain_lm"] == [ds.shards[0]["bin_file"]]
     assert not (track_dir / ds.shards[0]["bin_file"]).exists()
     assert (track_dir / ds.shards[-1]["bin_file"]).exists()
+    assert _track_shards_complete(receipt_path)
 
     # Continue streaming Shard 1 & Shard 2 and verify fallback if an evicted index is queried
     idx_b1 = mix_sampler.take(2)

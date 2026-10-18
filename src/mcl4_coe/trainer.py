@@ -644,6 +644,8 @@ class MCL4COETrainer:
             total_val_toks = 0
             total_val_bytes = 0
             mb_sz = max(1, min(self.config.micro_batch_size, self.config.batch_size))
+            if self.model.backbone.config.num_experts >= 200:
+                mb_sz = min(mb_sz, 4)
             max_batches = max(1, self.config.val_max_batches_per_track)
 
             for t_name, v_ds in self.val_track_datasets.items():
@@ -1329,6 +1331,10 @@ class MCL4COETrainer:
             del raw_opt
             self.model.cpu()
             self.optimizer.state.clear()
+            if hasattr(self, "controller") and self.controller is not None:
+                self.controller.model = None  # type: ignore[assignment]
+            del self.model
+            del self.optimizer
             if self.device.type == "cuda":
                 gc.collect()
                 torch.cuda.empty_cache()
@@ -1347,6 +1353,8 @@ class MCL4COETrainer:
             self.config.num_experts = new_e
             self._build_model_and_optimizer()
             self.ornith_improver = saved_ornith
+            if hasattr(self, "controller") and self.controller is not None:
+                self.controller.model = self.model
             self.model.load_state_dict(upcycled_state, strict=False)
             del upcycled_state
             with torch.no_grad():
@@ -1748,6 +1756,18 @@ class MCL4COETrainer:
                         self._slice_micro_batch_to_seq_len(mb, active_seq_len)
                         for mb in micro_batches
                     ]
+                cur_e = int(self.model.backbone.config.num_experts)
+                if cur_e >= 160:
+                    max_mb_cap = 4 if cur_e >= 256 else 8
+                    split_mbs: list[dict[str, torch.Tensor]] = []
+                    for mb in micro_batches:
+                        n_rows = int(mb["input_ids"].shape[0])
+                        if n_rows > max_mb_cap:
+                            for s_i in range(0, n_rows, max_mb_cap):
+                                split_mbs.append({k: v[s_i : s_i + max_mb_cap] for k, v in mb.items()})
+                        else:
+                            split_mbs.append(mb)
+                    micro_batches = split_mbs
                 if step < self.config.total_steps:
                     self.prefetcher.schedule(next_indices)
 
@@ -1843,7 +1863,7 @@ class MCL4COETrainer:
 
                 fast_low_param_step = bool(
                     self.config.mitosis_milestones
-                    and self.model.backbone.config.num_experts <= 32
+                    and (cur_e <= 32 or cur_e >= 256)
                     and not run_operators
                 )
                 step_rec = 1 if fast_low_param_step else self.config.recurrence_steps

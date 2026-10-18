@@ -369,13 +369,11 @@ class SparseMoE(nn.Module):
         if torch.is_grad_enabled():
             self._grouped_weight_cache = None
             w_up = (
-                torch.stack([e.up_proj.weight for e in self.experts], dim=0)
-                .to(torch.bfloat16)
+                torch.stack([e.up_proj.weight.to(torch.bfloat16) for e in self.experts], dim=0)
                 .transpose(-1, -2)
             )
             w_down = (
-                torch.stack([e.down_proj.weight for e in self.experts], dim=0)
-                .to(torch.bfloat16)
+                torch.stack([e.down_proj.weight.to(torch.bfloat16) for e in self.experts], dim=0)
                 .transpose(-1, -2)
             )
             return w_up, w_down
@@ -391,14 +389,12 @@ class SparseMoE(nn.Module):
         if cached is not None and cached[0] == key:
             return cached[1], cached[2]
         w_up = (
-            torch.stack([e.up_proj.weight for e in self.experts], dim=0)
-            .to(torch.bfloat16)
+            torch.stack([e.up_proj.weight.to(torch.bfloat16) for e in self.experts], dim=0)
             .transpose(-1, -2)
             .contiguous()
         )
         w_down = (
-            torch.stack([e.down_proj.weight for e in self.experts], dim=0)
-            .to(torch.bfloat16)
+            torch.stack([e.down_proj.weight.to(torch.bfloat16) for e in self.experts], dim=0)
             .transpose(-1, -2)
             .contiguous()
         )
@@ -643,14 +639,16 @@ class SparseMoE(nn.Module):
                 else:
                     weights, selected = routed_probs.topk(self.top_k, dim=-1)
                 weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
-                one_hot_all = F.one_hot(selected, num_classes=self.num_experts)
-                self.last_selected_mask = (
-                    one_hot_all.sum(dim=1)
-                    .detach()
-                    .to(torch.float32)
-                    .view(*x.shape[:-1], self.num_experts)
+                sel_mask_2d = x.new_zeros((flat.shape[0], self.num_experts), dtype=torch.float32)
+                sel_mask_2d.scatter_add_(
+                    1,
+                    selected,
+                    torch.ones_like(selected, dtype=torch.float32),
                 )
-                counts_int_all = one_hot_all.sum(dim=(0, 1))
+                self.last_selected_mask = sel_mask_2d.detach().view(*x.shape[:-1], self.num_experts)
+                counts_int_all = torch.bincount(
+                    selected.reshape(-1), minlength=self.num_experts
+                )
                 if valid is not None:
                     flat_valid = valid.reshape(-1)
                     f_mask = flat_valid.unsqueeze(-1)
@@ -659,8 +657,7 @@ class SparseMoE(nn.Module):
                     has_valid = (n_valid_raw > 0).float()
                     n_valid = n_valid_raw.clamp_min(1).float()
                     weights = weights * f_mask_f
-                    one_hot_valid = one_hot_all * f_mask.unsqueeze(-1).long()
-                    counts_valid = one_hot_valid.sum(dim=(0, 1)).float() / (n_valid * self.top_k)
+                    counts_valid = (sel_mask_2d * f_mask_f).sum(dim=0) / (n_valid * self.top_k)
                     mean_probs = (probabilities * f_mask_f).sum(dim=0) / n_valid
                     aux_loss = self.num_experts * (counts_valid * mean_probs).sum() * has_valid
                     z_sq = torch.logsumexp(router_logits, dim=-1).square()
@@ -1513,7 +1510,9 @@ class MCL4CEDBackbone(nn.Module):
                         if self.config.logits_scaling != 1.0:
                             l1 = l1 / float(self.config.logits_scaling)
                         p1 = F.softmax(l1, dim=-1)
-                        ent1 = -(p1 * p1.clamp_min(1e-9).log()).sum(dim=-1, keepdim=True)
+                        del l1
+                        ent1 = torch.special.entr(p1).sum(dim=-1, keepdim=True)
+                        del p1
                         gate_ent = (0.50 + 0.35 * torch.sigmoid((ent1 - 1.5) / 0.6)).to(r1.dtype)
                     blended = self.final_norm(r1 + gate_ent * (r_deep - r1))
                 else:
@@ -1525,7 +1524,9 @@ class MCL4CEDBackbone(nn.Module):
                     if self.config.logits_scaling != 1.0:
                         l1 = l1 / float(self.config.logits_scaling)
                     p1 = F.softmax(l1, dim=-1)
-                    ent1 = -(p1 * p1.clamp_min(1e-9).log()).sum(dim=-1, keepdim=True)
+                    del l1
+                    ent1 = torch.special.entr(p1).sum(dim=-1, keepdim=True)
+                    del p1
                     gate_ent = (0.50 + 0.35 * torch.sigmoid((ent1 - 1.5) / 0.6)).to(s1.dtype)
                 blended = self.final_norm(s1 + gate_ent * (s_deep - s1))
                 state = blended.masked_fill(~candidate_valid.unsqueeze(-1), 0)

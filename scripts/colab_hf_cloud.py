@@ -890,11 +890,14 @@ def run_cloud_training(
         tps = float(metrics.get("tok_per_s", metrics.get("tokens_per_sec", 0.0)))
         if "mitosis_event" in metrics:
             me = metrics["mitosis_event"]
+            cleared_str = f" | cleared_shards={me['cleared_shards']}" if me.get("cleared_shards") else ""
             print(
                 f"  [mitosis @ step {step}] action={me.get('action')} | "
                 f"experts={me.get('old_experts', me.get('num_experts'))}->{me.get('new_experts', me.get('num_experts'))} | "
-                f"pairs={me.get('mitotic_pairs')} | params={me.get('parameter_count', 0):,}"
+                f"pairs={len(me.get('mitotic_pairs', []))} | params={me.get('parameter_count', 0):,}{cleared_str}"
             )
+        elif "cleared_shards" in metrics:
+            print(f"  [shard-evict @ step {step}] cleared_shards={metrics['cleared_shards']}")
         if step == 1 or step % 10 == 0 or step == config.total_steps or "mitosis_event" in metrics:
             val_str = ""
             if "val_bpb" in metrics:

@@ -142,9 +142,17 @@ class TrainingRunConfig:
     donor_backbone_lr_scale: float = 0.08
     enable_mitosis: bool = False
     release_mitotic_pairs: bool = False
+    orthogonal_mitosis: bool = True
+    recurrent_coverage_penalty: float = 0.0
+    mitotic_ortho_coef: float = 0.0
+    sequence_diversity_coef: float = 0.0
+    dense_expert_indices: tuple[int, ...] = ()
+    dense_subset_k: int = 0
+    combine_dense_and_sparse: bool = False
     max_experts: int = 12
     mitosis_every: int = 300
     mitosis_step_size: int = 2
+    clear_consumed_shards: bool = False
     max_seq_len: int = 2048
     projection_dim: int = 32
     recurrence_steps: int = 1
@@ -187,6 +195,8 @@ class TrainingRunConfig:
             "typed_decision": 0.15,
         }
     )
+    curriculum_stages: list[dict[str, float]] | None = None
+    stage_seq_lens: tuple[int, ...] = ()
 
     # Ornith-1.0 / 1.5 Self-Scaffolding & Self-Improvement + Dream-RSI loop
     enable_ornith_rl: bool = True
@@ -261,6 +271,32 @@ def compute_mitotic_schedule(
     return pairs
 
 
+def _orthogonal_antithetic_delta(
+    weight: torch.Tensor,
+    generator: torch.Generator,
+    scale: float = 1e-3,
+    *,
+    ortho_dim: int = -1,
+    orthogonal: bool = True,
+) -> torch.Tensor:
+    """Sample a perturbation `delta` projected onto the orthogonal complement of `weight` along `ortho_dim`."""
+    w_f = weight.float()
+    std = float(w_f.std().item())
+    target_std = float(scale) * max(std, 1e-5)
+    raw = torch.randn(w_f.shape, generator=generator, dtype=torch.float32)
+    if orthogonal and w_f.shape[ortho_dim] > 1:
+        u = F.normalize(w_f, p=2.0, dim=ortho_dim, eps=1e-8)
+        proj = (raw * u).sum(dim=ortho_dim, keepdim=True) * u
+        ortho = raw - proj
+        ortho_std = float(ortho.std().item())
+        if ortho_std > 1e-8:
+            ortho = ortho * (target_std / ortho_std)
+        else:
+            ortho = raw * target_std
+        return ortho.to(weight.dtype)
+    return (raw * target_std).to(weight.dtype)
+
+
 def upcycle_state_dict_experts(
     state_dict: dict[str, torch.Tensor],
     old_num_experts: int,
@@ -269,11 +305,13 @@ def upcycle_state_dict_experts(
     expert_loads: list[float] | None = None,
     existing_pairs: list[tuple[int, int]] | None = None,
     seed: int = 42,
+    orthogonal: bool = True,
 ) -> dict[str, torch.Tensor]:
     """Upcycle a `SparseMoE` checkpoint from `old_num_experts` to `new_num_experts` via Exact-Ratio Twin-Gated Mitosis.
 
     Clones the highest-utilization parent experts into the new slots `[old_num_experts .. new_num_experts-1]`
-    with symmetric $\\pm \\delta$ antithetic perturbations ($\\|\\delta\\| = 10^{-3} \\sigma_W$) on both the
+    with symmetric $\\pm \\delta$ antithetic perturbations ($\\|\\delta\\| = 10^{-3} \\sigma_W$, Gram-Schmidt
+    orthogonalized against each parent neuron/residual vector when `orthogonal=True`) on both the
     router rows and SwiGLU FFN projections, while recording `mitotic_pairs_tensor` so `SparseMoE`
     routes only the winning twin of each mitotic pair into `topk(2)`.
     """
@@ -314,21 +352,18 @@ def upcycle_state_dict_experts(
         extra_rows = []
         for parent_e, new_e in added_pairs:
             r_p = r_weight[parent_e : parent_e + 1].clone()
-            r_std = float(r_p.float().std().item())
-            r_delta = (
-                torch.randn(r_p.shape, generator=gen, dtype=torch.float32)
-                * (1e-3 * max(r_std, 1e-5))
-            ).to(r_p.dtype)
+            r_delta = _orthogonal_antithetic_delta(
+                r_p, gen, scale=1e-3, ortho_dim=-1, orthogonal=orthogonal
+            )
             r_weight[parent_e : parent_e + 1] = r_p - r_delta
             extra_rows.append(r_p + r_delta)
-            for proj in ("up_proj.weight", "down_proj.weight"):
+            for proj, o_dim in (("up_proj.weight", -1), ("down_proj.weight", 0)):
                 p_key = f"{prefix}.experts.{parent_e}.{proj}"
                 c_key = f"{prefix}.experts.{new_e}.{proj}"
                 w_p = out[p_key]
-                std = float(w_p.float().std().item())
-                delta = (
-                    torch.randn(w_p.shape, generator=gen, dtype=torch.float32) * (1e-3 * max(std, 1e-5))
-                ).to(w_p.dtype)
+                delta = _orthogonal_antithetic_delta(
+                    w_p, gen, scale=1e-3, ortho_dim=o_dim, orthogonal=orthogonal
+                )
                 out[p_key] = w_p - delta
                 out[c_key] = w_p + delta
         out[r_key] = torch.cat([r_weight, *extra_rows], dim=0)
@@ -460,10 +495,28 @@ class MCL4COETrainer:
 
         start_w = {k: v for k, v in self.config.start_weights.items() if k in self.dataset.track_names}
         end_w = {k: v for k, v in self.config.end_weights.items() if k in self.dataset.track_names}
+        raw_stages = self.config.curriculum_stages
+        if raw_stages is None and self.config.curriculum_mode == "mitotic_staged":
+            raw_stages = [
+                {"pretrain_lm": 0.90, "uta_trace": 0.08, "typed_decision": 0.02},
+                {"pretrain_lm": 0.55, "uta_trace": 0.35, "typed_decision": 0.10},
+                {"pretrain_lm": 0.30, "uta_trace": 0.50, "typed_decision": 0.20},
+            ]
+        stage_w: tuple[dict[str, float], ...] | None = None
+        if raw_stages:
+            filtered_stages = [
+                {k: float(st.get(k, 0.01)) for k in self.dataset.track_names}
+                for st in raw_stages
+            ]
+            stage_w = tuple(filtered_stages)
+            if filtered_stages:
+                start_w = dict(filtered_stages[0])
+                end_w = dict(filtered_stages[-1])
         self.schedule = CurriculumMixtureSchedule(
             start_weights=start_w,
             end_weights=end_w,
             mode=self.config.curriculum_mode,
+            stage_weights=stage_w,
         )
         self.sampler = CurriculumMixtureSampler(
             self.dataset,
@@ -700,6 +753,12 @@ class MCL4COETrainer:
             residual_multiplier=self.config.residual_multiplier,
             logits_scaling=self.config.logits_scaling,
             preserve_residual_across_stacks=self.config.preserve_residual_across_stacks,
+            recurrent_coverage_penalty=self.config.recurrent_coverage_penalty,
+            mitotic_ortho_coef=self.config.mitotic_ortho_coef,
+            sequence_diversity_coef=self.config.sequence_diversity_coef,
+            dense_expert_indices=tuple(self.config.dense_expert_indices),
+            dense_subset_k=self.config.dense_subset_k,
+            combine_dense_and_sparse=self.config.combine_dense_and_sparse,
         )
         self.coe_cfg = COEConfig(
             projection_dim=self.config.projection_dim,
@@ -1257,6 +1316,7 @@ class MCL4COETrainer:
                 expert_loads=loads_for_split,
                 existing_pairs=existing_pairs,
                 seed=self.config.seed + step,
+                orthogonal=self.config.orthogonal_mitosis,
             )
             del cur_model_state
             saved_ornith = self.ornith_improver
@@ -1298,6 +1358,11 @@ class MCL4COETrainer:
                 new_ema[c_e] = half
             self._ema_expert_loads = new_ema
             all_pairs = self._get_model_mitotic_pairs()
+            cleared_shards = (
+                self.sampler.evict_consumed_shards(delete_from_disk=self.config.clear_consumed_shards)
+                if hasattr(self.sampler, "evict_consumed_shards")
+                else {}
+            )
             return {
                 "step": step,
                 "action": "expand",
@@ -1306,9 +1371,15 @@ class MCL4COETrainer:
                 "added_pairs": [list(p) for p in added_pairs],
                 "mitotic_pairs": [list(p) for p in all_pairs],
                 "parameter_count": parameter_count(self.model),
+                **({"cleared_shards": cleared_shards} if cleared_shards else {}),
             }
 
         min_load = float(min(loads_for_split)) if loads_for_split else 0.0
+        cleared_shards = (
+            self.sampler.evict_consumed_shards(delete_from_disk=self.config.clear_consumed_shards)
+            if hasattr(self.sampler, "evict_consumed_shards")
+            else {}
+        )
         return {
             "step": step,
             "action": "bounded_steady_state",
@@ -1316,6 +1387,7 @@ class MCL4COETrainer:
             "min_expert_load": round(min_load, 4),
             "mitotic_pairs": [list(p) for p in existing_pairs],
             "parameter_count": parameter_count(self.model),
+            **({"cleared_shards": cleared_shards} if cleared_shards else {}),
         }
 
     def load_checkpoint(self, checkpoint_path: str | Path) -> None:
@@ -1354,6 +1426,7 @@ class MCL4COETrainer:
                 expert_loads=prev_loads,
                 existing_pairs=existing_pairs,
                 seed=self.config.seed,
+                orthogonal=self.config.orthogonal_mitosis,
             )
 
         self.model.load_state_dict(model_state, strict=False)
@@ -1516,6 +1589,68 @@ class MCL4COETrainer:
             self.config.min_lr_ratio + (1.0 - self.config.min_lr_ratio) * cosine
         )
 
+    def _mitotic_stage_progress(self, step: int) -> tuple[int | None, float | None]:
+        """Return `(stage_idx, stage_progress)` when `mitotic_staged` curriculum or `curriculum_stages` is active."""
+        if self.config.curriculum_mode != "mitotic_staged" and not self.config.curriculum_stages:
+            return None, None
+        if self.config.enable_mitosis and self.config.mitosis_every > 0:
+            m_every = max(1, int(self.config.mitosis_every))
+            n_pairs = len(self._get_model_mitotic_pairs())
+            step_sz = max(1, int(self.config.mitosis_step_size))
+            stage_from_pairs = n_pairs // step_sz
+            stage_from_step = max(0, int(step) // m_every)
+            stage_idx = max(stage_from_pairs, stage_from_step)
+            stage_prog = min(1.0, max(0.0, float(int(step) % m_every) / float(m_every)))
+            return stage_idx, stage_prog
+        n_stages = len(self.schedule.stage_weights) if self.schedule.stage_weights else 3
+        u = min(1.0, max(0.0, float(step) / float(max(1, self.config.total_steps))))
+        scaled = u * max(1, n_stages - 1)
+        stage_idx = int(math.floor(scaled))
+        stage_prog = scaled - stage_idx
+        return stage_idx, stage_prog
+
+    def _active_stage_seq_len(self, stage_idx: int | None) -> int:
+        """Return the active sequence length for the current mitotic stage."""
+        stage_lens = tuple(int(x) for x in self.config.stage_seq_lens if int(x) > 0)
+        if not stage_lens and self.config.curriculum_mode == "mitotic_staged" and self.dataset.seq_len >= 2048:
+            stage_lens = (512, 1024, 2048)
+        if stage_lens:
+            idx = min(max(0, int(stage_idx or 0)), len(stage_lens) - 1)
+            return max(16, min(int(self.dataset.seq_len), int(stage_lens[idx])))
+        return int(self.dataset.seq_len)
+
+    def _slice_micro_batch_to_seq_len(
+        self, mb: dict[str, torch.Tensor], target_seq_len: int
+    ) -> dict[str, torch.Tensor]:
+        """Slice a micro-batch to `target_seq_len`, preserving valid target tokens (`labels != -100`) per row."""
+        inp = mb["input_ids"]
+        lbl = mb["labels"]
+        if inp.ndim != 2 or inp.shape[1] <= target_seq_len:
+            return mb
+        head_lbl = lbl[:, :target_seq_len]
+        if bool((head_lbl != -100).any(dim=-1).all()):
+            return {
+                "input_ids": inp[:, :target_seq_len],
+                "labels": head_lbl,
+                "track_ids": mb["track_ids"],
+            }
+        bsz, full_len = inp.shape
+        out_inp = inp[:, :target_seq_len].clone()
+        out_lbl = head_lbl.clone()
+        for r in range(bsz):
+            if not bool((out_lbl[r] != -100).any()):
+                valid_pos = torch.nonzero(lbl[r] != -100, as_tuple=False).flatten()
+                if valid_pos.numel() > 0:
+                    end_pos = min(full_len, int(valid_pos[-1].item()) + 1)
+                    start_pos = max(0, end_pos - target_seq_len)
+                    out_inp[r] = inp[r, start_pos : start_pos + target_seq_len]
+                    out_lbl[r] = lbl[r, start_pos : start_pos + target_seq_len]
+        return {
+            "input_ids": out_inp,
+            "labels": out_lbl,
+            "track_ids": mb["track_ids"],
+        }
+
     def train(self) -> dict[str, Any]:
         """Run the training loop until `total_steps` or `stop_event` is set."""
         self._write_manifest("running")
@@ -1536,7 +1671,13 @@ class MCL4COETrainer:
                 progress0 = min(1.0, max(0.0, (start_step - 1) / max(1, self.config.total_steps)))
             else:
                 progress0 = max(0.0, (start_step - 1 - base_step) / stage_steps)
-            next_indices = self.sampler.take(self.config.batch_size, progress=progress0)
+            st_idx0, st_prog0 = self._mitotic_stage_progress(start_step - 1)
+            next_indices = self.sampler.take(
+                self.config.batch_size,
+                progress=progress0,
+                stage_idx=st_idx0,
+                stage_progress=st_prog0,
+            )
             self.prefetcher.schedule(next_indices)
 
             for step in range(start_step, self.config.total_steps + 1):
@@ -1551,7 +1692,10 @@ class MCL4COETrainer:
                     progress = min(1.0, max(0.0, step / max(1, self.config.total_steps)))
                 else:
                     progress = min(1.0, max(0.0, (step - base_step) / stage_steps))
-                cur_weights = self.schedule.weights_at(progress)
+                st_idx, st_prog = self._mitotic_stage_progress(step)
+                cur_weights = self.schedule.weights_at(
+                    progress, stage_idx=st_idx, stage_progress=st_prog
+                )
                 w_dec = float(cur_weights.get("typed_decision", 0.15))
 
                 lr = self._compute_lr(step)
@@ -1559,11 +1703,27 @@ class MCL4COETrainer:
                     group["lr"] = lr * float(group.get("lr_scale", 1.0))
 
                 cur_indices = next_indices
-                quotas = self.sampler.allocate_quotas(self.config.batch_size, progress=progress)
+                quotas = self.sampler.allocate_quotas(
+                    self.config.batch_size,
+                    progress=progress,
+                    stage_idx=st_idx,
+                    stage_progress=st_prog,
+                )
                 if step < self.config.total_steps:
-                    next_indices = self.sampler.take(self.config.batch_size, progress=progress)
+                    next_indices = self.sampler.take(
+                        self.config.batch_size,
+                        progress=progress,
+                        stage_idx=st_idx,
+                        stage_progress=st_prog,
+                    )
 
                 micro_batches = self.prefetcher.get(cur_indices)
+                active_seq_len = self._active_stage_seq_len(st_idx)
+                if active_seq_len < self.dataset.seq_len:
+                    micro_batches = [
+                        self._slice_micro_batch_to_seq_len(mb, active_seq_len)
+                        for mb in micro_batches
+                    ]
                 if step < self.config.total_steps:
                     self.prefetcher.schedule(next_indices)
 
@@ -1599,13 +1759,22 @@ class MCL4COETrainer:
                     warm_continuation
                     and base_step >= int(max(1, self._parent_total_steps) * float(self.config.ornith_warmup_ratio))
                 )
-                ornith_active = (progress >= float(self.config.ornith_warmup_ratio)) or parent_reached_ornith
+                if (
+                    self.config.curriculum_mode == "mitotic_staged"
+                    and self.config.enable_mitosis
+                    and float(self.config.ornith_warmup_ratio) <= 0.0
+                ):
+                    ornith_active = bool((st_idx or 0) >= 1 or parent_reached_ornith)
+                else:
+                    ornith_active = (
+                        progress >= float(self.config.ornith_warmup_ratio)
+                    ) or parent_reached_ornith
                 run_ornith = bool(
                     self.config.enable_ornith_rl
                     and ornith_active
                     and (
                         step % max(1, self.config.ornith_every) == 0
-                        or (step == 1 and float(self.config.ornith_warmup_ratio) <= 0.0)
+                        or (step == 1 and ornith_active and float(self.config.ornith_warmup_ratio) <= 0.0)
                     )
                 )
 
@@ -1869,6 +2038,11 @@ class MCL4COETrainer:
                         sh.write(json.dumps(sample_entry, sort_keys=True) + "\n")
 
                 if step % self.config.checkpoint_every == 0 or step == self.config.total_steps:
+                    if self.config.clear_consumed_shards and hasattr(self.sampler, "evict_consumed_shards"):
+                        ckpt_cleared = self.sampler.evict_consumed_shards(delete_from_disk=True)
+                        if ckpt_cleared:
+                            record["cleared_shards"] = ckpt_cleared
+                            self.latest_metrics = record
                     self.save_checkpoint(sample_uta=sample_trace)
 
                 self._write_manifest("running")

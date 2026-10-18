@@ -17,8 +17,10 @@ Combines:
 
 from __future__ import annotations
 
-import math
+from collections.abc import Sequence
 from dataclasses import dataclass
+import math
+from typing import Any
 
 import torch
 from torch import Tensor, nn
@@ -63,8 +65,18 @@ class MCL4CEDConfig:
     residual_multiplier: float = 1.0
     logits_scaling: float = 1.0
     preserve_residual_across_stacks: bool = False
+    recurrent_coverage_penalty: float = 0.0
+    mitotic_ortho_coef: float = 0.0
+    sequence_diversity_coef: float = 0.0
+    dense_expert_indices: tuple[int, ...] = ()
+    dense_subset_k: int = 0
+    combine_dense_and_sparse: bool = False
 
     def __post_init__(self) -> None:
+        if isinstance(self.dense_expert_indices, list):
+            self.dense_expert_indices = tuple(int(i) for i in self.dense_expert_indices)
+        else:
+            self.dense_expert_indices = tuple(int(i) for i in (self.dense_expert_indices or ()))
         for name in (
             "vocab_size",
             "d_model",
@@ -85,6 +97,11 @@ class MCL4CEDConfig:
             raise ValueError("RoPE requires an even head dimension")
         if self.top_k > self.num_experts:
             raise ValueError("top_k cannot exceed num_experts")
+        if self.dense_subset_k < 0 or self.dense_subset_k > self.num_experts:
+            raise ValueError("dense_subset_k must be in [0, num_experts]")
+        for idx in self.dense_expert_indices:
+            if idx < 0 or idx >= self.num_experts:
+                raise ValueError(f"dense_expert_indices entry {idx} out of range [0, {self.num_experts})")
         if self.attention_type not in ("markov_local4", "standard"):
             raise ValueError("attention_type must be 'markov_local4' or 'standard'")
 
@@ -175,12 +192,203 @@ class SparseMoE(nn.Module):
         super().__init__()
         self.num_experts = config.num_experts
         self.top_k = config.top_k
+        self.recurrent_coverage_penalty = float(
+            getattr(config, "recurrent_coverage_penalty", 0.0)
+        )
+        self.mitotic_ortho_coef = float(getattr(config, "mitotic_ortho_coef", 0.0))
+        self.sequence_diversity_coef = float(
+            getattr(config, "sequence_diversity_coef", 0.0)
+        )
+        self.dense_expert_indices: tuple[int, ...] = tuple(
+            int(i) for i in getattr(config, "dense_expert_indices", ())
+        )
+        self.dense_subset_k: int = int(getattr(config, "dense_subset_k", 0))
+        self.combine_dense_and_sparse: bool = bool(
+            getattr(config, "combine_dense_and_sparse", False)
+        )
         self.router = nn.Linear(config.d_model, config.num_experts, bias=False)
         self.experts = nn.ModuleList(
             SwiGLUExpert(config.d_model, config.expert_hidden_dim)
             for _ in range(config.num_experts)
         )
         self.mitotic_pairs: list[tuple[int, int]] = []
+        self._mitotic_idx_cache: tuple[Any, Tensor, Tensor] | None = None
+        self._grouped_weight_cache: tuple[Any, Tensor, Tensor] | None = None
+        self.last_selected_mask: Tensor | None = None
+
+    def forward_dense_subset(
+        self,
+        x: Tensor,
+        expert_indices: Sequence[int] | Tensor,
+        *,
+        expert_weights: Tensor | None = None,
+        valid: Tensor | None = None,
+    ) -> Tensor:
+        """Execute a selected subset of `M` experts as a single fused wide-dense SwiGLU layer of width `M * d_ffn`.
+
+        Because SwiGLU is linear in `down_proj`, concatenating `up_proj` (`[M * 2 * d_ffn, d_model]`)
+        and `down_proj` (`[d_model, M * d_ffn]`) across the `M` selected experts is mathematically
+        identical to a wide dense FFN of hidden dimension `M * d_ffn` executed in just 2 contiguous GEMMs.
+        """
+        if isinstance(expert_indices, torch.Tensor):
+            idx_list = [int(i) for i in expert_indices.detach().cpu().reshape(-1).tolist()]
+        else:
+            idx_list = [int(i) for i in expert_indices]
+        if not idx_list:
+            return torch.zeros_like(x)
+        m_sub = len(idx_list)
+        flat = x.reshape(-1, x.shape[-1])
+        n_tok = flat.shape[0]
+        if n_tok == 0:
+            return torch.zeros_like(x)
+
+        can_fuse = all(
+            type(self.experts[i].up_proj) is nn.Linear
+            and type(self.experts[i].down_proj) is nn.Linear
+            for i in idx_list
+        )
+        if can_fuse:
+            up_cat = torch.cat(
+                [self.experts[i].up_proj.weight for i in idx_list], dim=0
+            ).to(flat.dtype)
+            down_cat = torch.cat(
+                [self.experts[i].down_proj.weight for i in idx_list], dim=1
+            ).to(flat.dtype)
+            up_out = F.linear(flat, up_cat).view(n_tok, m_sub, 2, -1)
+            act = F.silu(up_out[:, :, 0, :]) * up_out[:, :, 1, :]
+            if expert_weights is not None:
+                w = expert_weights.to(act.dtype)
+                if w.ndim == 1:
+                    w = w.view(1, m_sub, 1)
+                elif w.ndim == 2:
+                    w = w.reshape(-1, m_sub, 1)
+                act = act * w
+            out = F.linear(act.reshape(n_tok, -1), down_cat).view_as(x)
+        else:
+            acc = torch.zeros_like(flat)
+            for m_pos, e_idx in enumerate(idx_list):
+                e_out = self.experts[e_idx](flat)
+                if expert_weights is not None:
+                    w = expert_weights.to(e_out.dtype)
+                    if w.ndim == 1:
+                        e_out = e_out * w[m_pos]
+                    else:
+                        e_out = e_out * w.reshape(-1, m_sub)[:, m_pos : m_pos + 1]
+                acc = acc + e_out
+            out = acc.view_as(x)
+
+        if valid is not None:
+            out = out.masked_fill(~valid.unsqueeze(-1), 0)
+        return out
+
+    def compute_mitotic_ortho_loss(self, device: torch.device) -> Tensor:
+        """Compute chordal orthogonality loss `max(0, sqrt(2) - ||u_p - u_c||_2) / sqrt(2)` across mitotic pairs.
+
+        Unlike `cos^2(theta)` whose gradient vanishes as `O(theta)` at birth (`theta ~ 1e-3`),
+        the chordal distance to orthogonality (`||u_p - u_c||_2 = sqrt(2)` when `u_p ⊥ u_c`)
+        maintains unit-strength repulsive gradients along the Gram-Schmidt split direction right from birth.
+        """
+        pair_tensors = self._get_mitotic_pair_tensors(device)
+        if pair_tensors is None:
+            return torch.zeros((), dtype=torch.float32, device=device)
+        p_t, c_t = pair_tensors
+        sqrt2 = 1.4142135623730951
+        pair_losses: list[Tensor] = []
+        for p_idx, c_idx in zip(p_t.tolist(), c_t.tolist()):
+            ep = self.experts[p_idx]
+            ec = self.experts[c_idx]
+            up_p = F.normalize(ep.up_proj.weight.float(), p=2.0, dim=-1, eps=1e-8)
+            up_c = F.normalize(ec.up_proj.weight.float(), p=2.0, dim=-1, eps=1e-8)
+            chord_up = (up_p - up_c).norm(p=2.0, dim=-1, keepdim=False)
+            loss_up = ((sqrt2 - chord_up) / sqrt2).clamp_min(0.0).mean()
+
+            dn_p = F.normalize(ep.down_proj.weight.float(), p=2.0, dim=0, eps=1e-8)
+            dn_c = F.normalize(ec.down_proj.weight.float(), p=2.0, dim=0, eps=1e-8)
+            chord_dn = (dn_p - dn_c).norm(p=2.0, dim=0, keepdim=False)
+            loss_dn = ((sqrt2 - chord_dn) / sqrt2).clamp_min(0.0).mean()
+
+            pair_losses.append(0.5 * (loss_up + loss_dn))
+        if not pair_losses:
+            return torch.zeros((), dtype=torch.float32, device=device)
+        return torch.stack(pair_losses).mean()
+
+    def _compute_sequence_diversity_loss(
+        self,
+        probabilities_bt: Tensor,
+        valid: Tensor | None,
+    ) -> Tensor:
+        """Penalize within-sequence expert collapse so tokens across a sequence recruit diverse experts."""
+        if probabilities_bt.ndim != 3 or probabilities_bt.shape[1] <= 1:
+            return probabilities_bt.new_zeros(())
+        if valid is not None:
+            v_bt = valid.to(probabilities_bt.dtype).unsqueeze(-1)
+            denom = v_bt.sum(dim=1).clamp_min(1.0)
+            seq_probs = (probabilities_bt * v_bt).sum(dim=1) / denom
+            row_valid = (valid.any(dim=1)).to(probabilities_bt.dtype)
+            n_rows = row_valid.sum().clamp_min(1.0)
+            collision = (self.num_experts * seq_probs.square().sum(dim=-1) - 1.0).clamp_min(0.0)
+            return (collision * row_valid).sum() / n_rows
+        seq_probs = probabilities_bt.mean(dim=1)
+        return (self.num_experts * seq_probs.square().sum(dim=-1).mean() - 1.0).clamp_min(0.0)
+
+    def _get_mitotic_pair_tensors(self, device: torch.device) -> tuple[Tensor, Tensor] | None:
+        if not self.mitotic_pairs:
+            return None
+        key = (tuple(self.mitotic_pairs), self.num_experts, device)
+        cached = self._mitotic_idx_cache
+        if cached is not None and cached[0] == key:
+            return cached[1], cached[2]
+        valid_pairs = [
+            (p_idx, c_idx)
+            for p_idx, c_idx in self.mitotic_pairs
+            if 0 <= p_idx < self.num_experts and 0 <= c_idx < self.num_experts and p_idx != c_idx
+        ]
+        if not valid_pairs:
+            return None
+        p_t = torch.tensor([p for p, _ in valid_pairs], dtype=torch.long, device=device)
+        c_t = torch.tensor([c for _, c in valid_pairs], dtype=torch.long, device=device)
+        self._mitotic_idx_cache = (key, p_t, c_t)
+        return p_t, c_t
+
+    def _get_grouped_expert_weights(self, device: torch.device) -> tuple[Tensor, Tensor]:
+        if torch.is_grad_enabled():
+            self._grouped_weight_cache = None
+            w_up = (
+                torch.stack([e.up_proj.weight for e in self.experts], dim=0)
+                .to(torch.bfloat16)
+                .transpose(-1, -2)
+            )
+            w_down = (
+                torch.stack([e.down_proj.weight for e in self.experts], dim=0)
+                .to(torch.bfloat16)
+                .transpose(-1, -2)
+            )
+            return w_up, w_down
+        key = (
+            len(self.experts),
+            device,
+            tuple(e.up_proj.weight._version for e in self.experts),
+            tuple(e.down_proj.weight._version for e in self.experts),
+            self.experts[0].up_proj.weight.data_ptr(),
+            self.experts[-1].up_proj.weight.data_ptr(),
+        )
+        cached = self._grouped_weight_cache
+        if cached is not None and cached[0] == key:
+            return cached[1], cached[2]
+        w_up = (
+            torch.stack([e.up_proj.weight for e in self.experts], dim=0)
+            .to(torch.bfloat16)
+            .transpose(-1, -2)
+            .contiguous()
+        )
+        w_down = (
+            torch.stack([e.down_proj.weight for e in self.experts], dim=0)
+            .to(torch.bfloat16)
+            .transpose(-1, -2)
+            .contiguous()
+        )
+        self._grouped_weight_cache = (key, w_up, w_down)
+        return w_up, w_down
 
     def _save_to_state_dict(self, destination: dict, prefix: str, keep_vars: bool) -> None:
         super()._save_to_state_dict(destination, prefix, keep_vars)
@@ -199,6 +407,8 @@ class SparseMoE(nn.Module):
         unexpected_keys: list[str],
         error_msgs: list[str],
     ) -> None:
+        self._mitotic_idx_cache = None
+        self._grouped_weight_cache = None
         mp_key = prefix + "mitotic_pairs_tensor"
         if mp_key in state_dict:
             mp_val = state_dict.pop(mp_key)
@@ -219,9 +429,161 @@ class SparseMoE(nn.Module):
         )
 
     def forward(
-        self, x: Tensor, valid: Tensor | None = None
+        self,
+        x: Tensor,
+        valid: Tensor | None = None,
+        *,
+        prior_expert_mask: Tensor | None = None,
+        dense_expert_indices: Sequence[int] | Tensor | None = None,
+        dense_subset_k: int | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         flat = x.reshape(-1, x.shape[-1])
+        eff_dense_indices: list[int]
+        if dense_expert_indices is not None:
+            if isinstance(dense_expert_indices, torch.Tensor):
+                eff_dense_indices = [
+                    int(i) for i in dense_expert_indices.detach().cpu().reshape(-1).tolist()
+                ]
+            else:
+                eff_dense_indices = [int(i) for i in dense_expert_indices]
+        else:
+            eff_dense_indices = list(self.dense_expert_indices)
+        eff_dense_k = int(self.dense_subset_k if dense_subset_k is None else dense_subset_k)
+
+        if eff_dense_indices or eff_dense_k > 0:
+            flat_valid = (
+                torch.ones(flat.shape[0], dtype=torch.bool, device=x.device)
+                if valid is None
+                else valid.reshape(-1)
+            )
+            active_indices = flat_valid.nonzero(as_tuple=False).squeeze(-1)
+            if active_indices.numel() == 0:
+                zero = x.new_zeros((), dtype=torch.float32)
+                loads = x.new_zeros(self.num_experts, dtype=torch.float32)
+                self.last_selected_mask = x.new_zeros(
+                    (*x.shape[:-1], self.num_experts), dtype=torch.float32
+                )
+                return torch.zeros_like(x), zero, zero, loads
+
+            active_x = flat.index_select(0, active_indices)
+            with torch.autocast(device_type=x.device.type, enabled=False):
+                router_logits = F.linear(active_x.float(), self.router.weight.float())
+                probabilities = F.softmax(router_logits, dim=-1)
+                routed_probs = probabilities
+                pair_tensors = self._get_mitotic_pair_tensors(x.device)
+                if pair_tensors is not None:
+                    p_t, c_t = pair_tensors
+                    routed_probs = probabilities.clone()
+                    p_wins = router_logits.index_select(1, p_t) >= router_logits.index_select(
+                        1, c_t
+                    )
+                    routed_probs[:, c_t] = torch.where(
+                        p_wins,
+                        torch.zeros_like(p_wins, dtype=routed_probs.dtype),
+                        probabilities.index_select(1, c_t),
+                    )
+                    routed_probs[:, p_t] = torch.where(
+                        p_wins,
+                        probabilities.index_select(1, p_t),
+                        torch.zeros_like(p_wins, dtype=routed_probs.dtype),
+                    )
+                selection_probs = routed_probs
+                if prior_expert_mask is not None and self.recurrent_coverage_penalty > 0.0:
+                    flat_prior = (
+                        prior_expert_mask.reshape(-1, self.num_experts)
+                        .index_select(0, active_indices)
+                        .to(routed_probs.dtype)
+                    )
+                    selection_probs = routed_probs * (
+                        1.0 - self.recurrent_coverage_penalty * flat_prior
+                    ).clamp_min(0.05)
+
+                if eff_dense_indices:
+                    chosen_list = [i for i in eff_dense_indices if 0 <= i < self.num_experts]
+                    chosen_t = torch.tensor(chosen_list, dtype=torch.long, device=x.device)
+                else:
+                    k_coal = min(max(1, eff_dense_k), self.num_experts)
+                    pooled_scores = selection_probs.mean(dim=0)
+                    _, chosen_t = pooled_scores.topk(k_coal, dim=-1)
+                    chosen_list = [int(i) for i in chosen_t.detach().cpu().tolist()]
+
+                dense_weights = probabilities.index_select(1, chosen_t)
+                dense_weights = dense_weights / dense_weights.sum(dim=-1, keepdim=True).clamp_min(
+                    1e-9
+                )
+                sel_mask_active = x.new_zeros(
+                    (active_x.shape[0], self.num_experts), dtype=torch.float32
+                )
+                sel_mask_active[:, chosen_t] = 1.0
+                full_sel_mask = x.new_zeros((flat.shape[0], self.num_experts), dtype=torch.float32)
+                full_sel_mask.index_copy_(0, active_indices, sel_mask_active)
+                self.last_selected_mask = full_sel_mask.view(*x.shape[:-1], self.num_experts)
+
+                counts = sel_mask_active.sum(dim=0) / max(1, active_x.shape[0] * len(chosen_list))
+                aux_loss = self.num_experts * (counts * probabilities.mean(dim=0)).sum()
+                router_z_loss = torch.logsumexp(router_logits, dim=-1).square().mean()
+                if self.sequence_diversity_coef > 0.0 and x.ndim == 3 and x.shape[1] > 1:
+                    full_probs = probabilities.new_zeros((flat.shape[0], self.num_experts))
+                    full_probs.index_copy_(0, active_indices, probabilities)
+                    probs_bt = full_probs.view(x.shape[0], x.shape[1], self.num_experts)
+                    aux_loss = aux_loss + self.sequence_diversity_coef * (
+                        self._compute_sequence_diversity_loss(probs_bt, valid)
+                    )
+                if self.mitotic_ortho_coef > 0.0 and self.mitotic_pairs:
+                    aux_loss = aux_loss + self.mitotic_ortho_coef * (
+                        self.compute_mitotic_ortho_loss(x.device)
+                    )
+
+            active_out = self.forward_dense_subset(
+                active_x, chosen_list, expert_weights=dense_weights
+            )
+            if self.combine_dense_and_sparse and len(chosen_list) < self.num_experts:
+                rem_k = min(self.top_k, self.num_experts - len(chosen_list))
+                if rem_k > 0:
+                    with torch.autocast(device_type=x.device.type, enabled=False):
+                        dense_mass = (
+                            probabilities.index_select(1, chosen_t)
+                            .sum(dim=-1, keepdim=True)
+                            .clamp_min(1e-9)
+                        )
+                        rem_probs = selection_probs.clone()
+                        rem_probs[:, chosen_t] = -1.0
+                        _, rem_sel = rem_probs.topk(rem_k, dim=-1)
+                        rem_raw_w = routed_probs.gather(-1, rem_sel)
+                        rem_mass = rem_raw_w.sum(dim=-1, keepdim=True).clamp_min(0.0)
+                        rem_w = rem_raw_w / rem_mass.clamp_min(1e-9)
+                        total_mass = (dense_mass + rem_mass).clamp_min(1e-9)
+                        alpha_dense = (dense_mass / total_mass).to(active_x.dtype)
+                        alpha_rem = (rem_mass / total_mass).to(active_x.dtype)
+                        rem_oh = F.one_hot(rem_sel, num_classes=self.num_experts)
+                        rem_counts_int = rem_oh.sum(dim=(0, 1))
+                    flat_rem = rem_sel.reshape(-1)
+                    perm_r = flat_rem.argsort(stable=True)
+                    sorted_tok_r = torch.div(perm_r, rem_k, rounding_mode="floor")
+                    sorted_w_r = rem_w.reshape(-1).index_select(0, perm_r).unsqueeze(-1)
+                    gathered_r = active_x.index_select(0, sorted_tok_r)
+                    chunks_r = gathered_r.split(rem_counts_int.tolist(), dim=0)
+                    outs_r = [
+                        expert(chunk)
+                        for expert, chunk in zip(self.experts, chunks_r)
+                        if chunk.shape[0] > 0
+                    ]
+                    if outs_r:
+                        all_r = torch.cat(outs_r, dim=0)
+                        weighted_r = (all_r * sorted_w_r.to(all_r.dtype)).to(active_x.dtype)
+                        unpermed_r = torch.empty_like(weighted_r)
+                        unpermed_r.index_copy_(0, perm_r, weighted_r)
+                        sparse_add = (
+                            unpermed_r.view(active_x.shape[0], rem_k, active_x.shape[-1])
+                            .sum(dim=1)
+                            .to(active_x.dtype)
+                        )
+                        active_out = alpha_dense * active_out + alpha_rem * sparse_add
+
+            output = torch.zeros_like(flat)
+            output.index_copy_(0, active_indices, active_out)
+            return output.view_as(x), aux_loss, router_z_loss, counts.detach()
+
         use_grouped = (
             flat.is_cuda
             and hasattr(torch, "_grouped_mm")
@@ -237,38 +599,42 @@ class SparseMoE(nn.Module):
                 router_logits = F.linear(flat.float(), self.router.weight.float())
                 probabilities = F.softmax(router_logits, dim=-1)
                 routed_probs = probabilities
-                if self.mitotic_pairs:
-                    valid_pairs = [
-                        (p_idx, c_idx)
-                        for p_idx, c_idx in self.mitotic_pairs
-                        if 0 <= p_idx < self.num_experts
-                        and 0 <= c_idx < self.num_experts
-                        and p_idx != c_idx
-                    ]
-                    if valid_pairs:
-                        routed_probs = probabilities.clone()
-                        p_t = torch.tensor(
-                            [p for p, _ in valid_pairs], dtype=torch.long, device=x.device
-                        )
-                        c_t = torch.tensor(
-                            [c for _, c in valid_pairs], dtype=torch.long, device=x.device
-                        )
-                        p_wins = router_logits.index_select(1, p_t) >= router_logits.index_select(
-                            1, c_t
-                        )
-                        routed_probs[:, c_t] = torch.where(
-                            p_wins,
-                            torch.zeros_like(p_wins, dtype=routed_probs.dtype),
-                            probabilities.index_select(1, c_t),
-                        )
-                        routed_probs[:, p_t] = torch.where(
-                            p_wins,
-                            probabilities.index_select(1, p_t),
-                            torch.zeros_like(p_wins, dtype=routed_probs.dtype),
-                        )
-                weights, selected = routed_probs.topk(self.top_k, dim=-1)
-                weights = weights / weights.sum(dim=-1, keepdim=True)
+                pair_tensors = self._get_mitotic_pair_tensors(x.device)
+                if pair_tensors is not None:
+                    p_t, c_t = pair_tensors
+                    routed_probs = probabilities.clone()
+                    p_wins = router_logits.index_select(1, p_t) >= router_logits.index_select(
+                        1, c_t
+                    )
+                    routed_probs[:, c_t] = torch.where(
+                        p_wins,
+                        torch.zeros_like(p_wins, dtype=routed_probs.dtype),
+                        probabilities.index_select(1, c_t),
+                    )
+                    routed_probs[:, p_t] = torch.where(
+                        p_wins,
+                        probabilities.index_select(1, p_t),
+                        torch.zeros_like(p_wins, dtype=routed_probs.dtype),
+                    )
+                if prior_expert_mask is not None and self.recurrent_coverage_penalty > 0.0:
+                    flat_prior = prior_expert_mask.reshape(-1, self.num_experts).to(
+                        routed_probs.dtype
+                    )
+                    selection_probs = routed_probs * (
+                        1.0 - self.recurrent_coverage_penalty * flat_prior
+                    ).clamp_min(0.05)
+                    _, selected = selection_probs.topk(self.top_k, dim=-1)
+                    weights = routed_probs.gather(-1, selected)
+                else:
+                    weights, selected = routed_probs.topk(self.top_k, dim=-1)
+                weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
                 one_hot_all = F.one_hot(selected, num_classes=self.num_experts)
+                self.last_selected_mask = (
+                    one_hot_all.sum(dim=1)
+                    .detach()
+                    .to(torch.float32)
+                    .view(*x.shape[:-1], self.num_experts)
+                )
                 counts_int_all = one_hot_all.sum(dim=(0, 1))
                 if valid is not None:
                     flat_valid = valid.reshape(-1)
@@ -290,6 +656,16 @@ class SparseMoE(nn.Module):
                     aux_loss = self.num_experts * (counts * probabilities.mean(dim=0)).sum()
                     router_z_loss = torch.logsumexp(router_logits, dim=-1).square().mean()
 
+                if self.sequence_diversity_coef > 0.0 and x.ndim == 3 and x.shape[1] > 1:
+                    probs_bt = probabilities.view(x.shape[0], x.shape[1], self.num_experts)
+                    aux_loss = aux_loss + self.sequence_diversity_coef * (
+                        self._compute_sequence_diversity_loss(probs_bt, valid)
+                    )
+                if self.mitotic_ortho_coef > 0.0 and self.mitotic_pairs:
+                    aux_loss = aux_loss + self.mitotic_ortho_coef * (
+                        self.compute_mitotic_ortho_loss(x.device)
+                    )
+
             flat_selected = selected.reshape(-1)
             perm = flat_selected.argsort(stable=True)
             sorted_tokens = torch.div(perm, self.top_k, rounding_mode="floor")
@@ -297,16 +673,7 @@ class SparseMoE(nn.Module):
             gathered_x = flat.index_select(0, sorted_tokens)
             offs = counts_int_all.to(torch.int32).cumsum(0, dtype=torch.int32)
             gx_bf = gathered_x.to(torch.bfloat16)
-            w_up = (
-                torch.stack([e.up_proj.weight for e in self.experts], dim=0)
-                .to(torch.bfloat16)
-                .transpose(-1, -2)
-            )
-            w_down = (
-                torch.stack([e.down_proj.weight for e in self.experts], dim=0)
-                .to(torch.bfloat16)
-                .transpose(-1, -2)
-            )
+            w_up, w_down = self._get_grouped_expert_weights(x.device)
             gate, val = torch._grouped_mm(gx_bf, w_up, offs=offs).chunk(2, dim=-1)
             all_expert_out = torch._grouped_mm(F.silu(gate) * val, w_down, offs=offs)
             weighted = (all_expert_out * sorted_weights.to(all_expert_out.dtype)).to(flat.dtype)
@@ -328,6 +695,9 @@ class SparseMoE(nn.Module):
         if active_indices.numel() == 0:
             zero = x.new_zeros((), dtype=torch.float32)
             loads = x.new_zeros(self.num_experts, dtype=torch.float32)
+            self.last_selected_mask = x.new_zeros(
+                (*x.shape[:-1], self.num_experts), dtype=torch.float32
+            )
             return torch.zeros_like(x), zero, zero, loads
 
         active_x = flat.index_select(0, active_indices)
@@ -335,34 +705,56 @@ class SparseMoE(nn.Module):
             router_logits = F.linear(active_x.float(), self.router.weight.float())
             probabilities = F.softmax(router_logits, dim=-1)
             routed_probs = probabilities
-            if self.mitotic_pairs:
-                valid_pairs = [
-                    (p_idx, c_idx)
-                    for p_idx, c_idx in self.mitotic_pairs
-                    if 0 <= p_idx < self.num_experts and 0 <= c_idx < self.num_experts and p_idx != c_idx
-                ]
-                if valid_pairs:
-                    routed_probs = probabilities.clone()
-                    p_t = torch.tensor([p for p, _ in valid_pairs], dtype=torch.long, device=x.device)
-                    c_t = torch.tensor([c for _, c in valid_pairs], dtype=torch.long, device=x.device)
-                    p_wins = router_logits.index_select(1, p_t) >= router_logits.index_select(1, c_t)
-                    routed_probs[:, c_t] = torch.where(
-                        p_wins,
-                        torch.zeros_like(p_wins, dtype=routed_probs.dtype),
-                        probabilities.index_select(1, c_t),
-                    )
-                    routed_probs[:, p_t] = torch.where(
-                        p_wins,
-                        probabilities.index_select(1, p_t),
-                        torch.zeros_like(p_wins, dtype=routed_probs.dtype),
-                    )
-            weights, selected = routed_probs.topk(self.top_k, dim=-1)
-            weights = weights / weights.sum(dim=-1, keepdim=True)
+            pair_tensors = self._get_mitotic_pair_tensors(x.device)
+            if pair_tensors is not None:
+                p_t, c_t = pair_tensors
+                routed_probs = probabilities.clone()
+                p_wins = router_logits.index_select(1, p_t) >= router_logits.index_select(1, c_t)
+                routed_probs[:, c_t] = torch.where(
+                    p_wins,
+                    torch.zeros_like(p_wins, dtype=routed_probs.dtype),
+                    probabilities.index_select(1, c_t),
+                )
+                routed_probs[:, p_t] = torch.where(
+                    p_wins,
+                    probabilities.index_select(1, p_t),
+                    torch.zeros_like(p_wins, dtype=routed_probs.dtype),
+                )
+            if prior_expert_mask is not None and self.recurrent_coverage_penalty > 0.0:
+                flat_prior = (
+                    prior_expert_mask.reshape(-1, self.num_experts)
+                    .index_select(0, active_indices)
+                    .to(routed_probs.dtype)
+                )
+                selection_probs = routed_probs * (
+                    1.0 - self.recurrent_coverage_penalty * flat_prior
+                ).clamp_min(0.05)
+                _, selected = selection_probs.topk(self.top_k, dim=-1)
+                weights = routed_probs.gather(-1, selected)
+            else:
+                weights, selected = routed_probs.topk(self.top_k, dim=-1)
+            weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
             one_hot_sel = F.one_hot(selected, num_classes=self.num_experts)
+            full_sel_mask = x.new_zeros((flat.shape[0], self.num_experts), dtype=torch.float32)
+            full_sel_mask.index_copy_(
+                0, active_indices, one_hot_sel.sum(dim=1).detach().to(torch.float32)
+            )
+            self.last_selected_mask = full_sel_mask.view(*x.shape[:-1], self.num_experts)
             counts_int = one_hot_sel.sum(dim=(0, 1))
             counts = counts_int.float() / max(1, selected.numel())
             aux_loss = self.num_experts * (counts * probabilities.mean(dim=0)).sum()
             router_z_loss = torch.logsumexp(router_logits, dim=-1).square().mean()
+            if self.sequence_diversity_coef > 0.0 and x.ndim == 3 and x.shape[1] > 1:
+                full_probs = probabilities.new_zeros((flat.shape[0], self.num_experts))
+                full_probs.index_copy_(0, active_indices, probabilities)
+                probs_bt = full_probs.view(x.shape[0], x.shape[1], self.num_experts)
+                aux_loss = aux_loss + self.sequence_diversity_coef * (
+                    self._compute_sequence_diversity_loss(probs_bt, valid)
+                )
+            if self.mitotic_ortho_coef > 0.0 and self.mitotic_pairs:
+                aux_loss = aux_loss + self.mitotic_ortho_coef * (
+                    self.compute_mitotic_ortho_loss(x.device)
+                )
 
         flat_selected = selected.reshape(-1)
         perm = flat_selected.argsort(stable=True)
@@ -396,6 +788,18 @@ class SparseMoE(nn.Module):
         return output.view_as(x), aux_loss, router_z_loss, counts.detach()
 
 
+def _is_all_valid(valid: Tensor) -> bool:
+    cached = getattr(valid, "_all_valid", None)
+    if cached is not None:
+        return bool(cached)
+    res = bool(valid.all())
+    try:
+        setattr(valid, "_all_valid", res)
+    except Exception:
+        pass
+    return res
+
+
 class LocalAttentionBlock(nn.Module):
     """Causal or bidirectional self-attention supporting both MCL4 and standard SDPA."""
 
@@ -424,6 +828,8 @@ class LocalAttentionBlock(nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.markov_router: MarkovLocal4Router | None = None
         self.markov_gate: nn.Parameter | None = None
+        self._rope_cache: tuple[Any, Tensor, Tensor] | None = None
+        self._markov_gate_cache: tuple[Any, bool] | None = None
         if config.attention_type == "markov_local4":
             self.markov_router = MarkovLocal4Router(
                 config.d_model,
@@ -456,9 +862,32 @@ class LocalAttentionBlock(nn.Module):
             )
         )
 
+    def _get_rope_cos_sin(self, n: int, device: torch.device, dtype: torch.dtype) -> tuple[Tensor, Tensor]:
+        key = (n, device, dtype, self.inv_freq.dtype, self.inv_freq.data_ptr())
+        cached = self._rope_cache
+        if cached is not None and cached[0] == key:
+            return cached[1], cached[2]
+        positions = torch.arange(n, device=device, dtype=torch.float32)
+        inv_freq = self._get_inv_freq(device)
+        angles = positions[:, None] * inv_freq[None, :]
+        cos, sin = angles.cos().to(dtype), angles.sin().to(dtype)
+        self._rope_cache = (key, cos, sin)
+        return cos, sin
+
+    def _is_markov_gate_active(self) -> bool:
+        if self.markov_gate is None:
+            return False
+        key = (self.markov_gate._version, self.markov_gate.data_ptr())
+        cached = self._markov_gate_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        active = float(self.markov_gate.detach().abs().item()) > 1e-6
+        self._markov_gate_cache = (key, active)
+        return active
+
     def _sdpa_attend(self, q: Tensor, k: Tensor, v: Tensor, valid: Tensor, *, causal: bool) -> Tensor:
         b, _, n, _ = q.shape
-        if causal and bool(valid.all()):
+        if causal and _is_all_valid(valid):
             return F.scaled_dot_product_attention(
                 q,
                 k,
@@ -489,10 +918,7 @@ class LocalAttentionBlock(nn.Module):
         q, k, v = (part.transpose(1, 2) for part in qkv.unbind(dim=2))
         if self.use_qk_norm:
             q, k = self.q_norm(q), self.k_norm(k)
-        positions = torch.arange(n, device=x_norm.device, dtype=torch.float32)
-        inv_freq = self._get_inv_freq(x_norm.device)
-        angles = positions[:, None] * inv_freq[None, :]
-        cos, sin = angles.cos().to(q.dtype), angles.sin().to(q.dtype)
+        cos, sin = self._get_rope_cos_sin(n, x_norm.device, q.dtype)
         q, k = self._apply_rope(q, cos, sin), self._apply_rope(k, cos, sin)
 
         if self.markov_router is not None and self.markov_gate is not None:
@@ -500,7 +926,7 @@ class LocalAttentionBlock(nn.Module):
             if (
                 self.training
                 or torch.is_grad_enabled()
-                or float(self.markov_gate.detach().abs().item()) > 1e-6
+                or self._is_markov_gate_active()
             ):
                 markov_attended = self.markov_router(
                     q,
@@ -615,6 +1041,7 @@ class CEDDecoderLayer(nn.Module):
             config.rope_theta ** (torch.arange(0, self.head_dim, 2).float() / self.head_dim)
         )
         self.register_buffer("inv_freq", inv_freq, persistent=False)
+        self._rope_cache: dict[Any, tuple[Tensor, Tensor]] = {}
 
         self.moe_norm = RMSNorm(config.d_model, eps=config.rms_norm_eps)
         self.moe = SparseMoE(config)
@@ -636,6 +1063,27 @@ class CEDDecoderLayer(nn.Module):
             )
         )
 
+    def _get_rope_cos_sin(
+        self, n: int, n_prefix: int, device: torch.device, dtype: torch.dtype
+    ) -> tuple[Tensor, Tensor]:
+        key = (n, int(n_prefix), device, dtype, self.inv_freq.dtype, self.inv_freq.data_ptr())
+        cached = self._rope_cache.get(key)
+        if cached is not None:
+            return cached
+        if n_prefix > 0:
+            positions = (
+                torch.arange(n, device=device, dtype=torch.float32) - float(max(0, int(n_prefix)))
+            ).clamp_min(0.0)
+        else:
+            positions = torch.arange(n, device=device, dtype=torch.float32)
+        inv_freq = self._get_inv_freq(device)
+        angles = positions[:, None] * inv_freq[None, :]
+        cos, sin = angles.cos().to(dtype), angles.sin().to(dtype)
+        if len(self._rope_cache) > 16:
+            self._rope_cache.clear()
+        self._rope_cache[key] = (cos, sin)
+        return cos, sin
+
     def project_global_kv(
         self,
         encoded_state: Tensor,
@@ -649,13 +1097,7 @@ class CEDDecoderLayer(nn.Module):
         )
         k_global, v_global = (part.transpose(1, 2).contiguous() for part in kv.unbind(dim=2))
         k_normed = self.global_k_norm(k_global)
-        positions = (
-            torch.arange(t_state, device=encoded_state.device, dtype=torch.float32)
-            - float(max(0, int(n_prefix)))
-        ).clamp_min(0.0)
-        inv_freq = self._get_inv_freq(encoded_state.device)
-        angles = positions[:, None] * inv_freq[None, :]
-        cos, sin = angles.cos().to(k_normed.dtype), angles.sin().to(k_normed.dtype)
+        cos, sin = self._get_rope_cos_sin(t_state, int(n_prefix), encoded_state.device, k_normed.dtype)
         return self._apply_rope(k_normed, cos, sin), v_global
 
     def _cross_attend(
@@ -672,10 +1114,7 @@ class CEDDecoderLayer(nn.Module):
         r, t_cand, width = q_norm.shape
         q = self.global_q_proj(q_norm).view(r, t_cand, self.n_heads, self.head_dim).transpose(1, 2)
         q = self.global_q_norm(q)
-        positions = torch.arange(t_cand, device=q_norm.device, dtype=torch.float32)
-        inv_freq = self._get_inv_freq(q_norm.device)
-        angles = positions[:, None] * inv_freq[None, :]
-        cos, sin = angles.cos().to(q.dtype), angles.sin().to(q.dtype)
+        cos, sin = self._get_rope_cos_sin(t_cand, 0, q_norm.device, q.dtype)
         q = self._apply_rope(q, cos, sin)
         if owner_rows is not None:
             k = k_global.index_select(0, owner_rows)
@@ -685,7 +1124,7 @@ class CEDDecoderLayer(nn.Module):
             k, v, s_valid = k_global, v_global, state_valid
 
         t_state = k.shape[2]
-        if causal_cross and causal_cross_mask is None and t_cand == t_state and bool(s_valid.all()):
+        if causal_cross and causal_cross_mask is None and t_cand == t_state and _is_all_valid(s_valid):
             context = F.scaled_dot_product_attention(
                 q,
                 k,
@@ -735,6 +1174,7 @@ class CEDDecoderLayer(nn.Module):
         causal_local: bool = True,
         causal_cross_mask: Tensor | None = None,
         causal_cross: bool = False,
+        prior_expert_mask: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         if self.ple is not None:
             x = self.ple(x, original_inputs, token_ids=token_ids, valid=cand_valid)
@@ -756,7 +1196,9 @@ class CEDDecoderLayer(nn.Module):
             + res_scale * self.dropout(local_out)
             + res_scale * self.dropout(global_out)
         ).masked_fill(~cand_valid.unsqueeze(-1), 0)
-        moe_out, aux_loss, z_loss, load = self.moe(self.moe_norm(x), valid=cand_valid)
+        moe_out, aux_loss, z_loss, load = self.moe(
+            self.moe_norm(x), valid=cand_valid, prior_expert_mask=prior_expert_mask
+        )
         x = (x + res_scale * self.dropout(moe_out)).masked_fill(~cand_valid.unsqueeze(-1), 0)
         return x, aux_loss, z_loss, load
 
@@ -828,6 +1270,29 @@ class MCL4CEDBackbone(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=1.0 / math.sqrt(module.embedding_dim))
 
+    def set_dense_expert_subset(
+        self,
+        expert_indices: Sequence[int] | None = None,
+        *,
+        dense_subset_k: int | None = None,
+        combine_dense_and_sparse: bool | None = None,
+    ) -> None:
+        """Configure all MoE layers to execute an explicit or dynamically routed subset of experts densely."""
+        if expert_indices is not None:
+            clean_idx = tuple(int(i) for i in expert_indices)
+            self.config.dense_expert_indices = clean_idx
+        if dense_subset_k is not None:
+            self.config.dense_subset_k = int(dense_subset_k)
+        if combine_dense_and_sparse is not None:
+            self.config.combine_dense_and_sparse = bool(combine_dense_and_sparse)
+        for layer in list(self.encoder_layers) + list(self.decoder_layers):
+            if expert_indices is not None:
+                layer.moe.dense_expert_indices = self.config.dense_expert_indices
+            if dense_subset_k is not None:
+                layer.moe.dense_subset_k = self.config.dense_subset_k
+            if combine_dense_and_sparse is not None:
+                layer.moe.combine_dense_and_sparse = self.config.combine_dense_and_sparse
+
     def encode_state(
         self,
         state_ids: Tensor,
@@ -840,8 +1305,14 @@ class MCL4CEDBackbone(nn.Module):
             raise ValueError("state_ids must have nonempty shape [batch, seq_len]")
         if state_valid is None:
             state_valid = state_ids != self.config.pad_id
-        if not state_valid.any(dim=-1).all():
-            raise ValueError("Every state row must have at least one valid token")
+            if self.config.pad_id < 0:
+                try:
+                    setattr(state_valid, "_all_valid", True)
+                except Exception:
+                    pass
+        if getattr(state_valid, "_all_valid", None) is not True:
+            if not state_valid.any(dim=-1).all():
+                raise ValueError("Every state row must have at least one valid token")
         x = self.token_embedding(state_ids.long())
         if self.config.embedding_multiplier != 1.0:
             x = x * float(self.config.embedding_multiplier)
@@ -850,6 +1321,7 @@ class MCL4CEDBackbone(nn.Module):
         aux_losses, z_losses, loads = [], [], []
         for layer in self.encoder_layers:
             x, aux, z, load = layer(x, original_inputs, state_ids, state_valid, causal=causal)
+            layer.moe.last_selected_mask = None
             aux_losses.append(aux)
             z_losses.append(z)
             loads.append(load)
@@ -885,8 +1357,14 @@ class MCL4CEDBackbone(nn.Module):
             raise ValueError("candidate_ids must have nonempty shape [rows, seq_len]")
         if candidate_valid is None:
             candidate_valid = candidate_ids != self.config.pad_id
-        if not candidate_valid.any(dim=-1).all():
-            raise ValueError("Every decoded candidate row must have at least one valid token")
+            if self.config.pad_id < 0:
+                try:
+                    setattr(candidate_valid, "_all_valid", True)
+                except Exception:
+                    pass
+        if getattr(candidate_valid, "_all_valid", None) is not True:
+            if not candidate_valid.any(dim=-1).all():
+                raise ValueError("Every decoded candidate row must have at least one valid token")
 
         original_inputs = self.token_embedding(candidate_ids.long())
         if self.config.embedding_multiplier != 1.0:
@@ -921,6 +1399,7 @@ class MCL4CEDBackbone(nn.Module):
         aux_losses = [candidate_encoded.aux_loss]
         z_losses = [candidate_encoded.router_z_loss]
         loads = [candidate_encoded.expert_load]
+        visited_expert_masks: list[Tensor | None] = [None] * len(self.decoder_layers)
         for step in range(recurrence_steps):
             x = anchor if step == 0 else self.feedback(anchor, state, valid=candidate_valid)
             step_kv_cache = global_kv_cache
@@ -949,7 +1428,9 @@ class MCL4CEDBackbone(nn.Module):
                     layer.project_global_kv(kv_state, n_prefix=n_prefix_kv)
                     for layer in self.decoder_layers
                 ]
-            for layer, (k_global, v_global) in zip(self.decoder_layers, step_kv_cache):
+            for l_idx, (layer, (k_global, v_global)) in enumerate(
+                zip(self.decoder_layers, step_kv_cache)
+            ):
                 x, aux, z, load = layer(
                     x,
                     original_inputs,
@@ -962,7 +1443,15 @@ class MCL4CEDBackbone(nn.Module):
                     causal_local=causal_local,
                     causal_cross_mask=causal_cross_mask,
                     causal_cross=causal_cross,
+                    prior_expert_mask=visited_expert_masks[l_idx],
                 )
+                if recurrence_steps > 1 and layer.moe.last_selected_mask is not None:
+                    cur_mask = layer.moe.last_selected_mask
+                    prev_mask = visited_expert_masks[l_idx]
+                    visited_expert_masks[l_idx] = (
+                        cur_mask if prev_mask is None else (prev_mask + cur_mask).clamp_max(1.0)
+                    )
+                layer.moe.last_selected_mask = None
                 aux_losses.append(aux)
                 z_losses.append(z)
                 loads.append(load.unsqueeze(0))
@@ -1053,7 +1542,12 @@ class MCL4CEDBackbone(nn.Module):
     ) -> BackboneOutput:
         """Causal full-sequence pass through lower encoder and upper CED decoder."""
         valid = input_ids != self.config.pad_id
-        if not valid.any(dim=-1).all():
+        if self.config.pad_id < 0:
+            try:
+                setattr(valid, "_all_valid", True)
+            except Exception:
+                pass
+        elif not valid.any(dim=-1).all():
             # Fallback if an entire block is pad_id: treat index 0 as valid for numeric safety.
             valid = valid.clone()
             valid[:, 0] = True
@@ -1193,7 +1687,8 @@ class MCL4CEDBackbone(nn.Module):
             logits = logits / float(self.config.logits_scaling)
         ce_loss, loss = None, None
         if targets is not None:
-            valid_tok_count = targets.ne(-100).sum().clamp_min(1)
+            valid_mask = targets.ne(-100)
+            valid_tok_count = valid_mask.sum().clamp_min(1)
             ce_sum = F.cross_entropy(
                 logits.float().reshape(-1, self.config.vocab_size),
                 targets.reshape(-1),
@@ -1207,19 +1702,20 @@ class MCL4CEDBackbone(nn.Module):
                 + self.config.router_z_loss_coef * encoded.router_z_loss
             )
             if deep_supervision_weight > 0.0 and len(encoded.step_states) > 1:
-                step_ces: list[Tensor] = []
-                for s_r in encoded.step_states:
-                    l_r = self.lm_head(s_r)
-                    if self.config.logits_scaling != 1.0:
-                        l_r = l_r / float(self.config.logits_scaling)
-                    s_sum = F.cross_entropy(
-                        l_r.float().reshape(-1, self.config.vocab_size),
-                        targets.reshape(-1),
-                        ignore_index=-100,
-                        reduction="sum",
-                    )
-                    step_ces.append(s_sum / valid_tok_count)
-                loss = loss + float(deep_supervision_weight) * torch.stack(step_ces).mean()
+                valid_targets = targets[valid_mask]
+                if valid_targets.numel() > 0:
+                    step_ces: list[Tensor] = []
+                    for s_r in encoded.step_states:
+                        l_r = self.lm_head(s_r[valid_mask])
+                        if self.config.logits_scaling != 1.0:
+                            l_r = l_r / float(self.config.logits_scaling)
+                        s_sum = F.cross_entropy(
+                            l_r.float(),
+                            valid_targets,
+                            reduction="sum",
+                        )
+                        step_ces.append(s_sum / valid_tok_count)
+                    loss = loss + float(deep_supervision_weight) * torch.stack(step_ces).mean()
         return CausalLMOutput(
             logits=logits,
             loss=loss,
@@ -1229,3 +1725,70 @@ class MCL4CEDBackbone(nn.Module):
             expert_load=encoded.expert_load,
             step_states=encoded.step_states,
         )
+
+    def forward_windowless(
+        self,
+        input_ids: Tensor,
+        targets: Tensor | None = None,
+        *,
+        pager: Any = None,
+        active_window_len: int | None = None,
+        page_size: int = 512,
+        top_k_pages: int = 4,
+        working_state_ids: Tensor | None = None,
+        recurrence_steps: int = 1,
+        latent_prior: Tensor | None = None,
+        latent_prior_scale: float = 0.0,
+        recurrent_kv: bool = False,
+        depth_ponder: bool = False,
+        deep_supervision_weight: float = 0.0,
+    ) -> CausalLMOutput:
+        """Windowless demand-paged forward pass for arbitrary-length ($1\\text{M}\\to\\infty$) streams.
+
+        Automatically pages out prefix tokens exceeding ``active_window_len`` into an
+        ``InfiniteContextPager`` (compressed 4.2x via TurboQuant with local RoPE ``[0..page_size]``),
+        retrieves the pinned ``WorkingStateLedger`` + top-$B$ relevant pages into a position-invariant
+        ``gist_state`` prefix, and runs the active tail within bounded ``[0..active_window_len]`` RoPE.
+        """
+        if targets is not None and targets.shape != input_ids.shape:
+            raise ValueError("targets must match input_ids shape [batch, seq_len]")
+        eff_window = (
+            int(active_window_len)
+            if active_window_len is not None and int(active_window_len) > 0
+            else min(int(self.config.max_seq_len), max(int(page_size) * 2, 1024))
+        )
+        if pager is None:
+            from .context_memory import InfiniteContextPager
+
+            pager = InfiniteContextPager(
+                page_size=int(page_size),
+                top_k_pages=int(top_k_pages),
+            )
+        if working_state_ids is not None:
+            pager.update_working_state(self, working_state_ids)
+
+        total_len = int(input_ids.shape[1])
+        if total_len > eff_window:
+            prefix_len = total_len - eff_window
+            prefix_ids = input_ids[:, :prefix_len]
+            active_ids = input_ids[:, prefix_len:]
+            active_targets = targets[:, prefix_len:] if targets is not None else None
+            pager.ingest_tokens(self, prefix_ids)
+        else:
+            active_ids = input_ids
+            active_targets = targets
+
+        gist_state = pager.build_gist_state(self, active_ids, top_k=int(top_k_pages))
+        return self.forward(
+            active_ids,
+            active_targets,
+            recurrence_steps=recurrence_steps,
+            latent_prior=latent_prior,
+            latent_prior_scale=latent_prior_scale,
+            recurrent_kv=recurrent_kv,
+            depth_ponder=depth_ponder,
+            gist_state=gist_state,
+            prior_start_pos=0,
+            deep_supervision_weight=deep_supervision_weight,
+        )
+

@@ -374,16 +374,49 @@ class TokenBlockDataset(Dataset):
 
 
 class EpochBlockSampler:
-    """Deterministic full-epoch block shuffle with resumable cursor."""
+    """Deterministic full-epoch (or shard-windowed) block shuffle with resumable cursor."""
 
-    def __init__(self, num_blocks: int, seed: int = 42) -> None:
+    def __init__(
+        self,
+        num_blocks: int,
+        seed: int = 42,
+        *,
+        shard_boundaries: list[int] | tuple[int, ...] | None = None,
+    ) -> None:
         if num_blocks < 1:
             raise ValueError("num_blocks must be positive")
         self.num_blocks = num_blocks
         self.seed = seed
         self.epoch = 0
         self.cursor = 0
+        self.shard_boundaries: tuple[int, ...] | None = (
+            tuple(int(b) for b in shard_boundaries if int(b) > 0)
+            if shard_boundaries
+            else None
+        )
         self._order: torch.Tensor | None = None
+
+    def _build_order(self) -> torch.Tensor:
+        if self.shard_boundaries and len(self.shard_boundaries) > 1:
+            chunks: list[torch.Tensor] = []
+            start_b = 0
+            for s_idx, end_b in enumerate(self.shard_boundaries):
+                clamped_end = min(self.num_blocks, int(end_b))
+                span = clamped_end - start_b
+                if span > 0:
+                    gen = torch.Generator(device="cpu").manual_seed(
+                        self.seed + self.epoch * 10007 + s_idx
+                    )
+                    chunks.append(start_b + torch.randperm(span, generator=gen))
+                start_b = clamped_end
+            if start_b < self.num_blocks:
+                gen = torch.Generator(device="cpu").manual_seed(
+                    self.seed + self.epoch * 10007 + len(self.shard_boundaries)
+                )
+                chunks.append(start_b + torch.randperm(self.num_blocks - start_b, generator=gen))
+            return torch.cat(chunks, dim=0) if chunks else torch.arange(self.num_blocks)
+        generator = torch.Generator(device="cpu").manual_seed(self.seed + self.epoch)
+        return torch.randperm(self.num_blocks, generator=generator)
 
     def peek(self, count: int) -> torch.Tensor:
         if count < 1:
@@ -391,8 +424,7 @@ class EpochBlockSampler:
         if self.cursor >= self.num_blocks:
             return torch.empty(0, dtype=torch.int64)
         if self._order is None:
-            generator = torch.Generator(device="cpu").manual_seed(self.seed + self.epoch)
-            self._order = torch.randperm(self.num_blocks, generator=generator)
+            self._order = self._build_order()
         end = min(self.cursor + count, self.num_blocks)
         return self._order[self.cursor : end]
 

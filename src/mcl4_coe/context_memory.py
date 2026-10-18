@@ -3043,3 +3043,431 @@ def synthesize_repository_uta_traces(
     return episodes
 
 
+# ---------------------------------------------------------------------------
+# Tier 5: Windowless 1M+ Demand-Paged Context & Zero-Forgetting Working Ledger
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class WorkingStateLedger:
+    """Zero-forgetting pinned working-state ledger permanently anchored in `CED` `n_prefix` slot 0.
+
+    Stores the model's current high-level objective, active plan step, and verified key-value
+    invariants/symbols. Only re-encodes when modified (`_dirty = True`), and its compressed
+    `EncodedState` is prepended to `gist_state` on every forward pass so the model physically
+    cannot forget what it is working on even after millions of streamed tokens.
+    """
+
+    objective: str = ""
+    active_plan_step: str = ""
+    active_step: str = ""
+    pinned_facts: dict[str, str] = field(default_factory=dict)
+    _cached_compressed: CompressedEncodedState | None = field(default=None, repr=False)
+    _dirty: bool = field(default=True, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.active_step and not self.active_plan_step:
+            self.active_plan_step = self.active_step
+        elif self.active_plan_step and not self.active_step:
+            self.active_step = self.active_plan_step
+
+    @property
+    def compressed_state(self) -> CompressedEncodedState | None:
+        return self._cached_compressed
+
+    def update(
+        self,
+        *,
+        objective: str | None = None,
+        active_plan_step: str | None = None,
+        active_step: str | None = None,
+        facts: dict[str, str] | None = None,
+    ) -> None:
+        if objective is not None and objective != self.objective:
+            self.objective = objective
+            self._dirty = True
+        step_val = active_plan_step if active_plan_step is not None else active_step
+        if step_val is not None and step_val != self.active_plan_step:
+            self.active_plan_step = step_val
+            self.active_step = step_val
+            self._dirty = True
+        if facts:
+            for k, v in facts.items():
+                if self.pinned_facts.get(k) != v:
+                    self.pinned_facts[str(k)] = str(v)
+                    self._dirty = True
+
+    def is_empty(self) -> bool:
+        return (
+            not (self.objective.strip() or self.active_plan_step.strip() or self.pinned_facts)
+            and self._cached_compressed is None
+        )
+
+    def to_text(self) -> str:
+        parts: list[str] = []
+        if self.objective.strip():
+            parts.append(f"[OBJECTIVE] {self.objective.strip()}")
+        if self.active_plan_step.strip():
+            parts.append(f"[STEP] {self.active_plan_step.strip()}")
+        if self.pinned_facts:
+            fact_str = "; ".join(f"{k}={v}" for k, v in sorted(self.pinned_facts.items()))
+            parts.append(f"[INVARIANTS] {fact_str}")
+        return " | ".join(parts)
+
+    def format_ledger_text(self) -> str:
+        return self.to_text()
+
+    @torch.no_grad()
+    def encode_from_tokens(
+        self,
+        backbone: MCL4CEDBackbone,
+        token_ids: Tensor,
+        *,
+        seed: int = 42,
+    ) -> EncodedState:
+        device = backbone.token_embedding.weight.device
+        inp = token_ids.to(device=device, dtype=torch.long)
+        if inp.ndim == 1:
+            inp = inp.unsqueeze(0)
+        elif inp.shape[0] > 1:
+            inp = inp[:1]
+        val = inp != backbone.config.pad_id
+        if not val.any():
+            val[:, 0] = True
+        enc = backbone.encode_state(inp, val, causal=False)
+        self._cached_compressed = compress_encoded_state(enc, seed=seed)
+        self._dirty = False
+        return enc
+
+    def get_encoded_state(
+        self,
+        backbone: MCL4CEDBackbone,
+        *,
+        max_ledger_tokens: int = 256,
+        seed: int = 42,
+    ) -> EncodedState | None:
+        if self.is_empty():
+            return None
+        device = backbone.token_embedding.weight.device
+        if not self._dirty and self._cached_compressed is not None:
+            dec = self._cached_compressed.decompress()
+            return EncodedState(
+                hidden=dec.hidden.to(device=device, dtype=backbone.token_embedding.weight.dtype),
+                valid=dec.valid.to(device=device),
+                aux_loss=dec.aux_loss.to(device=device),
+                router_z_loss=dec.router_z_loss.to(device=device),
+                expert_load=dec.expert_load.to(device=device),
+            )
+        tok = get_tokenizer(backbone.config.vocab_size)
+        ids = tok.encode(self.to_text())[: max(8, int(max_ledger_tokens))]
+        if not ids:
+            return None
+        inp = torch.tensor([ids], dtype=torch.long, device=device)
+        return self.encode_from_tokens(backbone, inp, seed=seed)
+
+
+@dataclass
+class PagedMemoryEntry:
+    """Single demand-paged context page stored in `InfiniteContextPager`."""
+
+    page_id: int
+    token_span: tuple[int, int]
+    compressed_state: CompressedEncodedState
+    landmark_keys: CompressedKV
+    source_tag: str = ""
+    sha256: str = ""
+
+
+class InfiniteContextPager:
+    """Demand-paged windowless context manager for $1\\text{M}\\to\\infty$ effective context length.
+
+    Maintains:
+    1. A `WorkingStateLedger` permanently pinned in `CED` `n_prefix` slot 0 (zero-forgetting task state).
+    2. An unbounded table of `TurboQuant`-compressed `PagedMemoryEntry` pages (`page_size` tokens each,
+       encoded with local RoPE `[0 .. page_size]` so positional embeddings never go out of distribution).
+    3. Multi-landmark `TurboQuant` QJL inner-product routing (`retrieve_top_k_pages`) that scores
+       thousands of pages in a single vectorized matmul and decompresses ONLY the top-`B` relevant pages
+       into position-invariant `CED` cross-attention (`n_prefix`), preventing softmax entropy dilution.
+    """
+
+    def __init__(
+        self,
+        *,
+        page_size: int = 512,
+        landmarks_per_page: int = 4,
+        top_k_pages: int = 4,
+        working_state: WorkingStateLedger | None = None,
+        seed: int = 42,
+    ) -> None:
+        if page_size < 4:
+            raise ValueError("page_size must be >= 4")
+        if landmarks_per_page < 1:
+            raise ValueError("landmarks_per_page must be >= 1")
+        if top_k_pages < 1:
+            raise ValueError("top_k_pages must be >= 1")
+        self.page_size = int(page_size)
+        self.landmarks_per_page = int(landmarks_per_page)
+        self.top_k_pages = int(top_k_pages)
+        self.seed = int(seed)
+        self.ledger = working_state if working_state is not None else WorkingStateLedger()
+        self.working_state = self.ledger
+        self.pages: list[PagedMemoryEntry] = []
+        self._sha_to_page_id: dict[str, int] = {}
+        self.total_ingested_tokens: int = 0
+
+    @property
+    def num_pages(self) -> int:
+        return len(self.pages)
+
+    @property
+    def total_compressed_bytes(self) -> int:
+        tot = sum(
+            p.compressed_state.compressed_bytes + p.landmark_keys.packed_logical_bytes
+            for p in self.pages
+        )
+        if self.ledger._cached_compressed is not None:
+            tot += self.ledger._cached_compressed.compressed_bytes
+        return tot
+
+    @property
+    def total_uncompressed_bytes(self) -> int:
+        tot = sum(p.compressed_state.uncompressed_bytes for p in self.pages)
+        if self.ledger._cached_compressed is not None:
+            tot += self.ledger._cached_compressed.uncompressed_bytes
+        return tot
+
+    @torch.no_grad()
+    def update_working_state(
+        self,
+        backbone: MCL4CEDBackbone,
+        ledger_tokens: Tensor | None = None,
+        *,
+        objective: str | None = None,
+        active_step: str | None = None,
+        facts: dict[str, str] | None = None,
+    ) -> EncodedState | None:
+        """Update and compress the pinned `WorkingStateLedger`."""
+        if objective is not None or active_step is not None or facts is not None:
+            self.ledger.update(objective=objective, active_step=active_step, facts=facts)
+        if ledger_tokens is not None:
+            return self.ledger.encode_from_tokens(backbone, ledger_tokens, seed=self.seed)
+        return self.ledger.get_encoded_state(backbone, seed=self.seed)
+
+    def _compute_page_landmarks(self, hidden: Tensor, valid: Tensor) -> Tensor:
+        """Extract `G = landmarks_per_page` multi-resolution landmark vectors `[B, G, D]` from a page `[B, L, D]`."""
+        bsz, seq_len, dim = hidden.shape
+        g = min(self.landmarks_per_page, seq_len)
+        v_f = valid.to(hidden.dtype).unsqueeze(-1)
+        masked_h = hidden * v_f
+        landmarks: list[Tensor] = []
+        boundaries = torch.linspace(0, seq_len, steps=g + 1, device=hidden.device).long()
+        for idx in range(g):
+            s = int(boundaries[idx].item())
+            e = max(s + 1, int(boundaries[idx + 1].item()))
+            sub_h = masked_h[:, s:e, :]
+            sub_v = v_f[:, s:e, :].sum(dim=1).clamp_min(1.0)
+            landmarks.append(sub_h.sum(dim=1) / sub_v)
+        while len(landmarks) < self.landmarks_per_page:
+            landmarks.append(landmarks[-1])
+        return F.normalize(torch.stack(landmarks, dim=1).float(), p=2.0, dim=-1).to(hidden.dtype)
+
+    @torch.no_grad()
+    def ingest_tokens(
+        self,
+        backbone: MCL4CEDBackbone,
+        token_ids: Tensor | Sequence[int],
+        *,
+        source_tag: str = "",
+        deduplicate: bool = True,
+    ) -> list[int]:
+        """Slice `token_ids` into `page_size` pages, encode with local RoPE `[0..page_size]`, and store compressed."""
+        device = backbone.token_embedding.weight.device
+        if isinstance(token_ids, torch.Tensor):
+            if token_ids.ndim >= 2:
+                flat_ids = token_ids[0].detach().reshape(-1).to(device=device, dtype=torch.long)
+            else:
+                flat_ids = token_ids.detach().reshape(-1).to(device=device, dtype=torch.long)
+        else:
+            flat_ids = torch.tensor(list(token_ids), dtype=torch.long, device=device)
+
+        n_tok = int(flat_ids.numel())
+        if n_tok == 0:
+            return []
+
+        added_page_ids: list[int] = []
+        for start in range(0, n_tok, self.page_size):
+            end = min(n_tok, start + self.page_size)
+            chunk = flat_ids[start:end]
+            raw_bytes = chunk.detach().cpu().numpy().tobytes()
+            digest = hashlib.sha256(raw_bytes).hexdigest()[:24]
+            if deduplicate and digest in self._sha_to_page_id:
+                added_page_ids.append(self._sha_to_page_id[digest])
+                continue
+
+            chunk_2d = chunk.unsqueeze(0)
+            valid_2d = chunk_2d != backbone.config.pad_id
+            if not valid_2d.any():
+                valid_2d[:, 0] = True
+            enc = backbone.encode_state(chunk_2d, valid_2d, causal=True)
+            landmarks = self._compute_page_landmarks(enc.hidden, enc.valid)
+            comp_state = compress_encoded_state(enc, seed=self.seed + len(self.pages))
+            comp_landmarks = turboquant_compress(landmarks, seed=self.seed)
+
+            pid = len(self.pages)
+            span = (self.total_ingested_tokens + start, self.total_ingested_tokens + end)
+            entry = PagedMemoryEntry(
+                page_id=pid,
+                token_span=span,
+                compressed_state=comp_state,
+                landmark_keys=comp_landmarks,
+                source_tag=source_tag or f"page_{pid:05d}",
+                sha256=digest,
+            )
+            self.pages.append(entry)
+            self._sha_to_page_id[digest] = pid
+            added_page_ids.append(pid)
+
+        self.total_ingested_tokens += n_tok
+        return added_page_ids
+
+    @torch.no_grad()
+    def _resolve_query_hidden(
+        self,
+        backbone_or_query: Any,
+        query: Tensor | None = None,
+        query_valid: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor | None]:
+        if isinstance(backbone_or_query, torch.Tensor):
+            q_hid = backbone_or_query
+            return q_hid, query_valid
+        backbone = backbone_or_query
+        assert query is not None
+        if query.ndim == 2 and query.dtype in (torch.long, torch.int64, torch.int32):
+            val = query != backbone.config.pad_id if query_valid is None else query_valid
+            if not val.any(dim=-1).all():
+                val = val.clone()
+                val[:, 0] = True
+            enc = backbone.encode_state(query, val, causal=True)
+            return enc.hidden, enc.valid
+        return query, query_valid
+
+    @torch.no_grad()
+    def retrieve_top_k_pages(
+        self,
+        backbone_or_query: Any,
+        query_or_valid: Tensor | None = None,
+        query_valid: Tensor | None = None,
+        *,
+        top_k: int | None = None,
+        always_include_recent: int = 1,
+    ) -> list[int]:
+        """Score all compressed pages via `turboquant_inner_product` and return top-`k` page IDs in chronological order."""
+        if not self.pages:
+            return []
+        k_req = min(len(self.pages), max(1, int(top_k if top_k is not None else self.top_k_pages)))
+        if len(self.pages) <= k_req:
+            return [p.page_id for p in self.pages]
+
+        if isinstance(backbone_or_query, torch.Tensor):
+            query_hidden = backbone_or_query
+            q_val = query_or_valid
+        else:
+            query_hidden, q_val = self._resolve_query_hidden(
+                backbone_or_query, query_or_valid, query_valid
+            )
+
+        if q_val is not None:
+            v_f = q_val.to(query_hidden.dtype).unsqueeze(-1)
+            q_mean = (query_hidden * v_f).sum(dim=1) / v_f.sum(dim=1).clamp_min(1.0)
+            q_tail = query_hidden[:, -min(64, query_hidden.shape[1]) :, :].mean(dim=1)
+        else:
+            q_mean = query_hidden.mean(dim=1)
+            q_tail = query_hidden[:, -min(64, query_hidden.shape[1]) :, :].mean(dim=1)
+
+        q_vecs = F.normalize(
+            torch.stack([q_mean.mean(dim=0), q_tail.mean(dim=0)], dim=0).float(),
+            p=2.0,
+            dim=-1,
+        )  # [2, D]
+
+        page_scores: list[tuple[float, int]] = []
+        n_recent = max(0, min(int(always_include_recent), k_req - 1))
+        recent_set = {p.page_id for p in self.pages[-n_recent:]} if n_recent > 0 else set()
+
+        for entry in self.pages:
+            if entry.page_id in recent_set:
+                continue
+            sim = turboquant_inner_product(
+                q_vecs.unsqueeze(0), entry.landmark_keys
+            )  # [1, 2, G]
+            score = float(sim.max().item())
+            page_scores.append((score, entry.page_id))
+
+        page_scores.sort(key=lambda item: item[0], reverse=True)
+        chosen = [pid for _, pid in page_scores[: k_req - len(recent_set)]] + list(recent_set)
+        return sorted(set(chosen))
+
+    @torch.no_grad()
+    def build_gist_state(
+        self,
+        backbone: MCL4CEDBackbone,
+        query: Tensor,
+        query_valid: Tensor | None = None,
+        *,
+        top_k: int | None = None,
+    ) -> EncodedState | None:
+        """Assemble `[WorkingStateLedger (Pinned) || Top-B Demand-Paged Pages]` as a single position-invariant `EncodedState`."""
+        query_hidden, q_val = self._resolve_query_hidden(backbone, query, query_valid)
+        device = query_hidden.device
+        dtype = query_hidden.dtype
+        bsz = int(query_hidden.shape[0])
+
+        chunks_h: list[Tensor] = []
+        chunks_v: list[Tensor] = []
+        aux_list: list[Tensor] = []
+        z_list: list[Tensor] = []
+        loads: list[Tensor] = []
+
+        pinned_enc = self.ledger.get_encoded_state(backbone, seed=self.seed)
+        if pinned_enc is not None:
+            ph = pinned_enc.hidden.to(device=device, dtype=dtype)
+            pv = pinned_enc.valid.to(device=device, dtype=torch.bool)
+            if ph.shape[0] == 1 and bsz > 1:
+                ph = ph.expand(bsz, -1, -1)
+                pv = pv.expand(bsz, -1)
+            chunks_h.append(ph)
+            chunks_v.append(pv)
+            aux_list.append(pinned_enc.aux_loss.to(device=device))
+            z_list.append(pinned_enc.router_z_loss.to(device=device))
+            loads.append(pinned_enc.expert_load.to(device=device))
+
+        selected_pids = self.retrieve_top_k_pages(
+            query_hidden, q_val, top_k=top_k
+        )
+        for pid in selected_pids:
+            dec = self.pages[pid].compressed_state.decompress()
+            dh = dec.hidden.to(device=device, dtype=dtype)
+            dv = dec.valid.to(device=device, dtype=torch.bool)
+            if dh.shape[0] == 1 and bsz > 1:
+                dh = dh.expand(bsz, -1, -1)
+                dv = dv.expand(bsz, -1)
+            chunks_h.append(dh)
+            chunks_v.append(dv)
+            aux_list.append(dec.aux_loss.to(device=device))
+            z_list.append(dec.router_z_loss.to(device=device))
+            loads.append(dec.expert_load.to(device=device))
+
+        if not chunks_h:
+            return None
+
+        return EncodedState(
+            hidden=torch.cat(chunks_h, dim=1),
+            valid=torch.cat(chunks_v, dim=1),
+            aux_loss=torch.stack(aux_list).mean(),
+            router_z_loss=torch.stack(z_list).mean(),
+            expert_load=torch.stack(loads).mean(dim=0),
+        )
+
+
+
+

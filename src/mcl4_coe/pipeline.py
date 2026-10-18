@@ -1454,14 +1454,71 @@ class ShardedTokenBlockDataset(Dataset):
 
         ds = self._datasets[shard_idx]
         if ds is None:
+            shard_path = self._shard_paths[shard_idx]
+            if not shard_path.is_file():
+                # If an early shard was evicted after consumption, fall back to the nearest surviving shard on disk
+                fallback_idx = next(
+                    (i for i in range(shard_idx + 1, len(self._shard_paths)) if self._shard_paths[i].is_file()),
+                    next(
+                        (i for i in range(len(self._shard_paths) - 1, -1, -1) if self._shard_paths[i].is_file()),
+                        None,
+                    ),
+                )
+                if fallback_idx is None:
+                    raise FileNotFoundError(f"All shard .bin files for {self.index_path} have been evicted")
+                return self._get_shard_dataset(fallback_idx)
             shard_dtype = str(self.shards[shard_idx].get("dtype", self.receipt.dtype))
             ds = TokenBlockDataset(
-                self._shard_paths[shard_idx],
+                shard_path,
                 seq_len=self.seq_len,
                 dtype=shard_dtype,
             )
             self._datasets[shard_idx] = ds
         return ds
+
+    def evict_consumed_shards(
+        self,
+        consumed_block_cursor: int,
+        *,
+        delete_from_disk: bool = False,
+    ) -> list[str]:
+        """Release memory (and optionally unlink `.bin` files) for all shards with `cum_blocks <= consumed_block_cursor`.
+
+        Always retains at least the final shard on disk so the track always has a valid backing `.bin` file.
+        """
+        cursor = int(consumed_block_cursor)
+        if cursor <= 0 or len(self.shards) <= 1:
+            return []
+        evicted_files: list[str] = []
+        receipt_dirty = False
+        for s_idx in range(len(self.shards) - 1):
+            if int(self._cum_blocks[s_idx]) <= cursor:
+                ds = self._datasets[s_idx]
+                if ds is not None:
+                    setattr(ds, "_tokens", None)
+                    self._datasets[s_idx] = None
+                bin_name = str(self.shards[s_idx].get("bin_file", f"shard_{s_idx:05d}.bin"))
+                shard_path = self._shard_paths[s_idx]
+                if delete_from_disk:
+                    if shard_path.is_file():
+                        try:
+                            shard_path.unlink(missing_ok=True)
+                            evicted_files.append(bin_name)
+                        except OSError:
+                            pass
+                    if not self.shards[s_idx].get("evicted"):
+                        self.shards[s_idx]["evicted"] = True
+                        receipt_dirty = True
+                else:
+                    if not self.shards[s_idx].get("evicted_mem"):
+                        self.shards[s_idx]["evicted_mem"] = True
+                        evicted_files.append(bin_name)
+        if receipt_dirty:
+            try:
+                _atomic_write_json(self.index_path, self.receipt.to_dict())
+            except OSError:
+                pass
+        return evicted_files
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         idx = operator.index(index)
@@ -1489,7 +1546,8 @@ class ShardedTokenBlockDataset(Dataset):
         for s_id in np.unique(shard_ids):
             mask = np.nonzero(shard_ids == s_id)[0]
             ds = self._get_shard_dataset(int(s_id))
-            sub_batch = ds.batch(local_indices[mask], pin_memory=False)
+            safe_local = np.mod(local_indices[mask], max(1, len(ds)))
+            sub_batch = ds.batch(safe_local, pin_memory=False)
             pos = torch.from_numpy(mask).long()
             inputs[pos] = sub_batch["input_ids"]
             labels[pos] = sub_batch["labels"]
@@ -1711,11 +1769,12 @@ class MultiTrackMixtureDataset(Dataset):
 
 @dataclass(frozen=True)
 class CurriculumMixtureSchedule:
-    """Declarative mixture schedule across tracks (`start_weights -> end_weights`)."""
+    """Declarative mixture schedule across tracks (`start_weights -> end_weights` or multi-stage `stage_weights`)."""
 
     start_weights: dict[str, float]
     end_weights: dict[str, float] | None = None
-    mode: str = "cosine"  # "constant", "linear", or "cosine"
+    mode: str = "cosine"  # "constant", "linear", "cosine", or "mitotic_staged"
+    stage_weights: tuple[dict[str, float], ...] | None = None
 
     def __post_init__(self) -> None:
         if not self.start_weights or any(v < 0.0 for v in self.start_weights.values()):
@@ -1727,25 +1786,72 @@ class CurriculumMixtureSchedule:
                 raise ValueError("end_weights must have the exact same track keys as start_weights")
             if any(v < 0.0 for v in self.end_weights.values()) or sum(self.end_weights.values()) <= 0.0:
                 raise ValueError("end_weights must be non-negative with positive sum")
-        if self.mode not in ("constant", "linear", "cosine"):
-            raise ValueError("mode must be 'constant', 'linear', or 'cosine'")
+        if self.stage_weights is not None:
+            clean_stages = tuple(dict(s) for s in self.stage_weights if s)
+            object.__setattr__(self, "stage_weights", clean_stages)
+            for st in clean_stages:
+                if set(st.keys()) != set(self.start_weights.keys()):
+                    raise ValueError("Each entry in stage_weights must match start_weights keys")
+                if any(v < 0.0 for v in st.values()) or sum(st.values()) <= 0.0:
+                    raise ValueError("Each entry in stage_weights must be non-negative with positive sum")
+        if self.mode not in ("constant", "linear", "cosine", "mitotic_staged"):
+            raise ValueError("mode must be 'constant', 'linear', 'cosine', or 'mitotic_staged'")
 
-    def weights_at(self, progress: float = 0.0) -> dict[str, float]:
-        """Return normalized track weights summing to `1.0` at training progress $u \\in [0, 1]$."""
+    @staticmethod
+    def _normalize_map(w: dict[str, float]) -> dict[str, float]:
+        tot = sum(w.values())
+        return {k: v / tot for k, v in w.items()}
+
+    def weights_at(
+        self,
+        progress: float = 0.0,
+        *,
+        stage_idx: int | None = None,
+        stage_progress: float | None = None,
+    ) -> dict[str, float]:
+        """Return normalized track weights summing to `1.0` at training progress $u \\in [0, 1]$ or mitotic stage."""
         import math
 
         u = max(0.0, min(1.0, float(progress)))
-        s_sum = sum(self.start_weights.values())
-        s_norm = {k: v / s_sum for k, v in self.start_weights.items()}
+        s_norm = self._normalize_map(self.start_weights)
+
+        if self.stage_weights and len(self.stage_weights) >= 2:
+            n_stages = len(self.stage_weights)
+            if stage_idx is not None:
+                cur_i = max(0, min(n_stages - 1, int(stage_idx)))
+                next_i = max(0, min(n_stages - 1, cur_i + 1))
+                local_u = (
+                    max(0.0, min(1.0, float(stage_progress)))
+                    if stage_progress is not None
+                    else u
+                )
+            else:
+                scaled = u * (n_stages - 1)
+                cur_i = min(n_stages - 1, int(math.floor(scaled)))
+                next_i = min(n_stages - 1, cur_i + 1)
+                local_u = scaled - cur_i
+            w0 = self._normalize_map(self.stage_weights[cur_i])
+            w1 = self._normalize_map(self.stage_weights[next_i])
+            alpha = 0.5 * (1.0 - math.cos(math.pi * local_u))
+            blended = {k: (1.0 - alpha) * w0[k] + alpha * w1[k] for k in w0}
+            return self._normalize_map(blended)
+
         if self.end_weights is None or self.mode == "constant":
             return s_norm
 
-        e_sum = sum(self.end_weights.values())
-        e_norm = {k: v / e_sum for k, v in self.end_weights.items()}
-        alpha = u if self.mode == "linear" else 0.5 * (1.0 - math.cos(math.pi * u))
+        e_norm = self._normalize_map(self.end_weights)
+        if self.mode == "mitotic_staged" and stage_idx is not None:
+            local_u = (
+                max(0.0, min(1.0, float(stage_progress)))
+                if stage_progress is not None
+                else u
+            )
+            eff_u = min(1.0, 0.35 * int(stage_idx) + 0.35 * local_u)
+            alpha = 0.5 * (1.0 - math.cos(math.pi * eff_u))
+        else:
+            alpha = u if self.mode == "linear" else 0.5 * (1.0 - math.cos(math.pi * u))
         blended = {k: (1.0 - alpha) * s_norm[k] + alpha * e_norm[k] for k in s_norm}
-        b_sum = sum(blended.values())
-        return {k: v / b_sum for k, v in blended.items()}
+        return self._normalize_map(blended)
 
 
 class CurriculumMixtureSampler:
@@ -1779,15 +1885,43 @@ class CurriculumMixtureSampler:
             name: EpochBlockSampler(
                 len(dataset.track_datasets[name]),
                 seed=seed + idx * 1009,
+                shard_boundaries=dataset.track_datasets[name]._cum_blocks.tolist(),
             )
             for idx, name in enumerate(dataset.track_names)
         }
 
-    def allocate_quotas(self, batch_size: int, progress: float = 0.0) -> dict[str, int]:
+    def evict_consumed_shards(
+        self,
+        *,
+        delete_from_disk: bool = False,
+    ) -> dict[str, list[str]]:
+        """Evict all fully consumed shards across tracks based on each track sampler's cursor."""
+        cleared: dict[str, list[str]] = {}
+        for name, sampler in self.track_samplers.items():
+            ds = self.dataset.track_datasets[name]
+            eff_cursor = sampler.num_blocks if sampler.epoch >= 1 else sampler.cursor
+            evicted = ds.evict_consumed_shards(
+                eff_cursor,
+                delete_from_disk=delete_from_disk,
+            )
+            if evicted:
+                cleared[name] = evicted
+        return cleared
+
+    def allocate_quotas(
+        self,
+        batch_size: int,
+        progress: float = 0.0,
+        *,
+        stage_idx: int | None = None,
+        stage_progress: float | None = None,
+    ) -> dict[str, int]:
         """Compute exact integer block counts per track summing to `batch_size` (Hamilton's method)."""
         if batch_size < 1:
             raise ValueError("batch_size must be >= 1")
-        weights = self.schedule.weights_at(progress)
+        weights = self.schedule.weights_at(
+            progress, stage_idx=stage_idx, stage_progress=stage_progress
+        )
         exact = {name: weights[name] * batch_size for name in self.dataset.track_names}
         floors = {name: int(exact[name]) for name in self.dataset.track_names}
         remainder = batch_size - sum(floors.values())
@@ -1801,9 +1935,21 @@ class CurriculumMixtureSampler:
                 floors[name] += 1
         return floors
 
-    def take(self, batch_size: int, *, progress: float = 0.0) -> torch.Tensor:
-        """Draw `batch_size` global block indices across tracks according to `schedule.weights_at(progress)`."""
-        quotas = self.allocate_quotas(batch_size, progress=progress)
+    def take(
+        self,
+        batch_size: int,
+        *,
+        progress: float = 0.0,
+        stage_idx: int | None = None,
+        stage_progress: float | None = None,
+    ) -> torch.Tensor:
+        """Draw `batch_size` global block indices across tracks according to `schedule.weights_at(...)`."""
+        quotas = self.allocate_quotas(
+            batch_size,
+            progress=progress,
+            stage_idx=stage_idx,
+            stage_progress=stage_progress,
+        )
         global_chunks: list[torch.Tensor] = []
         for name in self.dataset.track_names:
             q = quotas[name]

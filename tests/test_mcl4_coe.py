@@ -1978,4 +1978,466 @@ def test_ornith_v2_compositional_rlvr_and_dream_evolution(tmp_path: Path) -> Non
         assert 1 <= parsed.width <= 4
 
 
+def test_dense_equivalent_moe_utilization() -> None:
+    """Verify Recurrent Coverage / Tabu Routing across recurrent passes, Gram-Schmidt
+    Orthogonal Mitosis at birth, Mitotic Orthogonalization loss, and Sequence Diversity loss.
+    """
+    from mcl4_coe.trainer import upcycle_state_dict_experts
+
+    torch.manual_seed(17)
+    cfg = MCL4CEDConfig(
+        vocab_size=260,
+        d_model=64,
+        n_heads=4,
+        n_encoder_layers=1,
+        n_decoder_layers=1,
+        ple_dim=16,
+        expert_hidden_dim=128,
+        num_experts=6,
+        top_k=2,
+        max_seq_len=64,
+        recurrent_coverage_penalty=0.95,
+        mitotic_ortho_coef=0.10,
+        sequence_diversity_coef=0.05,
+    )
+    backbone = MCL4CEDBackbone(cfg).train()
+
+    # 1. Verify Recurrent Coverage / Tabu Routing recruits fresh experts on Pass 2
+    moe = backbone.decoder_layers[0].moe
+    x_tok = torch.randn(2, 8, 64)
+    val_tok = torch.ones(2, 8, dtype=torch.bool)
+    _, _, _, _ = moe(x_tok, valid=val_tok, prior_expert_mask=None)
+    mask_pass1 = moe.last_selected_mask
+    assert mask_pass1 is not None and mask_pass1.shape == (2, 8, 6)
+    _, _, _, _ = moe(x_tok, valid=val_tok, prior_expert_mask=mask_pass1)
+    mask_pass2 = moe.last_selected_mask
+    assert mask_pass2 is not None
+    union_experts_per_token = ((mask_pass1 + mask_pass2) > 0).sum(dim=-1).float().mean().item()
+    assert union_experts_per_token > float(cfg.top_k) + 1.5  # Strictly recruits new experts on Pass 2!
+
+    # 2. Verify Gram-Schmidt Orthogonal Mitosis at birth (exact norm symmetry + zero radial dot product)
+    base_cfg = MCL4CEDConfig(
+        vocab_size=260,
+        d_model=64,
+        n_heads=4,
+        n_encoder_layers=1,
+        n_decoder_layers=1,
+        ple_dim=16,
+        expert_hidden_dim=128,
+        num_experts=4,
+        top_k=2,
+        max_seq_len=64,
+    )
+    base_bb = MCL4CEDBackbone(base_cfg)
+    up_sd = upcycle_state_dict_experts(
+        base_bb.state_dict(),
+        old_num_experts=4,
+        new_num_experts=6,
+        seed=99,
+        orthogonal=True,
+    )
+    w_p_up = up_sd["decoder_layers.0.moe.experts.0.up_proj.weight"].float()
+    w_c_up = up_sd["decoder_layers.0.moe.experts.4.up_proj.weight"].float()
+    w_mean_up = 0.5 * (w_p_up + w_c_up)
+    delta_up = 0.5 * (w_c_up - w_p_up)
+    radial_cos = torch.nn.functional.cosine_similarity(w_mean_up, delta_up, dim=-1).abs().max().item()
+    assert radial_cos < 5e-5
+    assert torch.allclose(w_p_up.norm(dim=-1), w_c_up.norm(dim=-1), rtol=1e-5, atol=1e-6)
+
+    w_p_dn = up_sd["decoder_layers.0.moe.experts.0.down_proj.weight"].float()
+    w_c_dn = up_sd["decoder_layers.0.moe.experts.4.down_proj.weight"].float()
+    w_mean_dn = 0.5 * (w_p_dn + w_c_dn)
+    delta_dn = 0.5 * (w_c_dn - w_p_dn)
+    radial_cos_dn = torch.nn.functional.cosine_similarity(w_mean_dn, delta_dn, dim=0).abs().max().item()
+    assert radial_cos_dn < 5e-5
+    assert torch.allclose(w_p_dn.norm(dim=0), w_c_dn.norm(dim=0), rtol=1e-5, atol=1e-6)
+
+    # 3. Verify Mitotic Orthogonalization loss & multi-pass decode_candidates integration
+    backbone.load_state_dict(up_sd, strict=False)
+    ortho_before = float(backbone.decoder_layers[0].moe.compute_mitotic_ortho_loss(x_tok.device).item())
+    assert ortho_before > 0.99
+    inp_ids = torch.randint(0, 256, (2, 16), dtype=torch.long)
+    lm_out = backbone(inp_ids, targets=inp_ids, recurrence_steps=2)
+    assert lm_out.loss is not None and torch.isfinite(lm_out.loss)
+    lm_out.loss.backward()
+    with torch.no_grad():
+        for p in backbone.decoder_layers[0].moe.experts.parameters():
+            if p.grad is not None:
+                p.sub_(0.5 * p.grad)
+    ortho_after = float(backbone.decoder_layers[0].moe.compute_mitotic_ortho_loss(x_tok.device).item())
+    assert ortho_after < ortho_before
+
+    # 4. Verify fused wide-dense subset execution (forward_dense_subset, dense_expert_indices, dense_subset_k)
+    subset_ids = [0, 2, 4]
+    fused_dense = moe.forward_dense_subset(x_tok, subset_ids, valid=val_tok)
+    manual_dense = (
+        moe.experts[0](x_tok) + moe.experts[2](x_tok) + moe.experts[4](x_tok)
+    )
+    assert torch.allclose(fused_dense, manual_dense, rtol=1e-4, atol=1e-5)
+
+    # Explicit pinned dense subset + hybrid sparse routing
+    backbone.zero_grad(set_to_none=True)
+    backbone.set_dense_expert_subset([1, 3, 5], combine_dense_and_sparse=True)
+    lm_pinned = backbone(inp_ids, targets=inp_ids, recurrence_steps=1)
+    assert lm_pinned.loss is not None and torch.isfinite(lm_pinned.loss)
+    lm_pinned.loss.backward()
+    for idx in (1, 3, 5):
+        assert backbone.decoder_layers[0].moe.experts[idx].down_proj.weight.grad is not None
+        assert backbone.decoder_layers[0].moe.experts[idx].down_proj.weight.grad.abs().sum() > 0
+
+    # Dynamic sequence-level dense coalition (dense_subset_k=3) + Pass-2 coalition switching
+    backbone.zero_grad(set_to_none=True)
+    backbone.set_dense_expert_subset([], dense_subset_k=3, combine_dense_and_sparse=False)
+    _, _, _, _ = moe(x_tok, valid=val_tok, prior_expert_mask=None)
+    coal_mask_1 = moe.last_selected_mask
+    assert coal_mask_1 is not None and int(coal_mask_1[0, 0].sum().item()) == 3
+    _, _, _, _ = moe(x_tok, valid=val_tok, prior_expert_mask=coal_mask_1)
+    coal_mask_2 = moe.last_selected_mask
+    assert coal_mask_2 is not None and int(coal_mask_2[0, 0].sum().item()) == 3
+    total_coalition_coverage = int(((coal_mask_1[0, 0] + coal_mask_2[0, 0]) > 0).sum().item())
+    assert total_coalition_coverage >= 5  # Recruits almost the entire 6-expert bank across 2 dense passes!
+
+    # 5. Verify Mitosis-Staged Corpus Curriculum (English prose foundation -> CoT reasoning -> decisions)
+    from mcl4_coe.pipeline import CurriculumMixtureSchedule
+
+    stages = (
+        {"pretrain_lm": 0.90, "uta_trace": 0.08, "typed_decision": 0.02},
+        {"pretrain_lm": 0.55, "uta_trace": 0.35, "typed_decision": 0.10},
+        {"pretrain_lm": 0.30, "uta_trace": 0.50, "typed_decision": 0.20},
+    )
+    sched = CurriculumMixtureSchedule(
+        start_weights=stages[0],
+        end_weights=stages[-1],
+        mode="mitotic_staged",
+        stage_weights=stages,
+    )
+    w_s0 = sched.weights_at(0.0, stage_idx=0, stage_progress=0.0)
+    w_s1 = sched.weights_at(0.4, stage_idx=1, stage_progress=0.0)
+    w_s2 = sched.weights_at(0.9, stage_idx=2, stage_progress=1.0)
+    assert abs(w_s0["pretrain_lm"] - 0.90) < 1e-6
+    assert w_s0["pretrain_lm"] > w_s1["pretrain_lm"] > w_s2["pretrain_lm"]
+    assert w_s0["uta_trace"] < w_s1["uta_trace"] < w_s2["uta_trace"]
+    assert w_s0["typed_decision"] < w_s1["typed_decision"] < w_s2["typed_decision"]
+
+    # 6. Verify Windowless Demand-Paged Context (InfiniteContextPager + WorkingStateLedger + forward_windowless)
+    from mcl4_coe.context_memory import InfiniteContextPager, WorkingStateLedger
+
+    backbone.set_dense_expert_subset([], dense_subset_k=0, combine_dense_and_sparse=False)
+    ledger = WorkingStateLedger(
+        objective="Refactor authentication middleware without breaking session tokens",
+        active_step="Update JWT signature verifier in auth.py",
+        pinned_facts={"token_ttl": "3600s", "issuer": "yycore-auth"},
+    )
+    assert "Refactor authentication middleware" in ledger.format_ledger_text()
+
+    pager = InfiniteContextPager(
+        page_size=16,
+        top_k_pages=2,
+        landmarks_per_page=2,
+        working_state=ledger,
+    )
+    ledger_ids = torch.randint(1, 250, (1, 12), dtype=torch.long)
+    pager.update_working_state(backbone, ledger_ids)
+    assert pager.working_state.compressed_state is not None
+
+    # Feed a 64-token stream through a model with active_window_len=16 (4x beyond active window!)
+    long_stream = torch.randint(1, 250, (2, 64), dtype=torch.long)
+    long_targets = long_stream.clone()
+    long_targets[:, :8] = -100  # mask some targets to also exercise valid-target-only deep supervision
+    out_win = backbone.forward_windowless(
+        long_stream,
+        targets=long_targets,
+        pager=pager,
+        active_window_len=16,
+        page_size=16,
+        top_k_pages=2,
+        recurrence_steps=2,
+        deep_supervision_weight=0.2,
+    )
+    # 48 prefix tokens -> 3 pages of 16 tokens compressed into TurboQuant pager; active tail is 16 tokens
+    assert pager.num_pages == 3
+    assert pager.total_ingested_tokens == 48
+    assert out_win.logits.shape == (2, 16, cfg.vocab_size)
+    assert out_win.loss is not None and torch.isfinite(out_win.loss)
+
+    top_pages = pager.retrieve_top_k_pages(backbone, long_stream[:, -16:], top_k=2)
+    assert len(top_pages) == 2
+    gist_state = pager.build_gist_state(backbone, long_stream[:, -16:], top_k=2)
+    # Gist state holds [12 ledger tokens + 2 * 16 retrieved page tokens] = 44 position-invariant prefix tokens
+    assert gist_state is not None
+    assert gist_state.hidden.shape == (2, 12 + 2 * 16, cfg.d_model)
+
+    # 7. Verify COE-Gated Quarantined Fast-Weight Plasticity ("Einstein on a Whiteboard" Engine)
+    from mcl4_coe.operators import COEConfig, CognitiveOperatorEnsemble
+
+    coe = CognitiveOperatorEnsemble(backbone, COEConfig(projection_dim=16, recurrence_steps=2))
+    slow_snapshot = {k: v.detach().clone() for k, v in coe.state_dict().items()}
+    controller = coe.create_whiteboard_controller(
+        whiteboard_slots=6,
+        lora_rank=8,
+        lora_alpha=4.0,
+        lr=4e-2,
+        inner_steps=2,
+        max_prefix_norm=0.40,
+        max_adapter_frobenius_norm=0.20,
+        min_novelty=0.02,
+        min_entropy_floor=0.20,
+        max_anchor_drift=0.25,
+    )
+    anchor_ids = torch.randint(1, 250, (2, 16), dtype=torch.long)
+    controller.register_anchor_invariants(anchor_ids)
+
+    wb_state_ids = torch.randint(1, 250, (2, 20), dtype=torch.long)
+    wb_hyp_ids = torch.randint(1, 250, (2, 16), dtype=torch.long)
+    report1 = controller.step(wb_state_ids, wb_hyp_ids, recurrence_steps=2)
+    assert report1.committed is True
+    assert report1.status == "committed"
+    assert report1.whiteboard_loss_after < report1.whiteboard_loss_before
+    assert report1.adapter_frobenius_norm <= 0.20 + 1e-5
+    assert report1.prefix_delta_norm <= 0.40 + 1e-5
+
+    # Guarantee 100% of slow weights in COE + Backbone are bitwise untouched
+    for k, v in coe.state_dict().items():
+        assert torch.equal(v, slow_snapshot[k]), f"Slow weight {k} mutated during plasticity!"
+
+    # Gate 1: Re-submitting identical hypothesis is filtered by COE Association Novelty
+    report_dup = controller.step(wb_state_ids, wb_hyp_ids, recurrence_steps=2)
+    assert report_dup.committed is False
+    assert report_dup.status == "skipped_low_novelty"
+
+    # Gate 3: If Correspondence Principle anchor drift threshold is violated, instant O(1) rollback occurs
+    committed_lora_b = controller.whiteboard.fast_lora_B.detach().clone()
+    controller.max_anchor_drift = -1.0  # Force anchor drift gate rejection
+    wb_hyp_ids_2 = torch.randint(1, 250, (2, 16), dtype=torch.long)
+    report_rb = controller.step(wb_state_ids, wb_hyp_ids_2, recurrence_steps=2)
+    assert report_rb.committed is False
+    assert report_rb.status == "rolled_back_anchor_invariant_drift"
+    assert torch.equal(controller.whiteboard.fast_lora_B, committed_lora_b)
+
+    # Inference conditioned on the committed QuarantinedWhiteboardState
+    wb_out = coe.forward_with_whiteboard(
+        wb_state_ids, targets=wb_state_ids, whiteboard=controller.whiteboard, recurrence_steps=2
+    )
+    assert wb_out.loss is not None and torch.isfinite(wb_out.loss)
+
+    # 8. Verify Strengthened Inference-Time Learning:
+    #    - Biorthogonal Hopfield-Kanerva Rule Readout & Surprise-Weighted Generative Fast Weights
+    #    - Continual Multi-Chapter Episodic Absorption (`append_episodic_rules`)
+    #    - Mitotic Whiteboard-to-Child Sleep Consolidation (`consolidate_whiteboard_to_mitotic_children`)
+    controller.max_anchor_drift = 0.35
+    controller.whiteboard.reset_fast_weights()
+
+    ch1_ctx = torch.randint(4, 240, (2, 20), dtype=torch.long)
+    ch1_hyp = torch.randint(4, 240, (2, 16), dtype=torch.long)
+    ch1_doc = torch.cat([ch1_ctx, ch1_hyp], dim=1)
+    ch2_ctx = torch.randint(4, 240, (2, 20), dtype=torch.long)
+    ch2_hyp = torch.randint(4, 240, (2, 16), dtype=torch.long)
+    ch2_doc = torch.cat([ch2_ctx, ch2_hyp], dim=1)
+
+    # Base generative loss before absorption
+    with torch.no_grad():
+        base_gen_loss = float(
+            coe.backbone(ch1_doc[:, :-1], targets=ch1_doc[:, 1:], recurrence_steps=2).loss.item()
+        )
+
+    abs_rep_1 = controller.absorb_context(
+        ch1_doc,
+        premise_ids=ch1_ctx,
+        conclusion_ids=ch1_hyp,
+        recurrence_steps=2,
+    )
+    assert abs_rep_1.committed is True
+    assert abs_rep_1.whiteboard_loss_after < abs_rep_1.whiteboard_loss_before
+    assert controller.whiteboard.episodic_rule_count == 2
+
+    # Generative perplexity / loss on absorbed domain text must strictly improve
+    with torch.no_grad():
+        wb_gen_loss = float(
+            coe.forward_with_whiteboard(
+                ch1_doc[:, :-1],
+                targets=ch1_doc[:, 1:],
+                whiteboard=controller.whiteboard,
+                recurrence_steps=2,
+            ).loss.item()
+        )
+    assert wb_gen_loss < base_gen_loss
+
+    # Continual Chapter 2 absorption appends without forgetting Chapter 1 rules
+    abs_rep_2 = controller.absorb_context(
+        ch2_doc,
+        premise_ids=ch2_ctx,
+        conclusion_ids=ch2_hyp,
+        recurrence_steps=2,
+    )
+    assert abs_rep_2.committed is True
+    assert controller.whiteboard.episodic_rule_count == 4
+
+    # Verify solve_decision_on_whiteboard (Dense+WB) achieves 100% decision accuracy on absorbed rules
+    all_ctx = torch.cat([ch1_ctx, ch2_ctx], dim=0)
+    all_hyp = torch.cat([ch1_hyp, ch2_hyp], dim=0)
+    ctx_lens_all = torch.full((4,), 20, dtype=torch.long)
+    opt_ids_all = all_hyp.unsqueeze(0).expand(4, -1, -1).contiguous()
+    opt_lens_all = torch.full((4, 4), 16, dtype=torch.long)
+    targets_all = torch.arange(4, dtype=torch.long)
+
+    dec_dense_wb, _ = controller.solve_decision_on_whiteboard(
+        all_ctx,
+        ctx_lens_all,
+        opt_ids_all,
+        opt_lens_all,
+        targets=targets_all,
+        recurrence_steps=2,
+        adapt_on_context=False,
+    )
+    assert int((dec_dense_wb.logits.argmax(dim=-1) == targets_all).sum().item()) == 4
+
+    # Verify Mitotic Whiteboard-to-Child Sleep Consolidation keeps parent experts at 0.0 delta
+    cons_res = controller.consolidate_whiteboard_to_mitotic_children(
+        consolidation_rate=0.25,
+        reset_whiteboard_after=True,
+    )
+    assert cons_res["consolidated"] is True
+    assert cons_res["num_child_experts_updated"] >= 1
+    assert cons_res["parent_expert_max_delta"] == 0.0
+    assert cons_res["child_expert_frobenius_delta"] > 0.0
+
+    # 9. Verify Universal Multi-Modality Ingestion (Prose + Code AST + Web HTML) & 2-Hop Transitive Closure
+    from mcl4_coe import ByteTokenizer, InfiniteContextPager
+
+    tok_b = ByteTokenizer()
+    pager_b = InfiniteContextPager(page_size=32, landmarks_per_page=2, top_k_pages=2)
+    raw_paper_excerpt = (
+        "# Section 1: Symplectic Routing\n"
+        "When sparse experts are routed through the Krylov-7 manifold, the router enforces a symplectic gauge projection.\n"
+        "When the router enforces a symplectic gauge projection, Hamiltonian energy drift stays below 1e-6.\n"
+    )
+    raw_code_excerpt = (
+        "class LedgerNode:\n"
+        "    default_cipher = 'chacha20_poly1305'\n"
+        "    def check_crc(self, bad_crc: bool) -> str:\n"
+        "        if bad_crc:\n"
+        "            return 'quarantine_shard'\n"
+        "        return 'commit_block'\n"
+    )
+    raw_web_excerpt = (
+        "<html><body><table>"
+        "<tr><th>Endpoint</th><th>Protocol</th></tr>"
+        "<tr><td>/v4/sync</td><td>RDMA-RoCEv2</td></tr>"
+        "</table></body></html>"
+    )
+    rep_p, props_p = controller.ingest_artifact(
+        raw_paper_excerpt, tokenizer=tok_b, modality="prose", pager=pager_b, reset_whiteboard=True
+    )
+    rep_c, props_c = controller.ingest_artifact(
+        raw_code_excerpt, tokenizer=tok_b, modality="code", pager=pager_b
+    )
+    rep_w, props_w = controller.ingest_artifact(
+        raw_web_excerpt, tokenizer=tok_b, modality="web", pager=pager_b
+    )
+    assert len(props_p) >= 2
+    assert len(props_c) >= 2
+    assert len(props_w) >= 1
+    assert rep_p.committed and rep_c.committed and rep_w.committed
+    assert pager_b.num_pages >= 1
+
+    # 10. Verify Frontier Whiteboard Capabilities:
+    #     - Symbolic-Numerical & Boolean Predicate Extraction (`extract_symbolic_predicates`)
+    #     - Algebraic Multi-Whiteboard Cartridge Fusion (`merge_whiteboards`)
+    #     - Non-Monotonic AGM Belief Revision (`revision_history`)
+    #     - Cross-Modal Contradiction & Bound Auditing (`audit_contradictions`)
+    num_p, bool_p = controller.whiteboard.extract_symbolic_predicates(
+        "in verify_shard_envelope, suppose crc_mismatch is false and epoch_lag = 27"
+    )
+    assert ("epoch_lag", "==", 27.0) in num_p
+    assert ("crc_mismatch", False) in bool_p
+
+    ctrl_cart1 = coe.create_whiteboard_controller(whiteboard_slots=6, lora_rank=8)
+    ctrl_cart2 = coe.create_whiteboard_controller(whiteboard_slots=6, lora_rank=8)
+    ctrl_cart1.ingest_artifact(raw_code_excerpt, tokenizer=tok_b, modality="code", reset_whiteboard=True)
+    ctrl_cart2.ingest_artifact(
+        "class LedgerNode:\n    default_cipher = 'aes_256_gcm_siv'\n",
+        tokenizer=tok_b,
+        modality="code",
+        reset_whiteboard=True,
+    )
+    merged_wb = controller.merge_whiteboards(
+        [ctrl_cart1.whiteboard, ctrl_cart2.whiteboard], allow_belief_revision=True
+    )
+    assert len(merged_wb.revision_history) >= 1
+    assert "aes_256_gcm_siv" in merged_wb.revision_history[0]["new_conclusion"]
+
+    conflicts = controller.audit_contradictions(
+        raw_paper_excerpt,
+        "When sparse experts are routed through the Krylov-7 manifold, Hamiltonian energy drift stays below 1e-2.\n",
+        tokenizer=tok_b,
+        modality_a="prose",
+        modality_b="prose",
+    )
+    assert len(conflicts) >= 1
+    assert conflicts[0]["type"] in ("transitive_2hop_bound_violation", "numeric_bound_violation")
+
+
+def test_v7_shard_windowed_streaming_and_eviction(tmp_path) -> None:
+    """Verify shard-windowed EpochBlockSampler streaming and consumed-shard disk eviction during mitosis."""
+    from mcl4_coe.data import EpochBlockSampler
+    from mcl4_coe.pipeline import (
+        BlockAlignedShardWriter,
+        CurriculumMixtureSchedule,
+        CurriculumMixtureSampler,
+        MultiTrackMixtureDataset,
+        ShardedTokenBlockDataset,
+    )
+
+    # 1. Verify EpochBlockSampler with shard_boundaries visits each shard window sequentially
+    sampler = EpochBlockSampler(12, seed=42, shard_boundaries=[4, 8, 12])
+    s0 = set(sampler.take(4).tolist())
+    s1 = set(sampler.take(4).tolist())
+    s2 = set(sampler.take(4).tolist())
+    assert s0 == {0, 1, 2, 3}
+    assert s1 == {4, 5, 6, 7}
+    assert s2 == {8, 9, 10, 11}
+
+    # 2. Build a 3-shard track on disk (`max_blocks_per_shard=2`) and verify consumed-shard eviction
+    track_dir = tmp_path / "pretrain_lm"
+    writer = BlockAlignedShardWriter(
+        track_dir,
+        track="pretrain_lm",
+        split="train",
+        seq_len=16,
+        max_blocks_per_shard=2,
+        vocab_size=260,
+    )
+    for i in range(6):
+        writer.add_pretrain_document(f"Document {i} " + ("alpha beta gamma " * 8))
+    writer.flush_shard()
+
+    receipt_path = track_dir / "index_receipt.json"
+    ds = ShardedTokenBlockDataset(receipt_path, track="pretrain_lm", split="train")
+    assert len(ds.shards) >= 3
+
+    sched = CurriculumMixtureSchedule(start_weights={"pretrain_lm": 1.0}, mode="constant")
+    mix_ds = MultiTrackMixtureDataset({"pretrain_lm": receipt_path}, split="train")
+    mix_sampler = CurriculumMixtureSampler(mix_ds, sched, seed=7)
+
+    # Consume exact blocks of Shard 0 (`2` blocks)
+    idx_b0 = mix_sampler.take(2)
+    batch0 = mix_ds.batch(idx_b0.tolist())
+    assert batch0["input_ids"].shape == (2, 16)
+
+    # Evict consumed shards from disk (`Shard 0` has cum_blocks=2 <= cursor=2)
+    cleared = mix_sampler.evict_consumed_shards(delete_from_disk=True)
+    assert "pretrain_lm" in cleared
+    assert cleared["pretrain_lm"] == [ds.shards[0]["bin_file"]]
+    assert not (track_dir / ds.shards[0]["bin_file"]).exists()
+    assert (track_dir / ds.shards[-1]["bin_file"]).exists()
+
+    # Continue streaming Shard 1 & Shard 2 and verify fallback if an evicted index is queried
+    idx_b1 = mix_sampler.take(2)
+    batch1 = mix_ds.batch(idx_b1.tolist())
+    assert batch1["input_ids"].shape == (2, 16)
+    fallback_batch = mix_ds.batch([0])
+    assert fallback_batch["input_ids"].shape == (1, 16)
+
+
+
 

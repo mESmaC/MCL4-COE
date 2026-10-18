@@ -173,6 +173,7 @@ class TrainingRunConfig:
     batch_size: int = 8
     micro_batch_size: int = 4
     decision_batch_size: int = 4
+    operator_every: int = 1
     lr: float = 2.5e-3
     warmup_ratio: float = 0.08
     min_lr_ratio: float = 0.12
@@ -1750,7 +1751,13 @@ class MCL4COETrainer:
                 if step < self.config.total_steps:
                     self.prefetcher.schedule(next_indices)
 
-                dec_batch = self._next_decision_batch()
+                run_operators = bool(
+                    step == 1
+                    or step == start_step
+                    or step == self.config.total_steps
+                    or (step % max(1, int(self.config.operator_every)) == 0)
+                )
+                dec_batch = self._next_decision_batch() if run_operators else None
                 self.model.train()
                 self.optimizer.zero_grad(set_to_none=True)
 
@@ -1808,7 +1815,12 @@ class MCL4COETrainer:
                 mb_token_counts = [
                     max(1, int((mb["labels"] != -100).sum().item())) for mb in micro_batches
                 ]
+                mb_valid_counts = [
+                    max(1, int((mb["input_ids"] != self.tokenizer.pad_id).sum().item()))
+                    for mb in micro_batches
+                ]
                 total_mb_tokens = max(1, sum(mb_token_counts))
+                total_valid_tokens = max(total_mb_tokens, sum(mb_valid_counts))
                 total_mb_bytes = max(
                     total_mb_tokens,
                     sum(self.tokenizer.count_utf8_bytes(mb["labels"]) for mb in micro_batches),
@@ -1920,11 +1932,18 @@ class MCL4COETrainer:
                 # Single GPU-to-CPU sync point per step after optimizer.step()
                 step_unmasked_tokens = int(step_tokens_gpu.item())
                 step_lm_loss = float(step_lm_gpu.item())
-                step_dec_loss = float(step_dec_gpu.item())
-                step_ded_loss = float(step_ded_gpu.item())
-                step_eval_loss = float(step_eval_gpu.item())
-                step_meta_loss = float(step_meta_gpu.item())
-                step_abs_loss = float(step_abs_gpu.item())
+                if dec_batch is not None:
+                    step_dec_loss = float(step_dec_gpu.item())
+                    step_ded_loss = float(step_ded_gpu.item())
+                    step_eval_loss = float(step_eval_gpu.item())
+                    step_meta_loss = float(step_meta_gpu.item())
+                    step_abs_loss = float(step_abs_gpu.item())
+                else:
+                    step_dec_loss = float(self.latest_metrics.get("decision_loss", 0.0))
+                    step_ded_loss = float(self.latest_metrics.get("deduction_loss", 0.0))
+                    step_eval_loss = float(self.latest_metrics.get("evaluation_loss", 0.0))
+                    step_meta_loss = float(self.latest_metrics.get("metacognition_loss", 0.0))
+                    step_abs_loss = float(self.latest_metrics.get("abstraction_loss", 0.0))
                 step_total_loss = float(step_total_gpu.item())
                 expert_loads = [round(float(x), 4) for x in step_expert_load_gpu.cpu().tolist()]
                 prev_ema = getattr(self, "_ema_expert_loads", None)
@@ -1936,8 +1955,8 @@ class MCL4COETrainer:
                     self._ema_expert_loads = [float(c) for c in expert_loads]
                 step_elapsed = time.perf_counter() - t_step0
                 self.cumulative_wall_s += step_elapsed
-                self.cumulative_tokens += step_unmasked_tokens
-                tok_per_s = step_unmasked_tokens / max(step_elapsed, 1e-6)
+                self.cumulative_tokens += total_valid_tokens
+                tok_per_s = total_valid_tokens / max(step_elapsed, 1e-6)
 
                 avg_track_losses: dict[str, float] = {}
                 for t_name in self.dataset.track_names:

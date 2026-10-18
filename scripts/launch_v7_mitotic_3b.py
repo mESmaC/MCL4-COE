@@ -1,17 +1,18 @@
-"""Launch script and preset builder for MCL4-COE v7-Mitotic-3B (`16 -> 206` experts = `320.5M -> 3.01B`).
+"""Launch script and preset builder for MCL4-COE v7-Mitotic-3B (`8 -> 416` experts = `117.2M -> 3.01B`).
 
 Architecture highlights:
 - Option B Fine-Grained Specialist aspect ratio: `expert_hidden_dim = 0.5 * d_model` with `top_k = 4`
   active experts per token (`active FFN width = 2 * d_model`), giving 4 independent specialist axes
   per token and smooth multi-active density scaling (`dense_subset_k` from `k=4` up to full `3.01B`).
+- High-Velocity `8L` (`4 enc + 4 dec`), `n_heads = 8` Backbone (`~38K - 47K+ tok/s` at low params):
 - Preset `balanced_768` (default):
-  * `d_model = 768`, `n_heads = 12`, `n_encoder_layers = 8`, `n_decoder_layers = 8` (`16` MoE layers)
-  * Single expert per layer: `3 * 768 * 384 = 884,736` (`~885K`) parameters (`14.16M` per 16-layer column)
-  * Starts at `E = 16` (`320.5M` total, `150.6M` active) -> grows via mitosis to `E = 206` (`3.010B` total)
+  * `d_model = 768`, `n_heads = 8` (`head_dim = 96`), `n_encoder_layers = 4`, `n_decoder_layers = 4` (`8` MoE layers)
+  * Single expert per layer: `3 * 768 * 384 = 884,736` (`~885K`) parameters (`7.08M` per 8-layer column)
+  * Starts at `E = 8` (`117.2M` total, `88.9M` active) -> grows via mitosis to `E = 416` (`3.005B` total)
 - Preset `ultra_fine_512`:
-  * `d_model = 512`, `n_heads = 8`, `n_encoder_layers = 6`, `n_decoder_layers = 6` (`12` MoE layers)
-  * Single expert per layer: `3 * 512 * 256 = 393,216` (`~393K`) parameters (`4.72M` per 12-layer column)
-  * Starts at `E = 16` (`112.1M` total, `55.5M` active) -> grows via mitosis to `E = 628` (`3.000B` total)
+  * `d_model = 512`, `n_heads = 8` (`head_dim = 64`), `n_encoder_layers = 4`, `n_decoder_layers = 4` (`8` MoE layers)
+  * Single expert per layer: `3 * 512 * 256 = 393,216` (`~393K`) parameters (`3.15M` per 8-layer column)
+  * Starts at `E = 8` (`60.5M` total, `47.9M` active) -> grows via mitosis to `E = 944` (`3.005B` total)
 - Shard-windowed token streaming + consumed-shard eviction (`clear_consumed_shards = True`):
   * Shuffles blocks within each shard sequentially (`Shard 0 -> Shard 1 -> ...`) and unlinks consumed
     `.bin` files from disk as training progresses through mitosis.
@@ -38,54 +39,54 @@ from mcl4_coe.trainer import MCL4COETrainer, TrainingRunConfig
 V7_PRESETS: dict[str, dict[str, Any]] = {
     "balanced_768": {
         "d_model": 768,
-        "n_heads": 12,
-        "n_encoder_layers": 8,
-        "n_decoder_layers": 8,
+        "n_heads": 8,              # 8 heads (head_dim=96) + 8 layers = 96 head-layers for ~40K+ tok/s!
+        "n_encoder_layers": 4,
+        "n_decoder_layers": 4,
         "ple_dim": 192,
-        "expert_hidden_dim": 384,  # 0.5 * d_model -> 884,736 params/expert/layer (14.16M across 16 layers)
-        "num_experts": 8,          # 207.2M starting total params (150.6M active at top_k=4) for max token speed!
-        "max_experts": 206,        # 3,010,275,536 (3.01B) terminal total params
+        "expert_hidden_dim": 384,  # 0.5 * d_model -> 884,736 params/expert/layer (7.08M across 8 layers)
+        "num_experts": 8,          # 117.2M starting total params (88.9M active at top_k=4) for max token speed!
+        "max_experts": 416,        # 3,005,127,585 (3.005B) terminal total params
         "top_k": 4,
         "mitosis_step_size": 8,
         "projection_dim": 192,
-        # (progress_fraction, target_experts): 75% of tokens stay at <=32 experts (207M..547M params),
-        # then geometrically expand 48 -> 64 -> 96 -> 128 -> 164 -> 206 (3.01B) in the final 25%!
+        # (progress_fraction, target_experts): 75% of tokens stay at <=48 experts (117M..400M params),
+        # then geometrically expand 64 -> 96 -> 144 -> 224 -> 320 -> 416 (3.005B) in the final 25%!
         "milestone_curve": (
             (0.20, 12),
             (0.36, 16),
             (0.51, 24),
             (0.64, 32),
             (0.75, 48),
-            (0.82, 64),
-            (0.88, 96),
-            (0.93, 128),
-            (0.965, 164),
-            (0.985, 206),
+            (0.82, 80),
+            (0.88, 128),
+            (0.93, 208),
+            (0.965, 304),
+            (0.985, 416),
         ),
     },
     "ultra_fine_512": {
         "d_model": 512,
         "n_heads": 8,
-        "n_encoder_layers": 6,
-        "n_decoder_layers": 6,
+        "n_encoder_layers": 4,
+        "n_decoder_layers": 4,
         "ple_dim": 128,
-        "expert_hidden_dim": 256,  # 0.5 * d_model -> 393,216 params/expert/layer (4.72M across 12 layers)
-        "num_experts": 8,          # 74.3M starting total params (55.5M active at top_k=4)
-        "max_experts": 628,        # 3,000,159,280 (3.00B) terminal total params
+        "expert_hidden_dim": 256,  # 0.5 * d_model -> 393,216 params/expert/layer (3.15M across 8 layers)
+        "num_experts": 8,          # 60.5M starting total params (47.9M active at top_k=4)
+        "max_experts": 944,        # 3,005,162,769 (3.005B) terminal total params
         "top_k": 4,
         "mitosis_step_size": 16,
         "projection_dim": 128,
         "milestone_curve": (
             (0.20, 16),
-            (0.36, 24),
-            (0.51, 36),
-            (0.64, 64),
-            (0.75, 112),
-            (0.82, 176),
-            (0.88, 256),
-            (0.93, 368),
-            (0.965, 496),
-            (0.985, 628),
+            (0.36, 32),
+            (0.51, 48),
+            (0.64, 80),
+            (0.75, 128),
+            (0.82, 224),
+            (0.88, 368),
+            (0.93, 544),
+            (0.965, 736),
+            (0.985, 944),
         ),
     },
 }
@@ -251,7 +252,7 @@ def build_v7_config(
         depth_ponder=True,
         deep_supervision_weight=0.20,
         enable_gist_conditioning=True,
-        gist_conditioning_prob=0.35,
+        gist_conditioning_prob=0.15,
         latent_prior_scale=0.35,
         use_nvfp4=use_nvfp4,
         cpu_offload_optimizer=cpu_offload_optimizer,
@@ -259,6 +260,7 @@ def build_v7_config(
         batch_size=batch_size,
         micro_batch_size=micro_batch_size,
         decision_batch_size=4,
+        operator_every=4,
         lr=1.0e-3,
         warmup_ratio=0.06,
         min_lr_ratio=0.12,
@@ -266,11 +268,11 @@ def build_v7_config(
         start_weights={"pretrain_lm": 0.50, "uta_trace": 0.35, "typed_decision": 0.15},
         end_weights={"pretrain_lm": 0.25, "uta_trace": 0.55, "typed_decision": 0.20},
         enable_ornith_rl=True,
-        ornith_every=8,
+        ornith_every=12,
         ornith_weight=0.20,
         ornith_warmup_ratio=0.50,
         enable_dream_rsi=True,
-        dream_every=10,
+        dream_every=20,
         checkpoint_every=500,
         max_keep_checkpoints=1,
         eval_every=250,

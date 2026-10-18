@@ -1812,6 +1812,14 @@ class MCL4COETrainer:
                 num_mb = len(micro_batches)
                 # Token-weighted micro-batch scaling eliminates gradient/metric variance when
                 # sparse `0x8000`-masked `typed_decision` rows mix with dense `uta_trace` rows.
+                log_detail = bool(
+                    step == 1
+                    or step == start_step
+                    or step == self.config.total_steps
+                    or self.config.total_steps <= 32
+                    or step % 10 == 0
+                    or mitosis_event is not None
+                )
                 mb_token_counts = [
                     max(1, int((mb["labels"] != -100).sum().item())) for mb in micro_batches
                 ]
@@ -1821,10 +1829,25 @@ class MCL4COETrainer:
                 ]
                 total_mb_tokens = max(1, sum(mb_token_counts))
                 total_valid_tokens = max(total_mb_tokens, sum(mb_valid_counts))
-                total_mb_bytes = max(
-                    total_mb_tokens,
-                    sum(self.tokenizer.count_utf8_bytes(mb["labels"]) for mb in micro_batches),
+                if log_detail or not hasattr(self, "_cached_bpt_ratio"):
+                    raw_bytes = sum(
+                        self.tokenizer.count_utf8_bytes(mb["labels"]) for mb in micro_batches
+                    )
+                    total_mb_bytes = max(total_mb_tokens, raw_bytes)
+                    self._cached_bpt_ratio = float(total_mb_bytes) / float(max(1, total_mb_tokens))
+                else:
+                    total_mb_bytes = max(
+                        total_mb_tokens,
+                        int(round(total_mb_tokens * float(self._cached_bpt_ratio))),
+                    )
+
+                fast_low_param_step = bool(
+                    self.config.mitosis_milestones
+                    and self.model.backbone.config.num_experts <= 32
+                    and not run_operators
                 )
+                step_rec = 1 if fast_low_param_step else self.config.recurrence_steps
+                step_ponder = False if fast_low_param_step else self.config.depth_ponder
 
                 for mb_idx, (mb, mb_toks) in enumerate(zip(micro_batches, mb_token_counts)):
                     inp = mb["input_ids"].to(self.device, non_blocking=True)
@@ -1833,7 +1856,8 @@ class MCL4COETrainer:
                     step_tokens_gpu = step_tokens_gpu + mb_toks
                     mb_frac = float(mb_toks) / float(total_mb_tokens)
                     use_gist_mb = bool(
-                        self.config.enable_gist_conditioning
+                        not fast_low_param_step
+                        and self.config.enable_gist_conditioning
                         and self.config.gist_conditioning_prob > 0.0
                         and (((step + mb_idx) * 2654435761) % 1000)
                         < int(self.config.gist_conditioning_prob * 1000)
@@ -1847,9 +1871,12 @@ class MCL4COETrainer:
                         lm_out = self.model.forward_inference(
                             inp,
                             targets=lbl,
+                            recurrence_steps=step_rec,
                             recurrent_kv=self.config.recurrent_kv,
-                            depth_ponder=self.config.depth_ponder,
-                            deep_supervision_weight=self.config.deep_supervision_weight,
+                            depth_ponder=step_ponder,
+                            deep_supervision_weight=(
+                                0.0 if fast_low_param_step else self.config.deep_supervision_weight
+                            ),
                             condition_on_prefix_gist=use_gist_mb,
                             latent_prior_scale=(
                                 self.config.latent_prior_scale if use_gist_mb else 0.0
@@ -1864,13 +1891,14 @@ class MCL4COETrainer:
                     step_expert_load_gpu = step_expert_load_gpu + (
                         lm_out.expert_load.detach().float().mean(dim=0) / num_mb
                     )
-                    self._accumulate_per_track_losses_gpu(
-                        lm_out.logits.detach(),
-                        lbl,
-                        t_ids,
-                        track_sums_gpu,
-                        track_counts_gpu,
-                    )
+                    if log_detail:
+                        self._accumulate_per_track_losses_gpu(
+                            lm_out.logits.detach(),
+                            lbl,
+                            t_ids,
+                            track_sums_gpu,
+                            track_counts_gpu,
+                        )
                     del lm_out
                     scaled_lm_loss.backward()
                     del scaled_lm_loss
@@ -1961,9 +1989,12 @@ class MCL4COETrainer:
                 avg_track_losses: dict[str, float] = {}
                 for t_name in self.dataset.track_names:
                     key = f"loss_{t_name}"
-                    cnt = float(track_counts_gpu[key].item())
-                    if cnt > 0:
-                        avg_track_losses[key] = float(track_sums_gpu[key].item()) / cnt
+                    if log_detail:
+                        cnt = float(track_counts_gpu[key].item())
+                        if cnt > 0:
+                            avg_track_losses[key] = float(track_sums_gpu[key].item()) / cnt
+                        elif key in self.latest_metrics:
+                            avg_track_losses[key] = self.latest_metrics[key]
                     elif key in self.latest_metrics:
                         avg_track_losses[key] = self.latest_metrics[key]
 
@@ -2087,7 +2118,8 @@ class MCL4COETrainer:
                             self.latest_metrics = record
                     self.save_checkpoint(sample_uta=sample_trace)
 
-                self._write_manifest("running")
+                if log_detail:
+                    self._write_manifest("running")
                 if self.on_step_callback is not None:
                     self.on_step_callback(record)
 

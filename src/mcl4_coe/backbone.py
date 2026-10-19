@@ -297,6 +297,11 @@ class SparseMoE(nn.Module):
         ]
         if not valid_pairs:
             return torch.zeros((), dtype=torch.float32, device=device)
+        if len(valid_pairs) > 16:
+            offset = int(getattr(self, "_ortho_pair_cursor", 0)) % len(valid_pairs)
+            self._ortho_pair_cursor = offset + 16
+            doubled = valid_pairs + valid_pairs
+            valid_pairs = doubled[offset : offset + 16]
         sqrt2 = 1.4142135623730951
         up_p = F.normalize(
             torch.stack([self.experts[p].up_proj.weight for p, _ in valid_pairs], dim=0).float(),

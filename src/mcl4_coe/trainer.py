@@ -1779,7 +1779,8 @@ class MCL4COETrainer:
                 )
                 dec_batch = self._next_decision_batch() if run_operators else None
                 if dec_batch is not None and cur_e >= 128:
-                    dec_batch = {k: v[:2] for k, v in dec_batch.items()}
+                    dec_cap = 1 if cur_e >= 256 else 2
+                    dec_batch = {k: v[:dec_cap] for k, v in dec_batch.items()}
                 self.model.train()
                 self.optimizer.zero_grad(set_to_none=True)
 
@@ -1931,7 +1932,11 @@ class MCL4COETrainer:
                         dtype=torch.bfloat16,
                         enabled=use_amp,
                     ):
-                        op_out = self.model.forward_all_operators(**dec_batch)
+                        op_out = self.model.forward_all_operators(
+                            **dec_batch,
+                            recurrence_steps=step_rec,
+                            depth_ponder=step_ponder,
+                        )
                         assert op_out.decision.ce_loss is not None
                         step_dec_gpu = op_out.decision.ce_loss.detach().float()
                         step_ded_gpu = op_out.deduction_loss.detach().float()

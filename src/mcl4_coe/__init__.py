@@ -202,6 +202,7 @@ from .trainer import (
     resolve_shards_root,
     upcycle_state_dict_experts,
 )
+from .inference_ui import InferenceSessionController, start_inference_ui_server
 from .webui import TrainingControllerState, start_web_ui_server
 
 __all__ = [
@@ -257,6 +258,7 @@ __all__ = [
     "GLiNER25GateConfig",
     "HostBatchPrefetcher",
     "IndexReceipt",
+    "InferenceSessionController",
     "InfiniteContextPager",
     "JointCOELossOutput",
     "MCL4CEDBackbone",
@@ -351,6 +353,7 @@ __all__ = [
     "sanitize_morphcode_shards",
     "sanitize_trace_markers",
     "staleness_weight",
+    "start_inference_ui_server",
     "start_web_ui_server",
     "synthesize_repository_uta_traces",
     "transcode_byte_shards_to_morphcode",

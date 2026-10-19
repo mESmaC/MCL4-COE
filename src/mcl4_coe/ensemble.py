@@ -413,6 +413,7 @@ class MultiPassController(nn.Module):
         max_recurrence_steps: int = 3,
         recurrent_entropy_threshold: float = 1.5,
         gist_state: Any | None = None,
+        whiteboard: Any | None = None,
     ) -> str:
         """Synthesize a `#U$# -> #T$# -> #A$#` trace, guaranteeing complete `#T$#` and `#A$#` segments."""
         was_training = self.coe.training
@@ -662,7 +663,19 @@ class MultiPassController(nn.Module):
                 inp = torch.tensor([tokens], dtype=torch.long, device=device)
                 logit_bound = vocab_size if is_morph else 259
                 with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
-                    if adaptive_recurrent_depth and max_recurrence_steps > 1:
+                    if whiteboard is not None:
+                        out = self.coe.forward_with_whiteboard(
+                            inp,
+                            whiteboard=whiteboard,
+                            recurrence_steps=(
+                                max_recurrence_steps
+                                if (adaptive_recurrent_depth and max_recurrence_steps > 1)
+                                else recurrence_steps
+                            ),
+                            recurrent_kv=recurrent_kv,
+                            depth_ponder=depth_ponder,
+                        )
+                    elif adaptive_recurrent_depth and max_recurrence_steps > 1:
                         out = self.coe.forward_inference(
                             inp,
                             recurrence_steps=1,

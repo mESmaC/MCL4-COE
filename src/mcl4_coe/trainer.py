@@ -2705,16 +2705,29 @@ def evaluate_checkpoint_prompt(
         meta = {}
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    target_dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     payload = torch.load(pt_path, map_location="cpu", weights_only=False)
     b_cfg = MCL4CEDConfig(**payload["backbone_config"])
     c_cfg = COEConfig(**payload["coe_config"])
-    model = CognitiveOperatorEnsemble(MCL4CEDBackbone(b_cfg), c_cfg)
+    from contextlib import ExitStack
+    from unittest.mock import patch
+
+    prev_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(target_dtype)
+    try:
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(torch.nn.Linear, "reset_parameters", lambda self: None))
+            stack.enter_context(patch.object(torch.nn.Embedding, "reset_parameters", lambda self: None))
+            stack.enter_context(patch("torch.nn.init.normal_", lambda tensor, *a, **kw: tensor))
+            model = CognitiveOperatorEnsemble(MCL4CEDBackbone(b_cfg), c_cfg)
+    finally:
+        torch.set_default_dtype(prev_dtype)
     model.load_state_dict(payload["model_state"], strict=False)
     mp_list = [tuple(pair) for pair in payload.get("mitotic_pairs", [])]
     if mp_list and model.backbone.encoder_layers and not model.backbone.encoder_layers[0].moe.mitotic_pairs:
         for layer in list(model.backbone.encoder_layers) + list(model.backbone.decoder_layers):
             layer.moe.mitotic_pairs = list(mp_list)
-    model.to(device).eval()
+    model.to(device=device, dtype=target_dtype).eval()
 
     controller = MultiPassController(model)
     t0 = time.perf_counter()

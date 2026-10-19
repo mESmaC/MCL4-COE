@@ -501,7 +501,7 @@ class MultiPassController(nn.Module):
                 m_fn = re.search(r"`([a-zA-Z_]\w*\([^`]*\))`", user_prompt)
                 if m_fn:
                     ap_toks = self.tokenizer.encode(
-                        f" def {m_fn.group(1)}:", add_bos=False, add_eos=False
+                        f" def {m_fn.group(1)}:\n    ", add_bos=False, add_eos=False
                     )
 
             if thought_prefix is not None and thought_prefix.strip():
@@ -523,10 +523,10 @@ class MultiPassController(nn.Module):
                     if tokens[-1] not in sent_end_ids:
                         tokens.append(period_id)
                     tokens.extend(a_tag_tokens)
+                    a_start_token_idx = len(tokens)
                     if ap_toks and len(tokens) + len(ap_toks) < max_seq:
                         tokens.extend(ap_toks)
                     has_emitted_a = True
-                    a_start_token_idx = len(tokens)
                 else:
                     thought_budget = max(6 if bool(ap_toks) else 16, thought_budget - len(tp_toks))
 
@@ -587,12 +587,22 @@ class MultiPassController(nn.Module):
                 if m in str_to_id
             ]
             donor_code_start_ids: set[int] = set()
+            donor_docstring_ids: set[int] = set()
+            donor_conj_start_ids: set[int] = set()
             donor_return_ids: set[int] = set()
             if is_hf_donor:
-                for tok_str in (" def", "def", "```", " ```", '"""', ' """'):
+                for tok_str in (" def", "def", "```", " ```", '"""', ' """', "'''", " '''"):
                     enc_ids = self.tokenizer.encode(tok_str, add_bos=False, add_eos=False)
                     if len(enc_ids) == 1:
                         donor_code_start_ids.add(int(enc_ids[0]))
+                for doc_str in ('"""', ' """', "'''", " '''", '    """', '    """\n'):
+                    enc_ids = self.tokenizer.encode(doc_str, add_bos=False, add_eos=False)
+                    if len(enc_ids) == 1:
+                        donor_docstring_ids.add(int(enc_ids[0]))
+                for conj_str in (" and", " or", " but", " nor"):
+                    enc_ids = self.tokenizer.encode(conj_str, add_bos=False, add_eos=False)
+                    if len(enc_ids) == 1:
+                        donor_conj_start_ids.add(int(enc_ids[0]))
                 for ret_str in (" return", "return"):
                     enc_ids = self.tokenizer.encode(ret_str, add_bos=False, add_eos=False)
                     if len(enc_ids) == 1:
@@ -602,7 +612,7 @@ class MultiPassController(nn.Module):
             while step < hard_max_steps and len(tokens) < max_seq:
                 donor_colon_intro_ready = (
                     is_hf_donor
-                    and step >= 6
+                    and step >= thought_budget
                     and len(tokens) >= 2
                     and tokens[-2] == colon_id
                     and tokens[-1] in pure_newline_ids
@@ -655,10 +665,10 @@ class MultiPassController(nn.Module):
                             elif is_morph and not is_hf_donor and tokens[-1] not in sent_end_ids and max_new_tokens >= 64:
                                 tokens.append(period_id)
                             tokens.extend(a_tag_tokens)
+                            a_start_token_idx = len(tokens)
                             if ap_toks and len(tokens) + len(ap_toks) < max_seq:
                                 tokens.extend(ap_toks)
                             has_emitted_a = True
-                            a_start_token_idx = len(tokens)
                             if len(tokens) >= max_seq:
                                 break
 
@@ -743,11 +753,19 @@ class MultiPassController(nn.Module):
                         for cid in donor_code_start_ids:
                             if cid < logit_bound:
                                 next_logits[cid] = -torch.inf
+                        if step == 0:
+                            for conj_id in donor_conj_start_ids:
+                                if conj_id < logit_bound:
+                                    next_logits[conj_id] = -torch.inf
                         if tokens[-1] in pure_newline_ids and step < min_t_steps:
                             next_logits[hash_id] = -torch.inf
                     elif a_start_token_idx > 0:
                         a_slice = tokens[a_start_token_idx:]
                         is_code_a = any(t in donor_code_start_ids for t in a_slice[:3])
+                        if is_code_a:
+                            for doc_id in donor_docstring_ids:
+                                if doc_id < logit_bound:
+                                    next_logits[doc_id] = -torch.inf
                         if is_code_a and tokens[-1] in pure_newline_ids:
                             next_logits[hash_id] = -torch.inf
                             for cid in donor_code_start_ids:
@@ -825,7 +843,9 @@ class MultiPassController(nn.Module):
                     next_logits[10] -= 2.5
 
                 # Antidoom span-loop guard: detect and suppress only the exact trigger token that restarts a repeated span
-                gen_window = tokens[max(prompt_len, len(tokens) - 128) :]
+                # Scope to active segment (`#T$#` vs `#A$#`) so `#A$#` can freely state conclusions derived in `#T$#`.
+                seg_start = a_start_token_idx if (has_emitted_a and a_start_token_idx > 0) else prompt_len
+                gen_window = tokens[max(seg_start, len(tokens) - 128) :]
                 if is_morph:
                     if len(gen_window) >= 7:
                         ctx6 = gen_window[-6:]
@@ -922,7 +942,23 @@ class MultiPassController(nn.Module):
                 if temperature <= 0.0:
                     next_id = int(next_logits.argmax(dim=-1).item())
                 else:
-                    probs = (next_logits / temperature).softmax(dim=-1)
+                    scaled_logits = next_logits / temperature
+                    if is_morph:
+                        top_k_n = min(16 if is_hf_donor else 24, int((scaled_logits > -torch.inf).sum().item()))
+                        if top_k_n > 1:
+                            topk_vals, _ = torch.topk(scaled_logits, top_k_n)
+                            scaled_logits = torch.where(
+                                scaled_logits < topk_vals[-1],
+                                torch.full_like(scaled_logits, -torch.inf),
+                                scaled_logits,
+                            )
+                        probs = scaled_logits.softmax(dim=-1)
+                        max_p = probs.max()
+                        probs = torch.where(probs >= (0.06 * max_p), probs, torch.zeros_like(probs))
+                        p_sum = probs.sum()
+                        probs = probs / p_sum.clamp_min(1e-9)
+                    else:
+                        probs = scaled_logits.softmax(dim=-1)
                     next_id = int(torch.multinomial(probs, num_samples=1).item())
 
                 # Cleanly terminate if #A$# is complete and the model attempts to open a new episode marker after newline
@@ -979,20 +1015,20 @@ class MultiPassController(nn.Module):
 
                 if not has_emitted_a:
                     if is_morph and next_id in a_marker_ids:
+                        a_start_token_idx = len(tokens)
                         if ap_toks and len(tokens) + len(ap_toks) < max_seq:
                             tokens.extend(ap_toks)
                         has_emitted_a = True
-                        a_start_token_idx = len(tokens)
                     elif len(tokens) >= len(a_tag_tokens) and tokens[-len(a_tag_tokens) :] == a_tag_tokens:
+                        a_start_token_idx = len(tokens)
                         if ap_toks and len(tokens) + len(ap_toks) < max_seq:
                             tokens.extend(ap_toks)
                         has_emitted_a = True
-                        a_start_token_idx = len(tokens)
                     elif is_hf_donor and len(tokens) >= len(a_tag_bare) and tokens[-len(a_tag_bare) :] == a_tag_bare:
+                        a_start_token_idx = len(tokens)
                         if ap_toks and len(tokens) + len(ap_toks) < max_seq:
                             tokens.extend(ap_toks)
                         has_emitted_a = True
-                        a_start_token_idx = len(tokens)
                 if next_id == self.tokenizer.eos_id:
                     break
 

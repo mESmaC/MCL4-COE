@@ -512,7 +512,19 @@ class InferenceSessionController:
 
             b_cfg = MCL4CEDConfig(**b_dict)
             c_cfg = COEConfig(**c_dict)
-            model = CognitiveOperatorEnsemble(MCL4CEDBackbone(b_cfg), c_cfg)
+            from contextlib import ExitStack
+            from unittest.mock import patch
+
+            prev_dtype = torch.get_default_dtype()
+            torch.set_default_dtype(target_dtype)
+            try:
+                with ExitStack() as stack:
+                    stack.enter_context(patch.object(torch.nn.Linear, "reset_parameters", lambda self: None))
+                    stack.enter_context(patch.object(torch.nn.Embedding, "reset_parameters", lambda self: None))
+                    stack.enter_context(patch("torch.nn.init.normal_", lambda tensor, *a, **kw: tensor))
+                    model = CognitiveOperatorEnsemble(MCL4CEDBackbone(b_cfg), c_cfg)
+            finally:
+                torch.set_default_dtype(prev_dtype)
             model.load_state_dict(raw["model_state"], strict=False)
 
             mp_list = [tuple(int(x) for x in pair) for pair in raw.get("mitotic_pairs", []) if len(pair) == 2]

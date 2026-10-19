@@ -2136,7 +2136,10 @@ class MCL4COETrainer:
                 if cur_e >= 96:
                     max_mb_cap = (
                         1
-                        if (cur_e >= 256 and cur_k >= 16)
+                        if (
+                            (cur_e >= 256 and cur_k >= 16)
+                            or (cur_e >= 96 and int(self.backbone_cfg.d_model) >= 1536)
+                        )
                         else (2 if cur_e >= 256 else (4 if cur_e >= 128 else 8))
                     )
                     split_mbs: list[dict[str, torch.Tensor]] = []
@@ -2158,8 +2161,14 @@ class MCL4COETrainer:
                     or (step % max(1, int(self.config.operator_every)) == 0)
                 )
                 dec_batch = self._next_decision_batch() if run_operators else None
-                if dec_batch is not None and cur_e >= 128:
-                    dec_cap = 1 if cur_e >= 256 else 2
+                if dec_batch is not None and (
+                    cur_e >= 128 or (cur_e >= 80 and int(self.backbone_cfg.d_model) >= 1536)
+                ):
+                    dec_cap = (
+                        1
+                        if (cur_e >= 256 or (cur_e >= 96 and int(self.backbone_cfg.d_model) >= 1536))
+                        else 2
+                    )
                     dec_batch = {k: v[:dec_cap] for k, v in dec_batch.items()}
                 self.model.train()
                 self.optimizer.zero_grad(set_to_none=True)

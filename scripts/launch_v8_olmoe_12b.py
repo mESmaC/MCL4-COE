@@ -665,9 +665,10 @@ def build_v8_olmoe_12b_config(
         curriculum_stages=[
             {"pretrain_lm": 0.45, "uta_trace": 0.40, "typed_decision": 0.15},
             {"pretrain_lm": 0.30, "uta_trace": 0.50, "typed_decision": 0.20},
-            {"pretrain_lm": 0.20, "uta_trace": 0.55, "typed_decision": 0.25},
+            {"pretrain_lm": 0.22, "uta_trace": 0.53, "typed_decision": 0.25},
+            {"pretrain_lm": 0.15, "uta_trace": 0.55, "typed_decision": 0.30},
         ],
-        stage_seq_lens=(512, 768, 1024),
+        stage_seq_lens=(512, 640, 768, 1024),
         enable_ornith_rl=True,
         ornith_every=8,
         ornith_weight=0.12,

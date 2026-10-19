@@ -369,11 +369,13 @@ class SparseMoE(nn.Module):
         if torch.is_grad_enabled():
             self._grouped_weight_cache = None
             w_up = (
-                torch.stack([e.up_proj.weight.to(torch.bfloat16) for e in self.experts], dim=0)
+                torch.stack([e.up_proj.weight for e in self.experts], dim=0)
+                .to(torch.bfloat16)
                 .transpose(-1, -2)
             )
             w_down = (
-                torch.stack([e.down_proj.weight.to(torch.bfloat16) for e in self.experts], dim=0)
+                torch.stack([e.down_proj.weight for e in self.experts], dim=0)
+                .to(torch.bfloat16)
                 .transpose(-1, -2)
             )
             return w_up, w_down

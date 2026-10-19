@@ -792,11 +792,26 @@ class MCL4COETrainer:
             bos_id=int(getattr(self.tokenizer, "bos_id", 257)),
             eos_id=int(getattr(self.tokenizer, "eos_id", 258)),
         )
-        self.model = CognitiveOperatorEnsemble(
-            MCL4CEDBackbone(self.backbone_cfg),
-            self.coe_cfg,
-        )
-        if str(self.config.model_dtype).lower() in ("bfloat16", "bf16"):
+        use_bf16_init = str(self.config.model_dtype).lower() in ("bfloat16", "bf16")
+        skip_rng = self._resume_payload is not None
+        old_default_dtype = torch.get_default_dtype()
+        orig_lin_reset = torch.nn.Linear.reset_parameters
+        orig_emb_reset = torch.nn.Embedding.reset_parameters
+        try:
+            if use_bf16_init:
+                torch.set_default_dtype(torch.bfloat16)
+            if skip_rng:
+                torch.nn.Linear.reset_parameters = lambda _self: None  # type: ignore[method-assign]
+                torch.nn.Embedding.reset_parameters = lambda _self: None  # type: ignore[method-assign]
+            self.model = CognitiveOperatorEnsemble(
+                MCL4CEDBackbone(self.backbone_cfg),
+                self.coe_cfg,
+            )
+        finally:
+            torch.set_default_dtype(old_default_dtype)
+            torch.nn.Linear.reset_parameters = orig_lin_reset  # type: ignore[method-assign]
+            torch.nn.Embedding.reset_parameters = orig_emb_reset  # type: ignore[method-assign]
+        if use_bf16_init:
             self.model.to(dtype=torch.bfloat16)
         if self.config.use_nvfp4 and self.device.type == "cuda":
             reset_gemm_counts()
@@ -1563,50 +1578,58 @@ class MCL4COETrainer:
         all_layers = list(self.model.backbone.encoder_layers) + list(
             self.model.backbone.decoder_layers
         )
-        with torch.no_grad():
-            for layer in all_layers:
-                moe = layer.moe
-                for p_e, _ in added_pairs:
-                    parent_exp = moe.experts[p_e]
-                    p_up = parent_exp.up_proj.weight.data
-                    p_down = parent_exp.down_proj.weight.data
-                    child_exp = SwiGLUExpert(d_model, expert_hidden_dim).to(
-                        device=p_up.device, dtype=p_up.dtype
+        orig_lin_reset = torch.nn.Linear.reset_parameters
+        old_default_dtype = torch.get_default_dtype()
+        try:
+            torch.nn.Linear.reset_parameters = lambda _self: None  # type: ignore[method-assign]
+            with torch.no_grad():
+                for layer in all_layers:
+                    moe = layer.moe
+                    for p_e, _ in added_pairs:
+                        parent_exp = moe.experts[p_e]
+                        p_up = parent_exp.up_proj.weight.data
+                        p_down = parent_exp.down_proj.weight.data
+                        torch.set_default_dtype(p_up.dtype)
+                        with torch.device(p_up.device):
+                            child_exp = SwiGLUExpert(d_model, expert_hidden_dim)
+                        torch.set_default_dtype(old_default_dtype)
+                        delta_up = _orthogonal_antithetic_delta(
+                            p_up.detach().cpu().float(),
+                            gen,
+                            scale=1e-3,
+                            ortho_dim=1,
+                            orthogonal=self.config.orthogonal_mitosis,
+                        ).to(device=p_up.device, dtype=p_up.dtype)
+                        child_exp.up_proj.weight.data.copy_(p_up - delta_up)
+                        p_up.add_(delta_up)
+
+                        delta_down = _orthogonal_antithetic_delta(
+                            p_down.detach().cpu().float(),
+                            gen,
+                            scale=1e-3,
+                            ortho_dim=0,
+                            orthogonal=self.config.orthogonal_mitosis,
+                        ).to(device=p_down.device, dtype=p_down.dtype)
+                        child_exp.down_proj.weight.data.copy_(p_down - delta_down)
+                        p_down.add_(delta_down)
+                        moe.experts.append(child_exp)
+
+                    old_rw = moe.router.weight.data
+                    extra_rows = [old_rw[p_e : p_e + 1].clone() for p_e, _ in added_pairs]
+                    new_rw = torch.cat([old_rw, *extra_rows], dim=0)
+                    new_router = torch.nn.Linear(
+                        d_model, new_e, bias=False, device=old_rw.device, dtype=old_rw.dtype
                     )
-                    delta_up = _orthogonal_antithetic_delta(
-                        p_up.detach().cpu().float(),
-                        gen,
-                        scale=1e-3,
-                        ortho_dim=1,
-                        orthogonal=self.config.orthogonal_mitosis,
-                    ).to(device=p_up.device, dtype=p_up.dtype)
-                    child_exp.up_proj.weight.data.copy_(p_up - delta_up)
-                    p_up.add_(delta_up)
+                    new_router.weight.data.copy_(new_rw)
+                    moe.router = new_router
+                    moe.num_experts = new_e
+                    moe._grouped_weight_cache = None
+                    moe._mitotic_idx_cache = None
 
-                    delta_down = _orthogonal_antithetic_delta(
-                        p_down.detach().cpu().float(),
-                        gen,
-                        scale=1e-3,
-                        ortho_dim=0,
-                        orthogonal=self.config.orthogonal_mitosis,
-                    ).to(device=p_down.device, dtype=p_down.dtype)
-                    child_exp.down_proj.weight.data.copy_(p_down - delta_down)
-                    p_down.add_(delta_down)
-                    moe.experts.append(child_exp)
-
-                old_rw = moe.router.weight.data
-                extra_rows = [old_rw[p_e : p_e + 1].clone() for p_e, _ in added_pairs]
-                new_rw = torch.cat([old_rw, *extra_rows], dim=0)
-                new_router = torch.nn.Linear(
-                    d_model, new_e, bias=False, device=old_rw.device, dtype=old_rw.dtype
-                )
-                new_router.weight.data.copy_(new_rw)
-                moe.router = new_router
-                moe.num_experts = new_e
-                moe._grouped_weight_cache = None
-                moe._mitotic_idx_cache = None
-
-            self.model.log_scale.data.clamp_(math.log(0.5), math.log(3.5))
+                self.model.log_scale.data.clamp_(math.log(0.5), math.log(3.5))
+        finally:
+            torch.set_default_dtype(old_default_dtype)
+            torch.nn.Linear.reset_parameters = orig_lin_reset  # type: ignore[method-assign]
 
         if self.config.use_nvfp4 and self.device.type == "cuda":
             for layer in all_layers:

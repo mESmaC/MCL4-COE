@@ -1,0 +1,21 @@
+{
+  "accepted_revisions": 1,
+  "cycle": 37,
+  "initial_score": 0.3940200710687649,
+  "latest_score": 0.4347914250170035,
+  "program": {
+    "patience": 1,
+    "rank": [
+      "UTILITY",
+      "CONFIDENCE",
+      "SCORE",
+      "GAIN"
+    ],
+    "root_every": 2,
+    "rounds": 2,
+    "stop": 0.78,
+    "width": 2
+  },
+  "program_text": "WIDTH 2\nROOT 2\nRANK UTILITY CONFIDENCE SCORE GAIN\nSTOP 0.78\nPATIENCE 1\nROUNDS 2",
+  "total_replays_dreamed": 10545
+}

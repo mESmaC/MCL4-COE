@@ -1250,6 +1250,7 @@ class MCL4COETrainer:
                         pass
 
         t = threading.Thread(target=_worker, name=f"hf_backup_{step_name}", daemon=True)
+        self._last_hf_backup_thread = t
         t.start()
 
     def _get_model_mitotic_pairs(self) -> list[tuple[int, int]]:
@@ -2535,9 +2536,11 @@ class MCL4COETrainer:
                         if ckpt_cleared:
                             record["cleared_shards"] = ckpt_cleared
                             self.latest_metrics = record
+                    if step == self.config.total_steps:
+                        self._write_manifest("completed")
                     self.save_checkpoint(sample_uta=sample_trace)
 
-                if log_detail:
+                if log_detail and step < self.config.total_steps:
                     self._write_manifest("running")
                 if self.on_step_callback is not None:
                     self.on_step_callback(record)
@@ -2554,6 +2557,7 @@ class MCL4COETrainer:
                     break
 
             if status == "stopped":
+                self._write_manifest("stopped")
                 self.save_checkpoint(tag=f"step_{self.current_step:05d}_stopped")
         except Exception:
             status = "failed"
@@ -2561,6 +2565,9 @@ class MCL4COETrainer:
         finally:
             self.prefetcher.close()
             self._write_manifest(status)
+            hf_t = getattr(self, "_last_hf_backup_thread", None)
+            if hf_t is not None and hf_t.is_alive():
+                hf_t.join()
             if self.device.type == "cuda":
                 gc.collect()
                 torch.cuda.empty_cache()

@@ -549,29 +549,12 @@ def transcode_shards_to_olmoe50k(
         if (src_dec_dir / cache_name).is_file() and not (dst_dec_dir / cache_name).is_file():
             shutil.copy2(src_dec_dir / cache_name, dst_dec_dir / cache_name)
 
-    # Transcode rlvr_env_pool.pt if present
+    # Copy rlvr_env_pool.pt directly (OrnithTask entries are tokenizer-agnostic strings)
     src_rlvr = src_root / "rlvr_env_pool.pt"
     dst_rlvr = dst_root / "rlvr_env_pool.pt"
-    if src_rlvr.is_file() and not dst_rlvr.is_file():
-        raw_pool = torch.load(src_rlvr, map_location="cpu", weights_only=False)
-        items = raw_pool.get("items", []) if isinstance(raw_pool, dict) else []
-        pool_src_vocab = int(raw_pool.get("vocab_size", src_vocab_size)) if isinstance(raw_pool, dict) else src_vocab_size
-        pool_src_tok = get_tokenizer(pool_src_vocab)
-        new_items = []
-        for it in items:
-            p_txt = it.get("prompt_text") or pool_src_tok.decode(it.get("prompt_ids", []))
-            a_txt = it.get("answer_text") or pool_src_tok.decode(it.get("answer_ids", []))
-            new_it = dict(it)
-            new_it["prompt_text"] = p_txt
-            new_it["answer_text"] = a_txt
-            new_it["prompt_ids"] = dst_tok.encode(p_txt)[:192]
-            new_it["answer_ids"] = dst_tok.encode(a_txt)[:64]
-            new_items.append(new_it)
-        torch.save(
-            {"vocab_size": OLMOE_VOCAB_SIZE, "count": len(new_items), "items": new_items},
-            dst_rlvr,
-        )
-        print(f"[transcode] Transcoded {len(new_items)} RLVR tasks -> {dst_rlvr}", flush=True)
+    if src_rlvr.is_file():
+        shutil.copy2(src_rlvr, dst_rlvr)
+        print(f"[transcode] Copied RLVR environment pool -> {dst_rlvr}", flush=True)
 
     return dst_root
 

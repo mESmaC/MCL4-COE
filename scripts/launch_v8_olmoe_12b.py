@@ -1,4 +1,4 @@
-"""Donor Weight Surgery, Shard Transcoder, and Mitotic Scaling Launcher for `MCL4-COE v8-OLMoE-12B`.
+r"""Donor Weight Surgery, Shard Transcoder, and Mitotic Scaling Launcher for `MCL4-COE v8-OLMoE-12B`.
 
 Scales `allenai/OLMoE-1B-7B-0125` (`6.92B` donor -> `7.08B` MCL4-COE Step-0 graft) to `11.91B` (`~12.0B`)
 total parameters (`E = 64 -> 80 -> 96 -> 112` experts across `16` layers = `8` Encoder + `8` Decoder)
@@ -492,44 +492,53 @@ def transcode_shards_to_olmoe50k(
                 f"[transcode] Transcoding {track} ({split_name}: {len(shards_list)} shards) -> OLMoE-50K...",
                 flush=True,
             )
+            bos_id = int(src_tok.bos_id)
+            eos_id = int(src_tok.eos_id)
+            pad_id = int(src_tok.pad_id)
             for sh in shards_list:
                 bin_path = src_root / track / sh["bin_file"]
-                n_blocks = int(sh["num_blocks"])
-                arr = np.memmap(
-                    bin_path,
-                    dtype=np.uint16,
-                    mode="r",
-                    offset=HEADER_BYTES,
-                    shape=(n_blocks, row_len),
+                raw_u16 = np.fromfile(bin_path, dtype="<u2")
+                clean_ids = raw_u16 & 0x7FFF
+                bos_positions = np.nonzero(clean_ids == bos_id)[0]
+                eos_positions = np.nonzero(clean_ids == eos_id)[0]
+                if bos_positions.size == 0 or eos_positions.size == 0:
+                    continue
+                eos_cursor = 0
+                n_eos = eos_positions.size
+                accepted = 0
+                for b_pos in bos_positions:
+                    while eos_cursor < n_eos and eos_positions[eos_cursor] <= b_pos:
+                        eos_cursor += 1
+                    if eos_cursor >= n_eos:
+                        break
+                    e_pos = eos_positions[eos_cursor]
+                    span_clean = [
+                        int(tid)
+                        for tid in clean_ids[b_pos + 1 : e_pos].tolist()
+                        if int(tid) not in (pad_id, bos_id, eos_id)
+                    ]
+                    if not span_clean:
+                        continue
+                    text = src_tok.decode(span_clean)
+                    if track == "pretrain_lm":
+                        writer.add_pretrain_document(text)
+                        accepted += 1
+                    elif "#T$#" in text and "#A$#" in text:
+                        u_part, rest = text.split("#T$#", 1)
+                        t_part, a_part = rest.split("#A$#", 1)
+                        u_clean = u_part.replace("#U$#", "", 1).strip()
+                        t_clean = t_part.strip()
+                        a_clean = a_part.strip()
+                        if u_clean and a_clean and writer.add_uta_episode(u_clean, t_clean, a_clean):
+                            accepted += 1
+                writer.record_provenance(
+                    corpus=f"transcoded_olmoe50k:{track}:{split_name}",
+                    source_file=sh["bin_file"],
+                    row_start=1,
+                    row_end=max(1, accepted),
+                    episodes_accepted=accepted,
+                    episodes_rejected_stage0=0,
                 )
-                if track == "pretrain_lm":
-                    # Decode batches of rows into continuous pretrain documents
-                    chunk_rows = min(n_blocks, 512)
-                    for i in range(0, n_blocks, chunk_rows):
-                        sub = arr[i : i + chunk_rows]
-                        flat_ids = [
-                            int(x & 0x7FFF)
-                            for x in sub.reshape(-1).tolist()
-                            if int(x & 0x7FFF) not in (src_tok.pad_id, src_tok.bos_id, src_tok.eos_id)
-                        ]
-                        if flat_ids:
-                            text = src_tok.decode(flat_ids)
-                            writer.add_pretrain_document(text)
-                else:
-                    for r in range(n_blocks):
-                        row_list = [int(x) for x in arr[r].tolist()]
-                        prefix_txt, comp_txt = _decode_masked_block(row_list, src_tok)
-                        if not comp_txt.strip():
-                            continue
-                        p_ids = [int(x) | 0x8000 for x in dst_tok.encode(prefix_txt)] if prefix_txt else []
-                        c_ids = [int(x) for x in dst_tok.encode(comp_txt)]
-                        full = [int(dst_tok.bos_id) | 0x8000] + p_ids + c_ids + [int(dst_tok.eos_id)]
-                        if len(full) < seq_len + 1:
-                            full.extend([int(dst_tok.pad_id)] * (seq_len + 1 - len(full)))
-                        else:
-                            full = full[: seq_len + 1]
-                        writer.add_aligned_block(full)
-                del arr
             writer.flush_shard()
 
     # Transcode decision caches if present

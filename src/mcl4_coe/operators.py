@@ -3699,42 +3699,43 @@ class COEPlasticityController:
                         gist_state=wb_gist_gen,
                         prior_start_pos=0,
                     )
-                    h_gen = enc_gen.hidden.float()
-                    w_lm = self.backbone.lm_head.weight.float()
-                    lm_scale = float(self.backbone.config.logits_scaling)
-                    base_lm_logits = F.linear(h_gen, w_lm) / lm_scale
-                    h_v = h_gen[valid_lm_mask]
-                    y_v = lm_tgt[valid_lm_mask]
-                    probs_v = F.softmax(base_lm_logits[valid_lm_mask], dim=-1)
-                    p_true = probs_v.gather(-1, y_v.unsqueeze(-1))
-                    g_v = F.embedding(y_v, w_lm) - (probs_v @ w_lm)
-                    g_unit = F.normalize(g_v, dim=-1, eps=1e-6) * (1.0 - p_true).sqrt()
-                    h_rms = h_v.norm(dim=-1, keepdim=True).mean().clamp_min(1e-4)
-                    delta_target = g_unit * (0.70 * h_rms)
+                    with torch.amp.autocast(device_type=device.type, enabled=False):
+                        h_gen = enc_gen.hidden.float()
+                        w_lm = self.backbone.lm_head.weight.float()
+                        lm_scale = float(self.backbone.config.logits_scaling)
+                        base_lm_logits = F.linear(h_gen, w_lm) / lm_scale
+                        h_v = h_gen[valid_lm_mask]
+                        y_v = lm_tgt[valid_lm_mask]
+                        probs_v = F.softmax(base_lm_logits[valid_lm_mask], dim=-1)
+                        p_true = probs_v.gather(-1, y_v.unsqueeze(-1))
+                        g_v = F.embedding(y_v, w_lm) - (probs_v @ w_lm)
+                        g_unit = F.normalize(g_v, dim=-1, eps=1e-6) * (1.0 - p_true).sqrt()
+                        h_rms = h_v.norm(dim=-1, keepdim=True).mean().clamp_min(1e-4)
+                        delta_target = g_unit * (0.70 * h_rms)
 
-                    old_gen_w = 0.50 * (
-                        self.whiteboard.gen_key_A.float() @ self.whiteboard.gen_val_B.float()
-                    ) * self.whiteboard.scale
-                    res_target = delta_target - (h_v @ old_gen_w)
-                    gram_h = h_v.T @ h_v + (8e-3 * float(h_v.shape[0])) * torch.eye(
-                        h_v.shape[1], device=device, dtype=torch.float32
-                    )
-                    w_gen_full = old_gen_w + torch.linalg.solve(gram_h, h_v.T @ res_target)
-                    u_g, s_g, vh_g = torch.linalg.svd(
-                        w_gen_full / max(1e-6, self.whiteboard.scale), full_matrices=False
-                    )
-                    r_gen = min(int(s_g.numel()), self.whiteboard.gen_rank)
-                    sqrt_sg = s_g[:r_gen].clamp_min(0.0).sqrt()
-                    g_a = u_g[:, :r_gen] * sqrt_sg.unsqueeze(0)
-                    g_b = sqrt_sg.unsqueeze(1) * vh_g[:r_gen, :]
-                    self.whiteboard.gen_key_A.zero_()
-                    self.whiteboard.gen_val_B.zero_()
-                    self.whiteboard.gen_key_A[:, :r_gen].copy_(
-                        g_a.to(self.whiteboard.gen_key_A.dtype)
-                    )
-                    self.whiteboard.gen_val_B[:r_gen, :].copy_(
-                        g_b.to(self.whiteboard.gen_val_B.dtype)
-                    )
+                        old_gen_w = 0.50 * (
+                            self.whiteboard.gen_key_A.float() @ self.whiteboard.gen_val_B.float()
+                        ) * self.whiteboard.scale
+                        res_target = delta_target - (h_v @ old_gen_w)
+                        gram_h = h_v.T @ h_v + (8e-3 * float(h_v.shape[0])) * torch.eye(
+                            h_v.shape[1], device=device, dtype=torch.float32
+                        )
+                        w_gen_full = old_gen_w + torch.linalg.solve(gram_h, h_v.T @ res_target)
+                        u_g, s_g, vh_g = torch.linalg.svd(
+                            w_gen_full / max(1e-6, self.whiteboard.scale), full_matrices=False
+                        )
+                        r_gen = min(int(s_g.numel()), self.whiteboard.gen_rank)
+                        sqrt_sg = s_g[:r_gen].clamp_min(0.0).sqrt()
+                        g_a = u_g[:, :r_gen] * sqrt_sg.unsqueeze(0)
+                        g_b = sqrt_sg.unsqueeze(1) * vh_g[:r_gen, :]
+                        self.whiteboard.gen_key_A.zero_()
+                        self.whiteboard.gen_val_B.zero_()
+                        self.whiteboard.gen_key_A[:, :r_gen].copy_(
+                            g_a.to(self.whiteboard.gen_key_A.dtype)
+                        )
+                        self.whiteboard.gen_val_B[:r_gen, :].copy_(
+                            g_b.to(self.whiteboard.gen_val_B.dtype)
+                        )
 
                 self.whiteboard.project_to_trust_region()
                 after = _joint_eval()
@@ -4937,81 +4938,82 @@ class COEPlasticityController:
             else s_f_all
         )
 
-        # Directed Multi-Hop Transitive Closure (A => B and B => C |- A => C)
-        closure_op = torch.eye(n_rules, device=device, dtype=torch.float32)
-        if n_rules >= 2:
-            self_overlap = (ch_all * ph_all).sum(dim=-1, keepdim=True).clamp_min(0.0)
-            ch_novel = F.normalize(
-                ch_all - 0.70 * self_overlap * ph_all, dim=-1, eps=1e-6
+        with torch.amp.autocast(device_type=device.type, enabled=False):
+            # Directed Multi-Hop Transitive Closure (A => B and B => C |- A => C)
+            closure_op = torch.eye(n_rules, device=device, dtype=torch.float32)
+            if n_rules >= 2:
+                self_overlap = (ch_all * ph_all).sum(dim=-1, keepdim=True).clamp_min(0.0)
+                ch_novel = F.normalize(
+                    ch_all - 0.70 * self_overlap * ph_all, dim=-1, eps=1e-6
+                )
+                raw_link = ch_novel @ ph_all.T
+                prem_sim = (ph_all @ ph_all.T).clamp_min(0.0)
+                link_sim = raw_link - 0.55 * raw_link.T.clamp_min(0.0) - 0.35 * prem_sim
+                link_sim.fill_diagonal_(-1.0)
+                row_max, row_argmax = link_sim.max(dim=-1)
+                if n_rules >= 3:
+                    top2_vals = torch.topk(link_sim, k=2, dim=-1).values
+                    link_margin = top2_vals[:, 0] - top2_vals[:, 1]
+                else:
+                    link_margin = row_max
+                t_adj = torch.zeros((n_rules, n_rules), device=device, dtype=torch.float32)
+                for r_idx in range(n_rules):
+                    tgt_idx = int(row_argmax[r_idx].item())
+                    if (
+                        float(row_max[r_idx].item()) > 0.22
+                        and float(link_margin[r_idx].item()) > 0.06
+                    ):
+                        t_adj[r_idx, tgt_idx] = 1.0
+                t_adj_2 = (t_adj @ t_adj).clamp(0.0, 1.0)
+                t_adj_2.fill_diagonal_(0.0)
+                closure_op = closure_op + 0.78 * t_adj + 0.55 * t_adj_2
+            wb._rule_closure_op = closure_op.detach().clone()
+
+            gram_c = c_unit_all @ c_unit_all.T + 1e-2 * torch.eye(
+                n_rules, device=device, dtype=torch.float32
             )
-            raw_link = ch_novel @ ph_all.T
-            prem_sim = (ph_all @ ph_all.T).clamp_min(0.0)
-            link_sim = raw_link - 0.55 * raw_link.T.clamp_min(0.0) - 0.35 * prem_sim
-            link_sim.fill_diagonal_(-1.0)
-            row_max, row_argmax = link_sim.max(dim=-1)
-            if n_rules >= 3:
-                top2_vals = torch.topk(link_sim, k=2, dim=-1).values
-                link_margin = top2_vals[:, 0] - top2_vals[:, 1]
-            else:
-                link_margin = row_max
-            t_adj = torch.zeros((n_rules, n_rules), device=device, dtype=torch.float32)
-            for r_idx in range(n_rules):
-                tgt_idx = int(row_argmax[r_idx].item())
-                if (
-                    float(row_max[r_idx].item()) > 0.22
-                    and float(link_margin[r_idx].item()) > 0.06
-                ):
-                    t_adj[r_idx, tgt_idx] = 1.0
-            t_adj_2 = (t_adj @ t_adj).clamp(0.0, 1.0)
-            t_adj_2.fill_diagonal_(0.0)
-            closure_op = closure_op + 0.78 * t_adj + 0.55 * t_adj_2
-        wb._rule_closure_op = closure_op.detach().clone()
+            b_dual_c = torch.linalg.solve(gram_c, c_unit_all)
+            q_dual = F.normalize(closure_op @ b_dual_c, dim=-1, eps=1e-6)
 
-        gram_c = c_unit_all @ c_unit_all.T + 1e-2 * torch.eye(
-            n_rules, device=device, dtype=torch.float32
-        )
-        b_dual_c = torch.linalg.solve(gram_c, c_unit_all)
-        q_dual = F.normalize(closure_op @ b_dual_c, dim=-1, eps=1e-6)
+            w_s = self.coe.state_projection.weight.detach().to(
+                device=device, dtype=torch.float32
+            )
+            w_s = w_s - w_s.mean(dim=0, keepdim=True)
+            w_s = w_s - w_s.mean(dim=1, keepdim=True)
+            gram_w = w_s @ w_s.T + 1e-3 * torch.eye(
+                w_s.shape[0], device=device, dtype=torch.float32
+            )
+            z_row = F.normalize(
+                torch.linalg.solve(gram_w, q_dual.T).T @ w_s, dim=-1, eps=1e-6
+            )
+            wb._rule_z_row_bank = z_row.detach().clone()
+            z_target = z_row
 
-        w_s = self.coe.state_projection.weight.detach().to(
-            device=device, dtype=torch.float32
-        )
-        w_s = w_s - w_s.mean(dim=0, keepdim=True)
-        w_s = w_s - w_s.mean(dim=1, keepdim=True)
-        gram_w = w_s @ w_s.T + 1e-3 * torch.eye(
-            w_s.shape[0], device=device, dtype=torch.float32
-        )
-        z_row = F.normalize(
-            torch.linalg.solve(gram_w, q_dual.T).T @ w_s, dim=-1, eps=1e-6
-        )
-        wb._rule_z_row_bank = z_row.detach().clone()
-        z_target = z_row
+            gram_h = ch_all @ ch_all.T + 1e-2 * torch.eye(
+                n_rules, device=device, dtype=torch.float32
+            )
+            b_dual_h = torch.linalg.solve(gram_h, ch_all)
+            wb._rule_closed_conc_holo_bank = (
+                F.normalize(closure_op @ b_dual_h, dim=-1, eps=1e-6).detach().clone()
+            )
 
-        gram_h = ch_all @ ch_all.T + 1e-2 * torch.eye(
-            n_rules, device=device, dtype=torch.float32
-        )
-        b_dual_h = torch.linalg.solve(gram_h, ch_all)
-        wb._rule_closed_conc_holo_bank = (
-            F.normalize(closure_op @ b_dual_h, dim=-1, eps=1e-6).detach().clone()
-        )
-
-        gram_s_reg = s_f_all @ s_f_all.T + 1e-3 * torch.eye(
-            n_rules, device=device, dtype=torch.float32
-        )
-        dual_keys = torch.linalg.solve(gram_s_reg, s_f_all)
-        wb._rule_dual_key_bank = dual_keys.detach().clone()
-        q_k, r_k = torch.linalg.qr(dual_keys.T, mode="reduced")
-        q_v, r_v = torch.linalg.qr(z_target.T, mode="reduced")
-        core = (r_k @ r_v.T) / max(1e-6, wb.scale)
-        u_c, s_c, vh_c = torch.linalg.svd(core, full_matrices=False)
-        r_keep = min(int(s_c.numel()), wb.rule_rank)
-        sqrt_s = s_c[:r_keep].clamp_min(0.0).sqrt()
-        k_a = (q_k @ u_c[:, :r_keep]) * sqrt_s.unsqueeze(0)
-        v_b = sqrt_s.unsqueeze(1) * (vh_c[:r_keep, :] @ q_v.T)
-        wb.rule_key_A.zero_()
-        wb.rule_val_B.zero_()
-        wb.rule_key_A[:, :r_keep].copy_(k_a.to(wb.rule_key_A.dtype))
-        wb.rule_val_B[:r_keep, :].copy_(v_b.to(wb.rule_val_B.dtype))
+            gram_s_reg = s_f_all @ s_f_all.T + 1e-3 * torch.eye(
+                n_rules, device=device, dtype=torch.float32
+            )
+            dual_keys = torch.linalg.solve(gram_s_reg, s_f_all)
+            wb._rule_dual_key_bank = dual_keys.detach().clone()
+            q_k, r_k = torch.linalg.qr(dual_keys.T, mode="reduced")
+            q_v, r_v = torch.linalg.qr(z_target.T, mode="reduced")
+            core = (r_k @ r_v.T) / max(1e-6, wb.scale)
+            u_c, s_c, vh_c = torch.linalg.svd(core, full_matrices=False)
+            r_keep = min(int(s_c.numel()), wb.rule_rank)
+            sqrt_s = s_c[:r_keep].clamp_min(0.0).sqrt()
+            k_a = (q_k @ u_c[:, :r_keep]) * sqrt_s.unsqueeze(0)
+            v_b = sqrt_s.unsqueeze(1) * (vh_c[:r_keep, :] @ q_v.T)
+            wb.rule_key_A.zero_()
+            wb.rule_val_B.zero_()
+            wb.rule_key_A[:, :r_keep].copy_(k_a.to(wb.rule_key_A.dtype))
+            wb.rule_val_B[:r_keep, :].copy_(v_b.to(wb.rule_val_B.dtype))
 
     @torch.no_grad()
     def merge_whiteboards(

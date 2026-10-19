@@ -1272,11 +1272,21 @@ class MCL4DreamDiscovery:
         targets = batch["targets"]
 
         use_amp = self.device.type == "cuda"
+        op_kwargs: dict[str, Any] = {}
+        if (
+            int(getattr(self.coe.backbone.config, "num_experts", 4))
+            * int(getattr(self.coe.backbone.config, "d_model", 128))
+        ) >= 65536:
+            op_kwargs = {
+                "recurrence_steps": 1,
+                "depth_ponder": False,
+                "margin_halt_threshold": None,
+            }
         with torch.autocast(
             device_type=self.device.type, dtype=torch.bfloat16, enabled=use_amp
         ):
             op_out = self.coe.forward_all_operators(
-                ctx_ids, ctx_lens, opt_ids, opt_lens, targets
+                ctx_ids, ctx_lens, opt_ids, opt_lens, targets, **op_kwargs
             )
             s_feat = op_out.decision.state_features[:1].detach().float()
             q_emb = F.normalize(s_feat - s_feat.mean(dim=-1, keepdim=True), dim=-1, eps=1e-6)
@@ -1523,6 +1533,16 @@ class MCL4PolicyProposer:
                 vocab_size=int(getattr(self.coe.backbone.config, "vocab_size", 260)),
             )
             use_amp = dev.type == "cuda"
+            op_kwargs: dict[str, Any] = {}
+            if (
+                int(getattr(self.coe.backbone.config, "num_experts", 4))
+                * int(getattr(self.coe.backbone.config, "d_model", 128))
+            ) >= 65536:
+                op_kwargs = {
+                    "recurrence_steps": 1,
+                    "depth_ponder": False,
+                    "margin_halt_threshold": None,
+                }
             with torch.autocast(
                 device_type=dev.type, dtype=torch.bfloat16, enabled=use_amp
             ):
@@ -1532,6 +1552,7 @@ class MCL4PolicyProposer:
                     batch["option_ids"],
                     batch["option_lengths"],
                     batch["targets"],
+                    **op_kwargs,
                 )
             d_probs = op_out.decision.probabilities[0].float()
             e_utils = op_out.evaluation_utilities.float().view(-1).clamp(0.0, 1.0)

@@ -586,13 +586,18 @@ class MCL4COETrainer:
         if val_dec_cache.is_file():
             try:
                 val_raw = torch.load(val_dec_cache, map_location="cpu", weights_only=False)
-                val_filtered = [
-                    ex
-                    for ex in val_raw
-                    if len(ex.descriptions) == 4
-                    and len(self.tokenizer.encode(ex.context)) <= dec_seq_len
-                    and all(len(self.tokenizer.encode(d)) <= dec_seq_len for d in ex.descriptions)
-                ][:512]
+                val_filtered = []
+                for ex in val_raw:
+                    if (
+                        len(ex.descriptions) == 4
+                        and len(ex.context.encode("utf-8")) <= dec_seq_len * 3
+                        and all(len(d.encode("utf-8")) <= dec_seq_len * 3 for d in ex.descriptions)
+                        and len(self.tokenizer.encode(ex.context)) <= dec_seq_len
+                        and all(len(self.tokenizer.encode(d)) <= dec_seq_len for d in ex.descriptions)
+                    ):
+                        val_filtered.append(ex)
+                        if len(val_filtered) >= 128:
+                            break
                 bsz_val = max(4, self.config.decision_batch_size * 2)
                 for i in range(0, len(val_filtered), bsz_val):
                     chunk = val_filtered[i : i + bsz_val]
@@ -602,7 +607,7 @@ class MCL4COETrainer:
                                 chunk,
                                 dec_seq_len,
                                 device="cpu",
-                                vocab_size=self.config.vocab_size,
+                                tokenizer=self.tokenizer,
                             )
                         )
                         self.val_decision_count += len(chunk)
@@ -614,34 +619,53 @@ class MCL4COETrainer:
         import random
 
         self.decision_batches = []
+        self._decision_order: list[Any] = []
         if not self._decision_pool:
             return
         pool = list(self._decision_pool)
         if self._decision_epoch > 0:
             rng = random.Random(self.config.seed + self._decision_epoch * 1009)
             rng.shuffle(pool)
+        self._decision_order = pool
         bsz = max(1, self.config.decision_batch_size)
-        for i in range(0, len(pool) - bsz + 1, bsz):
+        self._decision_total_batches = max(0, (len(pool) - bsz) // bsz + 1)
+        warmup_batches = min(4, self._decision_total_batches)
+        for b_idx in range(warmup_batches):
+            i = b_idx * bsz
             collated = collate_decisions(
                 pool[i : i + bsz],
                 self._decision_seq_len,
                 device="cpu",
-                vocab_size=self.config.vocab_size,
+                tokenizer=self.tokenizer,
             )
-            if self.device.type == "cuda":
-                collated = {k: v.pin_memory() for k, v in collated.items()}
             self.decision_batches.append(collated)
 
     def _next_decision_batch(self) -> dict[str, torch.Tensor] | None:
-        if not self.decision_batches:
+        from .data import collate_decisions
+
+        total_b = int(getattr(self, "_decision_total_batches", len(self.decision_batches)))
+        if total_b <= 0:
             return None
-        if self._decision_cursor >= len(self.decision_batches):
+        if self._decision_cursor >= total_b:
             self._decision_epoch += 1
             self._decision_cursor = 0
             self._rebuild_decision_batches()
-        batch_cpu = self.decision_batches[self._decision_cursor % len(self.decision_batches)]
+            total_b = int(getattr(self, "_decision_total_batches", len(self.decision_batches)))
+            if total_b <= 0:
+                return None
+        b_idx = self._decision_cursor % total_b
         self._decision_cursor += 1
-        return {k: v.to(self.device, non_blocking=True) for k, v in batch_cpu.items()}
+        if b_idx < len(self.decision_batches):
+            batch_cpu = self.decision_batches[b_idx]
+            return {k: v.to(self.device, non_blocking=True) for k, v in batch_cpu.items()}
+        bsz = max(1, self.config.decision_batch_size)
+        i = b_idx * bsz
+        return collate_decisions(
+            self._decision_order[i : i + bsz],
+            self._decision_seq_len,
+            device=self.device,
+            tokenizer=self.tokenizer,
+        )
 
     @torch.no_grad()
     def _evaluate_validation(self) -> dict[str, Any]:

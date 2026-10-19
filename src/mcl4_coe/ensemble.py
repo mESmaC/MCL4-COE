@@ -423,7 +423,7 @@ class MultiPassController(nn.Module):
             vocab_size = int(getattr(self.coe.backbone.config, "vocab_size", 260))
             is_morph = vocab_size > 1024
             is_hf_donor = bool(getattr(self.tokenizer, "is_hf_donor", False))
-            period_id = 32 if is_hf_donor else ord(".")
+            period_id = int(getattr(self.tokenizer, "period_id", 32)) if is_hf_donor else ord(".")
             if is_morph:
                 # Match encode_masked_turn exact token sequence: <bos> #U$# {prompt}\n #T$#
                 # without a trailing standalone space token (since MorphCode-16K / BPE words carry their own leading space)
@@ -473,7 +473,11 @@ class MultiPassController(nn.Module):
             hard_max_steps = max_new_tokens + grace_tokens
             use_amp = device.type == "cuda"
             if is_hf_donor:
-                sent_end_ids = frozenset({32, 19, 49, 203})
+                sent_end_ids = getattr(
+                    self.tokenizer,
+                    "_sentence_end_ids",
+                    frozenset({32, 19, 49, 203}),
+                )
             else:
                 sent_end_ids = getattr(
                     self.tokenizer,
@@ -532,7 +536,7 @@ class MultiPassController(nn.Module):
                 frozenset({32, 10, ord("."), ord("!"), ord("?"), ord(","), ord(";"), ord(":")}),
             )
             newline_ids = (
-                frozenset({203})
+                getattr(self.tokenizer, "_newline_ids", frozenset({203}))
                 if is_hf_donor
                 else getattr(self.tokenizer, "_newline_ids", frozenset({10}))
             )
@@ -540,12 +544,15 @@ class MultiPassController(nn.Module):
             xml_open_ids = getattr(self.tokenizer, "_xml_open_ids", frozenset({ord("<")}))
             str_to_id = getattr(self.tokenizer, "_str_to_id", {})
             pure_newline_ids = (
-                frozenset({203})
+                getattr(self.tokenizer, "_newline_ids", frozenset({203}))
                 if is_hf_donor
                 else frozenset(
                     {10} | {str_to_id[m] for m in ("\n", "\n\n") if m in str_to_id}
                 )
             )
+            colon_id = int(getattr(self.tokenizer, "colon_id", 44))
+            hash_id = int(getattr(self.tokenizer, "hash_id", 21))
+            lt_id = int(getattr(self.tokenizer, "lt_id", 46))
             punct_sent_end_ids = sent_end_ids - newline_ids
             forbidden_marker_ids = [
                 str_to_id[m]
@@ -597,7 +604,7 @@ class MultiPassController(nn.Module):
                     is_hf_donor
                     and step >= 6
                     and len(tokens) >= 2
-                    and tokens[-2] == 44
+                    and tokens[-2] == colon_id
                     and tokens[-1] in pure_newline_ids
                 )
                 if not has_emitted_a and (step >= thought_budget or donor_colon_intro_ready):
@@ -715,30 +722,43 @@ class MultiPassController(nn.Module):
                     else min(4, thought_budget // 2)
                 )
                 if is_hf_donor:
-                    # Mask unused special/FIM tokens 1..18 (including pad_id=4) and trailing special IDs >= 49152
-                    next_logits[1:19] = -torch.inf
-                    if vocab_size > 49152:
-                        next_logits[49152:] = -torch.inf
+                    low_s, low_e = getattr(self.tokenizer, "invalid_logit_slice_low", (1, 19))
+                    high_s = int(getattr(self.tokenizer, "invalid_logit_start_high", 49152))
+                    eos_logit_val = (
+                        float(next_logits[self.tokenizer.eos_id].item())
+                        if 0 <= self.tokenizer.eos_id < logit_bound
+                        else None
+                    )
+                    next_logits[low_s:low_e] = -torch.inf
+                    if vocab_size > high_s:
+                        next_logits[high_s:] = -torch.inf
+                    if (
+                        eos_logit_val is not None
+                        and has_emitted_a
+                        and a_start_token_idx > 0
+                        and (len(tokens) - a_start_token_idx) >= 4
+                    ):
+                        next_logits[self.tokenizer.eos_id] = eos_logit_val
                     if not has_emitted_a:
                         for cid in donor_code_start_ids:
                             if cid < logit_bound:
                                 next_logits[cid] = -torch.inf
                         if tokens[-1] in pure_newline_ids and step < min_t_steps:
-                            next_logits[21] = -torch.inf
+                            next_logits[hash_id] = -torch.inf
                     elif a_start_token_idx > 0:
                         a_slice = tokens[a_start_token_idx:]
                         is_code_a = any(t in donor_code_start_ids for t in a_slice[:3])
                         if is_code_a and tokens[-1] in pure_newline_ids:
-                            next_logits[21] = -torch.inf
+                            next_logits[hash_id] = -torch.inf
                             for cid in donor_code_start_ids:
                                 if cid < logit_bound:
                                     next_logits[cid] = -torch.inf
-                    if len(tokens) >= 2 and tokens[-1] == 21:
+                    if len(tokens) >= 2 and tokens[-1] == hash_id:
                         # Prevent emitting `#U$#`, `#T$#`, `#Q$#` mid-trace, or `#A$#` when disallowed
-                        for ch_id in (71, 70, 67, 69, 58):
+                        for ch_id in getattr(self.tokenizer, "marker_char_ids", (71, 70, 67, 69, 58)):
                             next_logits[ch_id] = -torch.inf
                         if has_emitted_a or step < min_t_steps:
-                            next_logits[51] = -torch.inf
+                            next_logits[int(getattr(self.tokenizer, "a_char_id", 51))] = -torch.inf
                 else:
                     # Mask control bytes (<32 except newline=10), DEL..0xFF (127..255), pad_id (256), bos_id (257), unk_id (259)
                     next_logits[:10] = -torch.inf
@@ -879,7 +899,7 @@ class MultiPassController(nn.Module):
                     or (has_emitted_a and len(tokens) == a_start_token_idx)
                     or (len(tokens) >= len(a_tag_tokens) and tokens[-len(a_tag_tokens) :] == a_tag_tokens)
                 ):
-                    for bad_start_id in (203, 21, 46):
+                    for bad_start_id in (*pure_newline_ids, hash_id, lt_id):
                         if bad_start_id < logit_bound:
                             next_logits[bad_start_id] = -torch.inf
                 elif not is_morph and (
@@ -915,7 +935,7 @@ class MultiPassController(nn.Module):
                     a_slice = tokens[a_start_token_idx:]
                     is_code_a = any(t in donor_code_start_ids for t in a_slice[:3])
                     if tokens[-1] in pure_newline_ids:
-                        if next_id in (21, 46):
+                        if next_id in (hash_id, lt_id):
                             break
                         if is_code_a and any(t in donor_return_ids for t in a_slice):
                             if next_id in pure_newline_ids or not self.tokenizer.decode([next_id]).startswith(" "):

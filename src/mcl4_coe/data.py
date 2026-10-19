@@ -171,6 +171,36 @@ class DonorHFTokenizer:
             self._CACHE[model_id] = (hf_tok, byte_lens)
         self.hf_tok, self._token_byte_lens = self._CACHE[model_id]
 
+        def _first_id(s: str, default: int) -> int:
+            ids = self.hf_tok.encode(s, add_special_tokens=False)
+            return int(ids[0]) if ids else default
+
+        self.period_id = _first_id(".", 15 if self.vocab_size == 50304 else 32)
+        self.colon_id = _first_id(":", 27 if self.vocab_size == 50304 else 44)
+        self.hash_id = _first_id("#", 4 if self.vocab_size == 50304 else 21)
+        self.lt_id = _first_id("<", 29 if self.vocab_size == 50304 else 46)
+        self.newline_id = _first_id("\n", 187 if self.vocab_size == 50304 else 203)
+        self._newline_ids = frozenset({self.newline_id})
+        self._sentence_end_ids = frozenset(
+            {
+                self.period_id,
+                _first_id("!", 2 if self.vocab_size == 50304 else 19),
+                _first_id("?", 32 if self.vocab_size == 50304 else 49),
+                self.newline_id,
+            }
+        )
+        self.marker_char_ids = tuple(
+            _first_id(c, d)
+            for c, d in (("U", 54), ("T", 53), ("Q", 50), ("S", 52), ("H", 41))
+        )
+        self.a_char_id = _first_id("A", 34 if self.vocab_size == 50304 else 51)
+        if self.vocab_size == 50304:
+            self.invalid_logit_slice_low = (0, 2)
+            self.invalid_logit_start_high = 50254
+        else:
+            self.invalid_logit_slice_low = (1, 19)
+            self.invalid_logit_start_high = 49152
+
     def encode(
         self,
         text: str,

@@ -2020,7 +2020,8 @@ class OrnithSelfImprover:
             self.novelty_buffer._buffer = self.novelty_buffer._buffer.to(model_dev)
 
         num_exp = int(getattr(coe.backbone.config, "num_experts", 4))
-        high_expert_mode = num_exp >= 256
+        d_mod = int(getattr(coe.backbone.config, "d_model", 128))
+        high_expert_mode = num_exp >= 256 or (num_exp * d_mod >= 65536)
         if high_expert_mode and batch_size > 1:
             batch_size = 1
 
@@ -2260,10 +2261,12 @@ class OrnithSelfImprover:
         ftpo_cho_ids: list[list[int]] = []
         with torch.no_grad():
             if is_hf_donor:
+                low_s, low_e = getattr(self.tokenizer, "invalid_logit_slice_low", (1, 19))
+                high_s = int(getattr(self.tokenizer, "invalid_logit_start_high", 49152))
                 masked_l = lm_distill_out.logits.detach().clone()
-                masked_l[:, :, 1:19] = -torch.inf
-                if vocab_size > 49152:
-                    masked_l[:, :, 49152:] = -torch.inf
+                masked_l[:, :, low_s:low_e] = -torch.inf
+                if vocab_size > high_s:
+                    masked_l[:, :, high_s:] = -torch.inf
                 pred_ids = masked_l.argmax(dim=-1)
             elif vocab_size > 1024:
                 masked_l = lm_distill_out.logits.detach().clone()
@@ -2302,10 +2305,12 @@ class OrnithSelfImprover:
             if rej_tok == gold_tok:
                 continue
             if is_hf_donor:
+                low_s, low_e = getattr(self.tokenizer, "invalid_logit_slice_low", (1, 19))
+                high_s = int(getattr(self.tokenizer, "invalid_logit_start_high", 49152))
                 row_cand = lm_distill_out.logits[b_i, pos_idx].detach().clone()
-                row_cand[:19] = -torch.inf
-                if vocab_size > 49152:
-                    row_cand[49152:] = -torch.inf
+                row_cand[low_s:low_e] = -torch.inf
+                if vocab_size > high_s:
+                    row_cand[high_s:] = -torch.inf
                 row_cand[rej_tok] = -torch.inf
                 top_alts = row_cand.topk(4).indices.tolist()
             elif vocab_size > 1024:

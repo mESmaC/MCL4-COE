@@ -800,17 +800,47 @@ class MultiPassController(nn.Module):
                             if gen_window[i : i + 6] == ctx6:
                                 trig_b = gen_window[i + 6]
                                 if is_hf_donor or (32 <= trig_b < 127) or trig_b >= 260:
-                                    next_logits[trig_b] -= 5.0
-                    if len(gen_window) >= 5:
-                        ctx4 = gen_window[-4:]
-                        hits_4: dict[int, int] = {}
-                        for i in range(len(gen_window) - 4):
-                            if gen_window[i : i + 4] == ctx4:
-                                trig_b = gen_window[i + 4]
-                                hits_4[trig_b] = hits_4.get(trig_b, 0) + 1
-                        for trig_b, cnt in hits_4.items():
-                            if cnt >= 2 and (is_hf_donor or (32 <= trig_b < 127) or trig_b >= 260):
-                                next_logits[trig_b] -= 4.5 * cnt
+                                    next_logits[trig_b] -= 6.0
+                    if len(gen_window) >= 4:
+                        ctx3 = gen_window[-3:]
+                        hits_3m: dict[int, int] = {}
+                        for i in range(len(gen_window) - 3):
+                            if gen_window[i : i + 3] == ctx3:
+                                trig_b = gen_window[i + 3]
+                                hits_3m[trig_b] = hits_3m.get(trig_b, 0) + 1
+                        for trig_b, cnt in hits_3m.items():
+                            if cnt >= 1 and (is_hf_donor or (32 <= trig_b < 127) or trig_b >= 260):
+                                next_logits[trig_b] -= 5.0 * cnt
+                    if len(gen_window) >= 3:
+                        ctx2 = gen_window[-2:]
+                        hits_2m: dict[int, int] = {}
+                        for i in range(len(gen_window) - 2):
+                            if gen_window[i : i + 2] == ctx2:
+                                trig_b = gen_window[i + 2]
+                                hits_2m[trig_b] = hits_2m.get(trig_b, 0) + 1
+                        for trig_b, cnt in hits_2m.items():
+                            if cnt >= 1 and (is_hf_donor or (32 <= trig_b < 127) or trig_b >= 260):
+                                next_logits[trig_b] -= 4.0 * cnt
+                    if len(gen_window) >= 2:
+                        last_t = gen_window[-1]
+                        if last_t >= 260 and last_t not in pure_newline_ids:
+                            next_logits[last_t] = -torch.inf
+                        hits_1m: dict[int, int] = {}
+                        for i in range(len(gen_window) - 1):
+                            if gen_window[i] == last_t:
+                                trig_b = gen_window[i + 1]
+                                hits_1m[trig_b] = hits_1m.get(trig_b, 0) + 1
+                        for trig_b, cnt in hits_1m.items():
+                            if cnt >= 1 and (is_hf_donor or (32 <= trig_b < 127) or trig_b >= 260):
+                                next_logits[trig_b] -= 2.75 * cnt
+                    freq_window = gen_window[-64:]
+                    tok_counts: dict[int, int] = {}
+                    for t_id in freq_window:
+                        if t_id >= 260 and t_id not in pure_newline_ids:
+                            tok_counts[t_id] = tok_counts.get(t_id, 0) + 1
+                    for t_id, cnt in tok_counts.items():
+                        if cnt >= 2 and t_id < logit_bound:
+                            next_logits[t_id] -= 1.35 * (cnt - 1)
                 else:
                     if len(gen_window) >= 6:
                         ctx5 = gen_window[-5:]

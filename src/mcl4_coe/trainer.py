@@ -946,13 +946,23 @@ class MCL4COETrainer:
         """Build `self.optimizer` over all currently trainable (`requires_grad=True`) parameters."""
         if self.config.preserve_residual_across_stacks and float(self.config.donor_backbone_lr_scale) != 1.0:
             new_adapter_markers = (
-                ".ple.",
-                ".markov_router.",
-                ".markov_gate",
-                ".global_",
-                ".feedback.",
-                ".q_norm.",
-                ".k_norm.",
+                (
+                    ".ple.",
+                    ".markov_router.",
+                    ".markov_gate",
+                    ".global_",
+                    ".feedback.",
+                )
+                if str(self.config.qk_norm_mode).lower() == "full"
+                else (
+                    ".ple.",
+                    ".markov_router.",
+                    ".markov_gate",
+                    ".global_",
+                    ".feedback.",
+                    ".q_norm.",
+                    ".k_norm.",
+                )
             )
             adapter_decay, adapter_nodecay = [], []
             donor_decay, donor_nodecay = [], []
@@ -1258,13 +1268,23 @@ class MCL4COETrainer:
         """Return trainable parameter names in the exact order they appear across `optimizer.param_groups`."""
         if self.config.preserve_residual_across_stacks and float(self.config.donor_backbone_lr_scale) != 1.0:
             new_adapter_markers = (
-                ".ple.",
-                ".markov_router.",
-                ".markov_gate",
-                ".global_",
-                ".feedback.",
-                ".q_norm.",
-                ".k_norm.",
+                (
+                    ".ple.",
+                    ".markov_router.",
+                    ".markov_gate",
+                    ".global_",
+                    ".feedback.",
+                )
+                if str(self.config.qk_norm_mode).lower() == "full"
+                else (
+                    ".ple.",
+                    ".markov_router.",
+                    ".markov_gate",
+                    ".global_",
+                    ".feedback.",
+                    ".q_norm.",
+                    ".k_norm.",
+                )
             )
             adapter_decay, adapter_nodecay = [], []
             donor_decay, donor_nodecay = [], []
@@ -1947,7 +1967,8 @@ class MCL4COETrainer:
 
         # Cold start or expert-upcycled stage without optimizer moments: warm up over >= 12% of stage steps
         eff_warmup = max(self.config.warmup_ratio, 0.12 if base_step > 0 else 0.0)
-        warmup_steps = max(1, int(round(stage_steps * eff_warmup)))
+        min_w = 48 if self.config.preserve_residual_across_stacks else 1
+        warmup_steps = max(min_w, int(round(stage_steps * eff_warmup)))
         if local_step <= warmup_steps:
             return self.config.lr * (local_step / warmup_steps)
         decay_span = max(1, stage_steps - warmup_steps)
@@ -2404,13 +2425,16 @@ class MCL4COETrainer:
                         if ok in self.latest_metrics:
                             ornith_telemetry[ok] = self.latest_metrics[ok]
 
-                run_val = (
-                    step == 1
-                    or (self.config.eval_every > 0 and step == start_step)
-                    or (self.config.eval_every > 0 and step % self.config.eval_every == 0)
-                    or step % self.config.checkpoint_every == 0
-                    or step == self.config.total_steps
-                    or (mitosis_event is not None and mitosis_event.get("action") == "expand")
+                run_val = bool(
+                    self.config.eval_every > 0
+                    and (
+                        step == 1
+                        or step == start_step
+                        or step % self.config.eval_every == 0
+                        or step % self.config.checkpoint_every == 0
+                        or step == self.config.total_steps
+                        or (mitosis_event is not None and mitosis_event.get("action") == "expand")
+                    )
                 )
                 val_telemetry: dict[str, Any] = {}
                 if run_val:

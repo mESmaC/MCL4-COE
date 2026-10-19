@@ -797,12 +797,14 @@ class MCL4COETrainer:
         old_default_dtype = torch.get_default_dtype()
         orig_lin_reset = torch.nn.Linear.reset_parameters
         orig_emb_reset = torch.nn.Embedding.reset_parameters
+        orig_init_normal = torch.nn.init.normal_
         try:
             if use_bf16_init:
                 torch.set_default_dtype(torch.bfloat16)
             if skip_rng:
                 torch.nn.Linear.reset_parameters = lambda _self: None  # type: ignore[method-assign]
                 torch.nn.Embedding.reset_parameters = lambda _self: None  # type: ignore[method-assign]
+                torch.nn.init.normal_ = lambda tensor, mean=0.0, std=1.0, generator=None: tensor  # type: ignore[assignment]
             self.model = CognitiveOperatorEnsemble(
                 MCL4CEDBackbone(self.backbone_cfg),
                 self.coe_cfg,
@@ -811,6 +813,7 @@ class MCL4COETrainer:
             torch.set_default_dtype(old_default_dtype)
             torch.nn.Linear.reset_parameters = orig_lin_reset  # type: ignore[method-assign]
             torch.nn.Embedding.reset_parameters = orig_emb_reset  # type: ignore[method-assign]
+            torch.nn.init.normal_ = orig_init_normal  # type: ignore[assignment]
         if use_bf16_init:
             self.model.to(dtype=torch.bfloat16)
         if self.config.use_nvfp4 and self.device.type == "cuda":

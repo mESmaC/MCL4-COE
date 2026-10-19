@@ -249,39 +249,45 @@ def graft_olmoe_1b_7b_checkpoint(
     torch.manual_seed(seed)
     orig_lin_reset = torch.nn.Linear.reset_parameters
     orig_emb_reset = torch.nn.Embedding.reset_parameters
+    orig_init_normal = torch.nn.init.normal_
     old_default_dtype = torch.get_default_dtype()
     try:
         torch.set_default_dtype(torch.bfloat16)
         torch.nn.Linear.reset_parameters = lambda _self: None  # type: ignore[method-assign]
         torch.nn.Embedding.reset_parameters = lambda _self: None  # type: ignore[method-assign]
+        torch.nn.init.normal_ = lambda tensor, mean=0.0, std=1.0, generator=None: tensor  # type: ignore[assignment]
         with torch.device("cpu"):
             model = CognitiveOperatorEnsemble(MCL4CEDBackbone(backbone_cfg), coe_cfg)
     finally:
         torch.set_default_dtype(old_default_dtype)
         torch.nn.Linear.reset_parameters = orig_lin_reset  # type: ignore[method-assign]
         torch.nn.Embedding.reset_parameters = orig_emb_reset  # type: ignore[method-assign]
+        torch.nn.init.normal_ = orig_init_normal  # type: ignore[assignment]
 
-    # Initialize only the newly added MCL4-COE modules (<0.26B params), skipping the 6.92B donor layers
+    # Initialize only the newly added MCL4-COE modules (<0.14B params), skipping the 6.92B donor layers
     for name, mod in model.named_modules():
-        if isinstance(mod, torch.nn.Linear) and (
+        if isinstance(mod, (torch.nn.Linear, torch.nn.Embedding)) and (
             not name.startswith("backbone.")
-            or any(tag in name for tag in (".ple.", ".markov_router.", ".global_q", ".global_kv", "feedback."))
+            or any(
+                tag in name
+                for tag in (".ple.", ".markov_router.", ".global_q_proj", ".global_kv_proj", "feedback.")
+            )
         ):
-            mod.reset_parameters()
+            model.backbone._initialize(mod)
 
     # Zero-initialize MCL4-COE residual gates so Step-0 forward pass is 100% continuous with OLMoE
     for layer_idx in range(8):
         enc = model.backbone.encoder_layers[layer_idx]
         dec = model.backbone.decoder_layers[layer_idx]
-        enc.ple.gate_scale.data.zero_()
-        dec.ple.gate_scale.data.zero_()
-        enc.attention.markov_gate.data.zero_()
-        dec.attention.markov_gate.data.zero_()
+        if enc.ple is not None:
+            enc.ple.gate_scale.data.zero_()
+        if dec.ple is not None:
+            dec.ple.gate_scale.data.zero_()
+        if enc.attention.markov_gate is not None:
+            enc.attention.markov_gate.data.zero_()
+        if dec.local_attention.markov_gate is not None:
+            dec.local_attention.markov_gate.data.zero_()
         dec.global_out_proj.weight.data.zero_()
-        enc.attention.markov_router.net[-1].weight.data.zero_()
-        enc.attention.markov_router.net[-1].bias.data.zero_()
-        dec.attention.markov_router.net[-1].weight.data.zero_()
-        dec.attention.markov_router.net[-1].bias.data.zero_()
     model.backbone.feedback.gate.data.zero_()
     model.backbone.encoder_norm.weight.data.fill_(1.0)
 
@@ -306,33 +312,26 @@ def graft_olmoe_1b_7b_checkpoint(
                 t = f.get_tensor(key).to(dtype=torch.bfloat16)
                 if key == "model.embed_tokens.weight":
                     model.backbone.token_embedding.weight.data.copy_(t)
-                    # Seed PLE token table from truncated SVD/slice of pretrained embeddings
-                    model.backbone.encoder_layers[0].ple.token_table.weight.data.copy_(
-                        t[:, :ple_dim] * 0.1
-                    )
-                    for blk in list(model.backbone.encoder_layers)[1:] + list(
-                        model.backbone.decoder_layers
-                    ):
-                        blk.ple.token_table.weight.data.copy_(t[:, :ple_dim] * 0.1)
                 elif key == "lm_head.weight":
                     model.backbone.lm_head.weight.data.copy_(t)
                 elif key == "model.norm.weight":
-                    model.backbone.decoder_norm.weight.data.copy_(t)
+                    model.backbone.final_norm.weight.data.copy_(t)
                 elif key.startswith("model.layers."):
                     parts = key.split(".")
                     l_idx = int(parts[2])
                     blk = _target_block(l_idx)
+                    attn_blk = blk.attention if hasattr(blk, "attention") else blk.local_attention
                     sub = ".".join(parts[3:])
                     if sub == "input_layernorm.weight":
                         blk.attn_norm.weight.data.copy_(t)
                     elif sub == "post_attention_layernorm.weight":
                         blk.moe_norm.weight.data.copy_(t)
                     elif sub == "self_attn.o_proj.weight":
-                        blk.attention.out_proj.weight.data.copy_(t)
+                        attn_blk.out_proj.weight.data.copy_(t)
                     elif sub == "self_attn.q_norm.weight":
-                        blk.attention.q_norm.weight.data.copy_(t[perm])
+                        attn_blk.q_norm.weight.data.copy_(t[perm])
                     elif sub == "self_attn.k_norm.weight":
-                        blk.attention.k_norm.weight.data.copy_(t[perm])
+                        attn_blk.k_norm.weight.data.copy_(t[perm])
                     elif sub in (
                         "self_attn.q_proj.weight",
                         "self_attn.k_proj.weight",
@@ -346,7 +345,7 @@ def graft_olmoe_1b_7b_checkpoint(
                             q_w = qkv_parts[l_idx].pop("q_proj")
                             k_w = qkv_parts[l_idx].pop("k_proj")
                             v_w = qkv_parts[l_idx].pop("v_proj")
-                            blk.attention.qkv.weight.data.copy_(torch.cat([q_w, k_w, v_w], dim=0))
+                            attn_blk.qkv.weight.data.copy_(torch.cat([q_w, k_w, v_w], dim=0))
                             del q_w, k_w, v_w
                     elif sub == "mlp.gate.weight":
                         blk.moe.router.weight.data.copy_(t)

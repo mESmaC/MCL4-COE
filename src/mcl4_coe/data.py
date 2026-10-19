@@ -123,20 +123,31 @@ class DonorHFTokenizer:
 
     def __init__(
         self,
-        model_id: str = "ibm-granite/granite-3.1-1b-a400m-instruct",
+        model_id: str | None = None,
         *,
         vocab_size: int = 49155,
-        pad_id: int = 4,
-        bos_id: int = 0,
-        eos_id: int = 0,
-        unk_id: int = 4,
+        pad_id: int | None = None,
+        bos_id: int | None = None,
+        eos_id: int | None = None,
+        unk_id: int | None = None,
     ) -> None:
+        if model_id is None:
+            if int(vocab_size) == 50304:
+                model_id = "allenai/OLMoE-1B-7B-0125"
+            else:
+                model_id = "ibm-granite/granite-3.1-1b-a400m-instruct"
         self.model_id = model_id
         self.vocab_size = int(vocab_size)
-        self.pad_id = int(pad_id)
-        self.bos_id = int(bos_id)
-        self.eos_id = int(eos_id)
-        self.unk_id = int(unk_id)
+        if int(vocab_size) == 50304:
+            self.pad_id = int(1 if pad_id is None else pad_id)
+            self.bos_id = int(50279 if bos_id is None else bos_id)
+            self.eos_id = int(50279 if eos_id is None else eos_id)
+            self.unk_id = int(0 if unk_id is None else unk_id)
+        else:
+            self.pad_id = int(4 if pad_id is None else pad_id)
+            self.bos_id = int(0 if bos_id is None else bos_id)
+            self.eos_id = int(0 if eos_id is None else eos_id)
+            self.unk_id = int(4 if unk_id is None else unk_id)
         self.is_hf_donor = True
         self.prompt_mask_bit = 0x80000000
         self.value_mask = 0x7FFFFFFF

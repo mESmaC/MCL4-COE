@@ -60,6 +60,9 @@ class MCL4CEDConfig:
     markov_query_chunk_size: int = 1024
     eos_token_id: int | None = None
     use_qk_norm: bool = True
+    qk_norm_mode: str = "head"
+    norm_topk_prob: bool = True
+    tie_word_embeddings: bool | None = None
     attention_multiplier: float | None = None
     embedding_multiplier: float = 1.0
     residual_multiplier: float = 1.0
@@ -104,6 +107,8 @@ class MCL4CEDConfig:
                 raise ValueError(f"dense_expert_indices entry {idx} out of range [0, {self.num_experts})")
         if self.attention_type not in ("markov_local4", "standard"):
             raise ValueError("attention_type must be 'markov_local4' or 'standard'")
+        if self.qk_norm_mode not in ("head", "full"):
+            raise ValueError("qk_norm_mode must be 'head' or 'full'")
 
     @property
     def eos_id(self) -> int:
@@ -192,6 +197,7 @@ class SparseMoE(nn.Module):
         super().__init__()
         self.num_experts = config.num_experts
         self.top_k = config.top_k
+        self.norm_topk_prob = bool(getattr(config, "norm_topk_prob", True))
         self.recurrent_coverage_penalty = float(
             getattr(config, "recurrent_coverage_penalty", 0.0)
         )
@@ -606,34 +612,59 @@ class SparseMoE(nn.Module):
             flat.is_cuda
             and hasattr(torch, "_grouped_mm")
             and flat.shape[0] > 0
+            and (self.num_experts * x.shape[-1] < 65536)
             and all(
                 type(e.up_proj) is nn.Linear and type(e.down_proj) is nn.Linear
                 for e in self.experts
             )
+            and len({e.up_proj.weight.requires_grad for e in self.experts}) <= 1
             and (flat.dtype == torch.bfloat16 or torch.is_autocast_enabled())
         )
         if use_grouped:
             with torch.autocast(device_type=x.device.type, enabled=False):
                 router_logits = F.linear(flat.float(), self.router.weight.float())
-                probabilities = F.softmax(router_logits, dim=-1)
-                routed_probs = probabilities
                 pair_tensors = self._get_mitotic_pair_tensors(x.device)
+                if pair_tensors is not None and not self.norm_topk_prob:
+                    p_t, c_t = pair_tensors
+                    ln2 = 0.6931471805599453
+                    adj_logits = router_logits.clone()
+                    adj_logits[:, p_t] = adj_logits[:, p_t] - ln2
+                    adj_logits[:, c_t] = adj_logits[:, c_t] - ln2
+                    probabilities = F.softmax(adj_logits, dim=-1)
+                else:
+                    probabilities = F.softmax(router_logits, dim=-1)
+                routed_probs = probabilities
                 if pair_tensors is not None:
                     p_t, c_t = pair_tensors
                     routed_probs = probabilities.clone()
                     p_wins = router_logits.index_select(1, p_t) >= router_logits.index_select(
                         1, c_t
                     )
-                    routed_probs[:, c_t] = torch.where(
-                        p_wins,
-                        torch.zeros_like(p_wins, dtype=routed_probs.dtype),
-                        probabilities.index_select(1, c_t),
-                    )
-                    routed_probs[:, p_t] = torch.where(
-                        p_wins,
-                        probabilities.index_select(1, p_t),
-                        torch.zeros_like(p_wins, dtype=routed_probs.dtype),
-                    )
+                    if not self.norm_topk_prob:
+                        pair_mass = probabilities.index_select(1, p_t) + probabilities.index_select(
+                            1, c_t
+                        )
+                        routed_probs[:, c_t] = torch.where(
+                            p_wins,
+                            torch.zeros_like(p_wins, dtype=routed_probs.dtype),
+                            pair_mass,
+                        )
+                        routed_probs[:, p_t] = torch.where(
+                            p_wins,
+                            pair_mass,
+                            torch.zeros_like(p_wins, dtype=routed_probs.dtype),
+                        )
+                    else:
+                        routed_probs[:, c_t] = torch.where(
+                            p_wins,
+                            torch.zeros_like(p_wins, dtype=routed_probs.dtype),
+                            probabilities.index_select(1, c_t),
+                        )
+                        routed_probs[:, p_t] = torch.where(
+                            p_wins,
+                            probabilities.index_select(1, p_t),
+                            torch.zeros_like(p_wins, dtype=routed_probs.dtype),
+                        )
                 if prior_expert_mask is not None and self.recurrent_coverage_penalty > 0.0:
                     flat_prior = prior_expert_mask.reshape(-1, self.num_experts).to(
                         routed_probs.dtype
@@ -645,7 +676,8 @@ class SparseMoE(nn.Module):
                     weights = routed_probs.gather(-1, selected)
                 else:
                     weights, selected = routed_probs.topk(self.top_k, dim=-1)
-                weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
+                if self.norm_topk_prob:
+                    weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
                 sel_mask_2d = x.new_zeros((flat.shape[0], self.num_experts), dtype=torch.float32)
                 sel_mask_2d.scatter_add_(
                     1,
@@ -722,23 +754,46 @@ class SparseMoE(nn.Module):
         active_x = flat.index_select(0, active_indices)
         with torch.autocast(device_type=x.device.type, enabled=False):
             router_logits = F.linear(active_x.float(), self.router.weight.float())
-            probabilities = F.softmax(router_logits, dim=-1)
-            routed_probs = probabilities
             pair_tensors = self._get_mitotic_pair_tensors(x.device)
+            if pair_tensors is not None and not self.norm_topk_prob:
+                p_t, c_t = pair_tensors
+                ln2 = 0.6931471805599453
+                adj_logits = router_logits.clone()
+                adj_logits[:, p_t] = adj_logits[:, p_t] - ln2
+                adj_logits[:, c_t] = adj_logits[:, c_t] - ln2
+                probabilities = F.softmax(adj_logits, dim=-1)
+            else:
+                probabilities = F.softmax(router_logits, dim=-1)
+            routed_probs = probabilities
             if pair_tensors is not None:
                 p_t, c_t = pair_tensors
                 routed_probs = probabilities.clone()
                 p_wins = router_logits.index_select(1, p_t) >= router_logits.index_select(1, c_t)
-                routed_probs[:, c_t] = torch.where(
-                    p_wins,
-                    torch.zeros_like(p_wins, dtype=routed_probs.dtype),
-                    probabilities.index_select(1, c_t),
-                )
-                routed_probs[:, p_t] = torch.where(
-                    p_wins,
-                    probabilities.index_select(1, p_t),
-                    torch.zeros_like(p_wins, dtype=routed_probs.dtype),
-                )
+                if not self.norm_topk_prob:
+                    pair_mass = probabilities.index_select(1, p_t) + probabilities.index_select(
+                        1, c_t
+                    )
+                    routed_probs[:, c_t] = torch.where(
+                        p_wins,
+                        torch.zeros_like(p_wins, dtype=routed_probs.dtype),
+                        pair_mass,
+                    )
+                    routed_probs[:, p_t] = torch.where(
+                        p_wins,
+                        pair_mass,
+                        torch.zeros_like(p_wins, dtype=routed_probs.dtype),
+                    )
+                else:
+                    routed_probs[:, c_t] = torch.where(
+                        p_wins,
+                        torch.zeros_like(p_wins, dtype=routed_probs.dtype),
+                        probabilities.index_select(1, c_t),
+                    )
+                    routed_probs[:, p_t] = torch.where(
+                        p_wins,
+                        probabilities.index_select(1, p_t),
+                        torch.zeros_like(p_wins, dtype=routed_probs.dtype),
+                    )
             if prior_expert_mask is not None and self.recurrent_coverage_penalty > 0.0:
                 flat_prior = (
                     prior_expert_mask.reshape(-1, self.num_experts)
@@ -752,7 +807,8 @@ class SparseMoE(nn.Module):
                 weights = routed_probs.gather(-1, selected)
             else:
                 weights, selected = routed_probs.topk(self.top_k, dim=-1)
-            weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
+            if self.norm_topk_prob:
+                weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
             one_hot_sel = F.one_hot(selected, num_classes=self.num_experts)
             full_sel_mask = x.new_zeros((flat.shape[0], self.num_experts), dtype=torch.float32)
             full_sel_mask.index_copy_(
@@ -828,15 +884,17 @@ class LocalAttentionBlock(nn.Module):
         self.n_heads = config.n_heads
         self.head_dim = config.d_model // config.n_heads
         self.use_qk_norm = bool(config.use_qk_norm)
+        self.qk_norm_mode = str(getattr(config, "qk_norm_mode", "head"))
         self.attention_multiplier = config.attention_multiplier
         self.qkv = nn.Linear(config.d_model, 3 * config.d_model, bias=False)
+        qk_norm_dim = config.d_model if self.qk_norm_mode == "full" else self.head_dim
         self.q_norm = (
-            RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+            RMSNorm(qk_norm_dim, eps=config.rms_norm_eps)
             if self.use_qk_norm
             else nn.Identity()
         )
         self.k_norm = (
-            RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+            RMSNorm(qk_norm_dim, eps=config.rms_norm_eps)
             if self.use_qk_norm
             else nn.Identity()
         )
@@ -933,10 +991,17 @@ class LocalAttentionBlock(nn.Module):
 
     def forward(self, x_norm: Tensor, valid: Tensor, *, causal: bool = True) -> Tensor:
         b, n, width = x_norm.shape
-        qkv = self.qkv(x_norm).view(b, n, 3, self.n_heads, self.head_dim)
-        q, k, v = (part.transpose(1, 2) for part in qkv.unbind(dim=2))
-        if self.use_qk_norm:
-            q, k = self.q_norm(q), self.k_norm(k)
+        if self.use_qk_norm and self.qk_norm_mode == "full":
+            q_flat, k_flat, v_flat = self.qkv(x_norm).chunk(3, dim=-1)
+            q_flat, k_flat = self.q_norm(q_flat), self.k_norm(k_flat)
+            q = q_flat.view(b, n, self.n_heads, self.head_dim).transpose(1, 2)
+            k = k_flat.view(b, n, self.n_heads, self.head_dim).transpose(1, 2)
+            v = v_flat.view(b, n, self.n_heads, self.head_dim).transpose(1, 2)
+        else:
+            qkv = self.qkv(x_norm).view(b, n, 3, self.n_heads, self.head_dim)
+            q, k, v = (part.transpose(1, 2) for part in qkv.unbind(dim=2))
+            if self.use_qk_norm:
+                q, k = self.q_norm(q), self.k_norm(k)
         cos, sin = self._get_rope_cos_sin(n, x_norm.device, q.dtype)
         q, k = self._apply_rope(q, cos, sin), self._apply_rope(k, cos, sin)
 
@@ -1274,9 +1339,14 @@ class MCL4CEDBackbone(nn.Module):
         if 0 <= config.pad_id < config.vocab_size:
             with torch.no_grad():
                 self.token_embedding.weight[config.pad_id].zero_()
-        if config.vocab_size > 1024:
+        should_tie = (
+            bool(config.tie_word_embeddings)
+            if config.tie_word_embeddings is not None
+            else (config.vocab_size > 1024)
+        )
+        if should_tie:
             self.lm_head.weight = self.token_embedding.weight
-        else:
+        elif config.vocab_size <= 1024:
             with torch.no_grad():
                 self.lm_head.weight.copy_(self.token_embedding.weight)
 

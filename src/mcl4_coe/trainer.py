@@ -134,12 +134,18 @@ class TrainingRunConfig:
     rms_norm_eps: float = 1e-5
     rope_theta: float = 10_000.0
     use_qk_norm: bool = True
+    qk_norm_mode: str = "head"
+    norm_topk_prob: bool = True
+    tie_word_embeddings: bool | None = None
     attention_multiplier: float | None = None
     embedding_multiplier: float = 1.0
     residual_multiplier: float = 1.0
     logits_scaling: float = 1.0
     preserve_residual_across_stacks: bool = False
     donor_backbone_lr_scale: float = 0.08
+    model_dtype: str = "float32"
+    plastic_experts_per_layer: int = 0
+    freeze_donor_embeddings: bool = False
     enable_mitosis: bool = False
     release_mitotic_pairs: bool = False
     orthogonal_mitosis: bool = True
@@ -216,6 +222,7 @@ class TrainingRunConfig:
     # Checkpointing, held-out validation & live telemetry
     checkpoint_every: int = 10
     max_keep_checkpoints: int = 0
+    save_optimizer_state: bool = True
     hf_backup_repo: str | None = None
     hf_keep_checkpoints: int = 2
     eval_every: int = 0
@@ -463,9 +470,17 @@ class MCL4COETrainer:
                 if b_cfg["attention_multiplier"] is not None
                 else None
             )
-        for b_key in ("use_qk_norm", "preserve_residual_across_stacks"):
+        for b_key in ("use_qk_norm", "preserve_residual_across_stacks", "norm_topk_prob"):
             if b_key in b_cfg and b_cfg[b_key] is not None:
                 setattr(self.config, b_key, bool(b_cfg[b_key]))
+        if "qk_norm_mode" in b_cfg and b_cfg["qk_norm_mode"] is not None:
+            self.config.qk_norm_mode = str(b_cfg["qk_norm_mode"])
+        if "tie_word_embeddings" in b_cfg:
+            self.config.tie_word_embeddings = (
+                bool(b_cfg["tie_word_embeddings"])
+                if b_cfg["tie_word_embeddings"] is not None
+                else None
+            )
         c_cfg = payload.get("coe_config", {})
         for key in ("projection_dim", "recurrence_steps"):
             if key in c_cfg:
@@ -753,6 +768,9 @@ class MCL4COETrainer:
             rms_norm_eps=self.config.rms_norm_eps,
             rope_theta=self.config.rope_theta,
             use_qk_norm=self.config.use_qk_norm,
+            qk_norm_mode=self.config.qk_norm_mode,
+            norm_topk_prob=self.config.norm_topk_prob,
+            tie_word_embeddings=self.config.tie_word_embeddings,
             attention_multiplier=self.config.attention_multiplier,
             embedding_multiplier=self.config.embedding_multiplier,
             residual_multiplier=self.config.residual_multiplier,
@@ -778,6 +796,8 @@ class MCL4COETrainer:
             MCL4CEDBackbone(self.backbone_cfg),
             self.coe_cfg,
         )
+        if str(self.config.model_dtype).lower() in ("bfloat16", "bf16"):
+            self.model.to(dtype=torch.bfloat16)
         if self.config.use_nvfp4 and self.device.type == "cuda":
             reset_gemm_counts()
             self.nvfp4_layers_converted = convert_linear_to_nvfp4(
@@ -800,6 +820,88 @@ class MCL4COETrainer:
         else:
             self.model.to(self.device)
 
+        self._apply_plasticity_policy()
+        self._create_optimizer()
+        self.controller = MultiPassController(
+            self.model,
+            schedule=CognitiveSchedule(
+                operators=("abduction", "association", "decision", "deduction", "evaluation", "metacognition"),
+                recurrence_steps=self.config.recurrence_steps,
+            ),
+        )
+        from .dream_rsi import DreamRSIEngine
+
+        dream_engine = (
+            DreamRSIEngine(
+                max_rounds=self.config.dream_max_rounds,
+                workers=self.config.dream_workers,
+                max_calls=self.config.dream_max_calls,
+                revisions_per_cycle=self.config.dream_revisions,
+                out_dir=self.run_dir / "dream",
+                seed=self.config.seed,
+            )
+            if self.config.enable_dream_rsi
+            else None
+        )
+        rlvr_pool_path = Path(self.config.shards_root).expanduser().resolve() / "rlvr_env_pool.pt"
+        self.ornith_improver = OrnithSelfImprover(
+            projection_dim=self.config.projection_dim,
+            max_seq_len=min(512, self.config.max_seq_len),
+            seed=self.config.seed,
+            enable_dream_rsi=self.config.enable_dream_rsi,
+            dream_every=self.config.dream_every,
+            dream_engine=dream_engine,
+            external_pool_path=rlvr_pool_path if rlvr_pool_path.is_file() else None,
+        )
+
+    def _apply_plasticity_policy(self, expert_loads: list[float] | None = None) -> set[int]:
+        """Configure `requires_grad` for Generation-Scoped Expert Plasticity and optional frozen donor embeddings."""
+        if self.config.freeze_donor_embeddings:
+            self.model.backbone.token_embedding.weight.requires_grad_(False)
+            self.model.backbone.token_embedding.weight.grad = None
+            self.model.backbone.lm_head.weight.requires_grad_(False)
+            self.model.backbone.lm_head.weight.grad = None
+
+        n_exp = int(self.model.backbone.config.num_experts)
+        cap = int(self.config.plastic_experts_per_layer)
+        if cap <= 0 or cap >= n_exp:
+            for layer in list(self.model.backbone.encoder_layers) + list(
+                self.model.backbone.decoder_layers
+            ):
+                for e in layer.moe.experts:
+                    e.up_proj.weight.requires_grad_(True)
+                    e.down_proj.weight.requires_grad_(True)
+            return set(range(n_exp))
+
+        pairs = self._get_model_mitotic_pairs()
+        plastic_set: set[int] = {
+            int(idx) for p in pairs for idx in p if 0 <= int(idx) < n_exp
+        }
+        if len(plastic_set) < cap:
+            loads = expert_loads or getattr(self, "_ema_expert_loads", None)
+            if loads and len(loads) == n_exp:
+                ranked = sorted(range(n_exp), key=lambda i: float(loads[i]), reverse=True)
+            else:
+                ranked = list(range(n_exp - 1, -1, -1))
+            for idx in ranked:
+                if len(plastic_set) >= cap:
+                    break
+                plastic_set.add(int(idx))
+
+        for layer in list(self.model.backbone.encoder_layers) + list(
+            self.model.backbone.decoder_layers
+        ):
+            for idx, e in enumerate(layer.moe.experts):
+                active = idx in plastic_set
+                e.up_proj.weight.requires_grad_(active)
+                e.down_proj.weight.requires_grad_(active)
+                if not active:
+                    e.up_proj.weight.grad = None
+                    e.down_proj.weight.grad = None
+        return plastic_set
+
+    def _create_optimizer(self) -> None:
+        """Build `self.optimizer` over all currently trainable (`requires_grad=True`) parameters."""
         if self.config.preserve_residual_across_stacks and float(self.config.donor_backbone_lr_scale) != 1.0:
             new_adapter_markers = (
                 ".ple.",
@@ -844,7 +946,7 @@ class MCL4COETrainer:
             ]
 
         if self.config.cpu_offload_optimizer:
-            self.optimizer: Any = CPUOffloadAdamW(
+            self.optimizer = CPUOffloadAdamW(
                 param_groups,
                 lr=self.config.lr,
                 betas=(0.9, 0.95),
@@ -859,37 +961,6 @@ class MCL4COETrainer:
                 betas=(0.9, 0.95),
                 fused=use_fused,
             )
-        self.controller = MultiPassController(
-            self.model,
-            schedule=CognitiveSchedule(
-                operators=("abduction", "association", "decision", "deduction", "evaluation", "metacognition"),
-                recurrence_steps=self.config.recurrence_steps,
-            ),
-        )
-        from .dream_rsi import DreamRSIEngine
-
-        dream_engine = (
-            DreamRSIEngine(
-                max_rounds=self.config.dream_max_rounds,
-                workers=self.config.dream_workers,
-                max_calls=self.config.dream_max_calls,
-                revisions_per_cycle=self.config.dream_revisions,
-                out_dir=self.run_dir / "dream",
-                seed=self.config.seed,
-            )
-            if self.config.enable_dream_rsi
-            else None
-        )
-        rlvr_pool_path = Path(self.config.shards_root).expanduser().resolve() / "rlvr_env_pool.pt"
-        self.ornith_improver = OrnithSelfImprover(
-            projection_dim=self.config.projection_dim,
-            max_seq_len=min(512, self.config.max_seq_len),
-            seed=self.config.seed,
-            enable_dream_rsi=self.config.enable_dream_rsi,
-            dream_every=self.config.dream_every,
-            dream_engine=dream_engine,
-            external_pool_path=rlvr_pool_path if rlvr_pool_path.is_file() else None,
-        )
 
     def _write_manifest(self, status: str) -> None:
         payload = {
@@ -974,20 +1045,21 @@ class MCL4COETrainer:
         }
 
         opt_state_cpu: dict[str, Any] = {}
-        try:
-            raw_opt = self.optimizer.state_dict()
-            opt_state_cpu = {
-                "param_groups": raw_opt.get("param_groups", []),
-                "state": {
-                    k: {
-                        sk: (sv.detach().cpu() if isinstance(sv, torch.Tensor) else sv)
-                        for sk, sv in v.items()
-                    }
-                    for k, v in raw_opt.get("state", {}).items()
-                },
-            }
-        except Exception:
-            pass
+        if self.config.save_optimizer_state:
+            try:
+                raw_opt = self.optimizer.state_dict()
+                opt_state_cpu = {
+                    "param_groups": raw_opt.get("param_groups", []),
+                    "state": {
+                        k: {
+                            sk: (sv.detach().cpu() if isinstance(sv, torch.Tensor) else sv)
+                            for sk, sv in v.items()
+                        }
+                        for k, v in raw_opt.get("state", {}).items()
+                    },
+                }
+            except Exception:
+                pass
 
         state_payload = {
             "step": self.current_step,
@@ -1004,8 +1076,11 @@ class MCL4COETrainer:
         }
         tmp_pt = pt_path.with_name(f"{pt_path.name}.{threading.get_ident()}.tmp")
         torch.save(state_payload, tmp_pt)
+        del state_payload
         _safe_replace(tmp_pt, pt_path)
         _atomic_json(meta_path, meta)
+        if self.config.hf_backup_repo:
+            self._async_backup_to_hf(step_name, pt_path)
         if int(self.config.max_keep_checkpoints) > 0:
             try:
                 pt_files = sorted(
@@ -1018,8 +1093,6 @@ class MCL4COETrainer:
                         old_pt.unlink(missing_ok=True)
             except Exception:
                 pass
-        if self.config.hf_backup_repo:
-            self._async_backup_to_hf(step_name, pt_path)
         return meta_path
 
     def _async_backup_to_hf(self, step_name: str, pt_path: Path) -> None:
@@ -1031,52 +1104,76 @@ class MCL4COETrainer:
         run_dir = self.run_dir
         run_id = self.config.run_id
         keep_remote = max(1, int(self.config.hf_keep_checkpoints))
+        already_compact = (not self.config.save_optimizer_state) and (
+            str(self.config.model_dtype).lower() in ("bfloat16", "bf16")
+        )
+        tmp_cloud_pt = pt_path.with_name(f".hf_sync_{step_name}.pt")
+        hardlinked = False
+        if already_compact and pt_path.is_file():
+            try:
+                tmp_cloud_pt.unlink(missing_ok=True)
+                os.link(pt_path, tmp_cloud_pt)
+                hardlinked = True
+            except Exception:
+                hardlinked = False
+
+        if not hasattr(self, "_hf_upload_lock"):
+            self._hf_upload_lock = threading.Lock()
 
         def _worker() -> None:
-            try:
-                from huggingface_hub import HfApi
+            with self._hf_upload_lock:
+                try:
+                    from huggingface_hub import HfApi
 
-                api = HfApi(token=hf_token)
-                for rel_f in (
-                    "run_manifest.json",
-                    "metrics.jsonl",
-                    "samples.jsonl",
-                    "dream/dream_state.json",
-                    f"checkpoints/{step_name}.meta.json",
-                ):
-                    local_f = run_dir / rel_f
-                    if local_f.is_file():
+                    api = HfApi(token=hf_token)
+                    for rel_f in (
+                        "run_manifest.json",
+                        "metrics.jsonl",
+                        "samples.jsonl",
+                        "dream/dream_state.json",
+                        f"checkpoints/{step_name}.meta.json",
+                    ):
+                        local_f = run_dir / rel_f
+                        if local_f.is_file():
+                            api.upload_file(
+                                path_or_fileobj=str(local_f),
+                                path_in_repo=f"{run_id}/{rel_f}",
+                                repo_id=repo_id,
+                                repo_type="model",
+                                commit_message=f"[{run_id}] Sync {rel_f} ({step_name})",
+                            )
+                    if hardlinked and tmp_cloud_pt.is_file():
                         api.upload_file(
-                            path_or_fileobj=str(local_f),
-                            path_in_repo=f"{run_id}/{rel_f}",
+                            path_or_fileobj=str(tmp_cloud_pt),
+                            path_in_repo=f"{run_id}/checkpoints/{step_name}.pt",
                             repo_id=repo_id,
                             repo_type="model",
-                            commit_message=f"[{run_id}] Sync {rel_f} ({step_name})",
+                            commit_message=f"[{run_id}] Backup checkpoint {step_name}.pt (bf16)",
                         )
-                if pt_path.is_file():
-                    raw = torch.load(pt_path, map_location="cpu", weights_only=False)
-                    raw.pop("optimizer_state", None)
-                    if "model_state" in raw and isinstance(raw["model_state"], dict):
-                        raw["model_state"] = {
-                            k: (
-                                v.to(dtype=torch.bfloat16)
-                                if torch.is_tensor(v) and torch.is_floating_point(v)
-                                else v
-                            )
-                            for k, v in raw["model_state"].items()
-                        }
-                    tmp_cloud_pt = pt_path.with_name(f".hf_sync_{step_name}.pt")
-                    torch.save(raw, tmp_cloud_pt)
-                    del raw
-                    gc.collect()
-                    api.upload_file(
-                        path_or_fileobj=str(tmp_cloud_pt),
-                        path_in_repo=f"{run_id}/checkpoints/{step_name}.pt",
-                        repo_id=repo_id,
-                        repo_type="model",
-                        commit_message=f"[{run_id}] Backup checkpoint {step_name}.pt (bf16)",
-                    )
-                    tmp_cloud_pt.unlink(missing_ok=True)
+                        tmp_cloud_pt.unlink(missing_ok=True)
+                    elif pt_path.is_file():
+                        raw = torch.load(pt_path, map_location="cpu", weights_only=False)
+                        raw.pop("optimizer_state", None)
+                        if "model_state" in raw and isinstance(raw["model_state"], dict):
+                            raw["model_state"] = {
+                                k: (
+                                    v.to(dtype=torch.bfloat16)
+                                    if torch.is_tensor(v) and torch.is_floating_point(v)
+                                    else v
+                                )
+                                for k, v in raw["model_state"].items()
+                            }
+                        torch.save(raw, tmp_cloud_pt)
+                        del raw
+                        gc.collect()
+                        api.upload_file(
+                            path_or_fileobj=str(tmp_cloud_pt),
+                            path_in_repo=f"{run_id}/checkpoints/{step_name}.pt",
+                            repo_id=repo_id,
+                            repo_type="model",
+                            commit_message=f"[{run_id}] Backup checkpoint {step_name}.pt (bf16)",
+                        )
+                        tmp_cloud_pt.unlink(missing_ok=True)
                     repo_files = api.list_repo_files(repo_id, repo_type="model")
                     remote_pts = sorted(
                         f
@@ -1094,8 +1191,11 @@ class MCL4COETrainer:
                                 )
                             except Exception:
                                 pass
-            except Exception:
-                pass
+                except Exception:
+                    try:
+                        tmp_cloud_pt.unlink(missing_ok=True)
+                    except Exception:
+                        pass
 
         t = threading.Thread(target=_worker, name=f"hf_backup_{step_name}", daemon=True)
         t.start()
@@ -1317,79 +1417,94 @@ class MCL4COETrainer:
                 expert_loads=loads_for_split,
                 existing_pairs=pairs_for_schedule,
             )
-            cur_model_state = model_state_cpu(self.model)
-            raw_opt = self.optimizer.state_dict()
-            cur_opt_state = {
-                "param_groups": raw_opt.get("param_groups", []),
-                "state": {
-                    k: {
-                        sk: (sv.detach().cpu().clone() if isinstance(sv, torch.Tensor) else sv)
-                        for sk, sv in v.items()
-                    }
-                    for k, v in raw_opt.get("state", {}).items()
-                },
-            }
-            del raw_opt
-            self.model.cpu()
-            self.optimizer.state.clear()
-            if hasattr(self, "controller") and self.controller is not None:
-                self.controller.model = None  # type: ignore[assignment]
-            del self.model
-            del self.optimizer
-            if self.device.type == "cuda":
-                gc.collect()
-                torch.cuda.empty_cache()
-
-            upcycled_state = upcycle_state_dict_experts(
-                cur_model_state,
-                old_e,
-                new_e,
-                expert_loads=loads_for_split,
-                existing_pairs=pairs_for_schedule,
-                seed=self.config.seed + step,
-                orthogonal=self.config.orthogonal_mitosis,
+            use_inplace = (not self.config.cpu_offload_optimizer) and (
+                str(self.config.model_dtype).lower() in ("bfloat16", "bf16")
+                or int(self.config.plastic_experts_per_layer) > 0
             )
-            del cur_model_state
-            saved_ornith = self.ornith_improver
-            self.config.num_experts = new_e
-            self._build_model_and_optimizer()
-            self.ornith_improver = saved_ornith
-            if hasattr(self, "controller") and self.controller is not None:
-                self.controller.model = self.model
-            self.model.load_state_dict(upcycled_state, strict=False)
-            del upcycled_state
-            with torch.no_grad():
-                self.model.log_scale.data.clamp_(math.log(0.5), math.log(3.5))
-            newly_split = {idx for pair in added_pairs for idx in pair}
-            active_existing = [
-                (p, c)
-                for p, c in pairs_for_schedule
-                if p not in newly_split and c not in newly_split
-            ]
-            self._set_model_mitotic_pairs(active_existing + added_pairs)
-            if self.config.cpu_offload_optimizer:
-                prepare_model(
-                    self.model,
-                    device=self.device,
-                    bf16_working_weights=(self.device.type == "cuda" and not self.config.use_nvfp4),
-                    preserve_master_weights=False,
+            if use_inplace:
+                self._perform_inplace_mitosis(
+                    step=step,
+                    old_e=old_e,
+                    new_e=new_e,
+                    loads_for_split=loads_for_split,
+                    pairs_for_schedule=pairs_for_schedule,
+                    added_pairs=added_pairs,
                 )
             else:
-                self.model.to(self.device)
-                self._optimizer_restored = self._upcycle_optimizer_state_dict(
-                    cur_opt_state, old_e, new_e, added_pairs
-                )
-            del cur_opt_state
-            if self.device.type == "cuda":
-                gc.collect()
-                torch.cuda.empty_cache()
+                cur_model_state = model_state_cpu(self.model)
+                raw_opt = self.optimizer.state_dict()
+                cur_opt_state = {
+                    "param_groups": raw_opt.get("param_groups", []),
+                    "state": {
+                        k: {
+                            sk: (sv.detach().cpu().clone() if isinstance(sv, torch.Tensor) else sv)
+                            for sk, sv in v.items()
+                        }
+                        for k, v in raw_opt.get("state", {}).items()
+                    },
+                }
+                del raw_opt
+                self.model.cpu()
+                self.optimizer.state.clear()
+                if hasattr(self, "controller") and self.controller is not None:
+                    self.controller.model = None  # type: ignore[assignment]
+                del self.model
+                del self.optimizer
+                if self.device.type == "cuda":
+                    gc.collect()
+                    torch.cuda.empty_cache()
 
-            new_ema = list(loads_for_split) + [0.0] * (new_e - old_e)
-            for p_e, c_e in added_pairs:
-                half = 0.5 * float(new_ema[p_e])
-                new_ema[p_e] = half
-                new_ema[c_e] = half
-            self._ema_expert_loads = new_ema
+                upcycled_state = upcycle_state_dict_experts(
+                    cur_model_state,
+                    old_e,
+                    new_e,
+                    expert_loads=loads_for_split,
+                    existing_pairs=pairs_for_schedule,
+                    seed=self.config.seed + step,
+                    orthogonal=self.config.orthogonal_mitosis,
+                )
+                del cur_model_state
+                saved_ornith = self.ornith_improver
+                self.config.num_experts = new_e
+                self._build_model_and_optimizer()
+                self.ornith_improver = saved_ornith
+                if hasattr(self, "controller") and self.controller is not None:
+                    self.controller.model = self.model
+                self.model.load_state_dict(upcycled_state, strict=False)
+                del upcycled_state
+                with torch.no_grad():
+                    self.model.log_scale.data.clamp_(math.log(0.5), math.log(3.5))
+                newly_split = {idx for pair in added_pairs for idx in pair}
+                active_existing = [
+                    (p, c)
+                    for p, c in pairs_for_schedule
+                    if p not in newly_split and c not in newly_split
+                ]
+                self._set_model_mitotic_pairs(active_existing + added_pairs)
+                if self.config.cpu_offload_optimizer:
+                    prepare_model(
+                        self.model,
+                        device=self.device,
+                        bf16_working_weights=(self.device.type == "cuda" and not self.config.use_nvfp4),
+                        preserve_master_weights=False,
+                    )
+                else:
+                    self.model.to(self.device)
+                    self._optimizer_restored = self._upcycle_optimizer_state_dict(
+                        cur_opt_state, old_e, new_e, added_pairs
+                    )
+                del cur_opt_state
+                if self.device.type == "cuda":
+                    gc.collect()
+                    torch.cuda.empty_cache()
+
+                new_ema = list(loads_for_split) + [0.0] * (new_e - old_e)
+                for p_e, c_e in added_pairs:
+                    half = 0.5 * float(new_ema[p_e])
+                    new_ema[p_e] = half
+                    new_ema[c_e] = half
+                self._ema_expert_loads = new_ema
+
             all_pairs = self._get_model_mitotic_pairs()
             cleared_shards = (
                 self.sampler.evict_consumed_shards(delete_from_disk=self.config.clear_consumed_shards)
@@ -1422,6 +1537,167 @@ class MCL4COETrainer:
             "parameter_count": parameter_count(self.model),
             **({"cleared_shards": cleared_shards} if cleared_shards else {}),
         }
+
+    def _perform_inplace_mitosis(
+        self,
+        *,
+        step: int,
+        old_e: int,
+        new_e: int,
+        loads_for_split: list[float],
+        pairs_for_schedule: list[tuple[int, int]],
+        added_pairs: list[tuple[int, int]],
+    ) -> None:
+        """Expand `SparseMoE` experts and routers directly on-device without full CPU state-dict cloning."""
+        from .backbone import SwiGLUExpert
+
+        old_state_by_name: dict[str, dict[str, Any]] = {}
+        for name, p in self.model.named_parameters():
+            if p in self.optimizer.state and self.optimizer.state[p]:
+                old_state_by_name[name] = self.optimizer.state[p]
+        self.optimizer.state.clear()
+
+        gen = torch.Generator(device="cpu").manual_seed(self.config.seed + step)
+        d_model = int(self.backbone_cfg.d_model)
+        expert_hidden_dim = int(self.backbone_cfg.expert_hidden_dim)
+        all_layers = list(self.model.backbone.encoder_layers) + list(
+            self.model.backbone.decoder_layers
+        )
+        with torch.no_grad():
+            for layer in all_layers:
+                moe = layer.moe
+                for p_e, _ in added_pairs:
+                    parent_exp = moe.experts[p_e]
+                    p_up = parent_exp.up_proj.weight.data
+                    p_down = parent_exp.down_proj.weight.data
+                    child_exp = SwiGLUExpert(d_model, expert_hidden_dim).to(
+                        device=p_up.device, dtype=p_up.dtype
+                    )
+                    delta_up = _orthogonal_antithetic_delta(
+                        p_up.detach().cpu().float(),
+                        gen,
+                        scale=1e-3,
+                        ortho_dim=1,
+                        orthogonal=self.config.orthogonal_mitosis,
+                    ).to(device=p_up.device, dtype=p_up.dtype)
+                    child_exp.up_proj.weight.data.copy_(p_up - delta_up)
+                    p_up.add_(delta_up)
+
+                    delta_down = _orthogonal_antithetic_delta(
+                        p_down.detach().cpu().float(),
+                        gen,
+                        scale=1e-3,
+                        ortho_dim=0,
+                        orthogonal=self.config.orthogonal_mitosis,
+                    ).to(device=p_down.device, dtype=p_down.dtype)
+                    child_exp.down_proj.weight.data.copy_(p_down - delta_down)
+                    p_down.add_(delta_down)
+                    moe.experts.append(child_exp)
+
+                old_rw = moe.router.weight.data
+                extra_rows = [old_rw[p_e : p_e + 1].clone() for p_e, _ in added_pairs]
+                new_rw = torch.cat([old_rw, *extra_rows], dim=0)
+                new_router = torch.nn.Linear(
+                    d_model, new_e, bias=False, device=old_rw.device, dtype=old_rw.dtype
+                )
+                new_router.weight.data.copy_(new_rw)
+                moe.router = new_router
+                moe.num_experts = new_e
+                moe._grouped_weight_cache = None
+                moe._mitotic_idx_cache = None
+
+            self.model.log_scale.data.clamp_(math.log(0.5), math.log(3.5))
+
+        if self.config.use_nvfp4 and self.device.type == "cuda":
+            for layer in all_layers:
+                for idx in range(old_e, new_e):
+                    self.nvfp4_layers_converted += convert_linear_to_nvfp4(
+                        layer.moe.experts[idx],
+                        min_features=32,
+                        experts_only=False,
+                        sparsity_mode=self.config.nvfp4_sparsity_mode,
+                        sr_ste_decay=self.config.nvfp4_sr_ste_decay,
+                        causal_activation_scale=True,
+                    )
+
+        self.config.num_experts = new_e
+        self.backbone_cfg.num_experts = new_e
+        self.model.backbone.config.num_experts = new_e
+        newly_split = {idx for pair in added_pairs for idx in pair}
+        active_existing = [
+            (p, c)
+            for p, c in pairs_for_schedule
+            if p not in newly_split and c not in newly_split
+        ]
+        self._set_model_mitotic_pairs(active_existing + added_pairs)
+
+        new_ema = list(loads_for_split) + [0.0] * (new_e - old_e)
+        for p_e, c_e in added_pairs:
+            half = 0.5 * float(new_ema[p_e])
+            new_ema[p_e] = half
+            new_ema[c_e] = half
+        self._ema_expert_loads = new_ema
+
+        self._apply_plasticity_policy(new_ema)
+        self._create_optimizer()
+
+        child_to_parent = {int(c): int(p) for p, c in added_pairs}
+        for name, p in self.model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if name.endswith(".moe.router.weight") and name in old_state_by_name:
+                st = old_state_by_name[name]
+                if "exp_avg" in st and "exp_avg_sq" in st:
+                    old_avg = st["exp_avg"]
+                    old_sq = st["exp_avg_sq"]
+                    extra_avg = [torch.zeros_like(old_avg[p_e : p_e + 1]) for p_e, _ in added_pairs]
+                    extra_sq = [old_sq[p_e : p_e + 1].clone() for p_e, _ in added_pairs]
+                    step_v = (
+                        st["step"].clone()
+                        if isinstance(st.get("step"), torch.Tensor)
+                        else st.get("step", 1)
+                    )
+                    self.optimizer.state[p] = {
+                        "step": step_v,
+                        "exp_avg": torch.cat([old_avg, *extra_avg], dim=0),
+                        "exp_avg_sq": torch.cat([old_sq, *extra_sq], dim=0),
+                    }
+                continue
+
+            matched_child: int | None = None
+            for c_e in child_to_parent:
+                if f".moe.experts.{c_e}." in name:
+                    matched_child = c_e
+                    break
+            if matched_child is not None:
+                p_e = child_to_parent[matched_child]
+                parent_name = name.replace(
+                    f".moe.experts.{matched_child}.", f".moe.experts.{p_e}."
+                )
+                if parent_name in old_state_by_name:
+                    st = old_state_by_name[parent_name]
+                    if "exp_avg_sq" in st:
+                        p_sq = st["exp_avg_sq"].clone()
+                        step_v = (
+                            st["step"].clone()
+                            if isinstance(st.get("step"), torch.Tensor)
+                            else st.get("step", 1)
+                        )
+                        self.optimizer.state[p] = {
+                            "step": step_v,
+                            "exp_avg": torch.zeros_like(p_sq),
+                            "exp_avg_sq": p_sq,
+                        }
+                continue
+
+            if name in old_state_by_name:
+                self.optimizer.state[p] = old_state_by_name[name]
+
+        old_state_by_name.clear()
+        self._optimizer_restored = True
+        if self.device.type == "cuda":
+            gc.collect()
+            torch.cuda.empty_cache()
 
     def load_checkpoint(self, checkpoint_path: str | Path) -> None:
         """Restore model weights (upcycling experts if `num_experts` increased), optimizer state, and sampler state."""
@@ -1463,11 +1739,12 @@ class MCL4COETrainer:
             )
 
         self.model.load_state_dict(model_state, strict=False)
+        del model_state
         with torch.no_grad():
             self.model.log_scale.data.clamp_(math.log(0.5), math.log(3.5))
         if self.config.release_mitotic_pairs:
             self._set_model_mitotic_pairs([])
-        elif existing_pairs and not self._get_model_mitotic_pairs():
+        elif (existing_pairs or added_pairs) and not self._get_model_mitotic_pairs():
             newly_split = {idx for pair in added_pairs for idx in pair}
             active_existing = [
                 (p, c)
@@ -1475,6 +1752,22 @@ class MCL4COETrainer:
                 if p not in newly_split and c not in newly_split
             ]
             self._set_model_mitotic_pairs(active_existing + added_pairs)
+
+        self.latest_metrics = dict(payload.get("latest_metrics", {}))
+        init_loads = list(self.latest_metrics.get("expert_load", []))
+        if init_loads and len(init_loads) == ckpt_experts and self.config.num_experts > ckpt_experts:
+            init_loads = init_loads + [0.0] * (self.config.num_experts - ckpt_experts)
+            for p_e, c_e in added_pairs:
+                half = 0.5 * float(init_loads[p_e])
+                init_loads[p_e] = half
+                init_loads[c_e] = half
+        if init_loads and len(init_loads) == self.config.num_experts:
+            self._ema_expert_loads = [float(x) for x in init_loads]
+
+        if int(self.config.plastic_experts_per_layer) > 0 or self.config.freeze_donor_embeddings:
+            self._apply_plasticity_policy(getattr(self, "_ema_expert_loads", None))
+            self._create_optimizer()
+
         if self.config.cpu_offload_optimizer:
             prepare_model(
                 self.model,
@@ -1511,19 +1804,11 @@ class MCL4COETrainer:
         self._parent_total_steps = int(payload.get("config", {}).get("total_steps", self.current_step))
         self.cumulative_wall_s = float(payload.get("cumulative_wall_s", 0.0))
         self.cumulative_tokens = int(payload.get("cumulative_tokens", 0))
-        self.latest_metrics = dict(payload.get("latest_metrics", {}))
         self._resume_lr = float(
             self.latest_metrics.get("lr", self.config.lr * self.config.min_lr_ratio)
         )
-        init_loads = list(self.latest_metrics.get("expert_load", []))
-        if init_loads and len(init_loads) == ckpt_experts and self.config.num_experts > ckpt_experts:
-            init_loads = init_loads + [0.0] * (self.config.num_experts - ckpt_experts)
-            for p_e, c_e in added_pairs:
-                half = 0.5 * float(init_loads[p_e])
-                init_loads[p_e] = half
-                init_loads[c_e] = half
-        if init_loads and len(init_loads) == self.config.num_experts:
-            self._ema_expert_loads = [float(x) for x in init_loads]
+        del payload
+        gc.collect()
 
         # Carry forward parent run's Dream-RSI world archive (`dream_state.json`) if present
         if (

@@ -2442,5 +2442,186 @@ def test_v7_shard_windowed_streaming_and_eviction(tmp_path) -> None:
     assert fallback_batch["input_ids"].shape == (1, 16)
 
 
+def test_inference_ui_session_and_endpoints() -> None:
+    """Verify InferenceSessionController checkpoint discovery, dynamic MoE/recurrence knobs, Whiteboard steering, and HTTP endpoints."""
+    import json
+    import threading
+    import urllib.request
+    from mcl4_coe.inference_ui import InferenceSessionController, start_inference_ui_server
+
+    ctrl = InferenceSessionController()
+    ckpts = ctrl.list_available_checkpoints()
+    assert len(ckpts) >= 1
+    ckpt_ids = {c["checkpoint_id"] for c in ckpts}
+    assert "colab_mcl4_coe_v7_mitotic_3b_fast/step_05800" in ckpt_ids
+
+    # 1. Initialize preset and verify dynamic MoE density & Tabu controls
+    st0 = ctrl.load_preset({"preset": "tiny_morph16k", "device": "cpu", "dtype": "float32"})
+    assert st0["loaded_info"]["loaded"] is True
+    p_top2 = st0["parameter_stats"]["active_parameters"]
+
+    st1 = ctrl.update_config(
+        {
+            "top_k": 4,
+            "dense_subset_k": 6,
+            "recurrent_coverage_penalty": 0.45,
+            "recurrence_steps": 2,
+        }
+    )
+    assert st1["parameter_stats"]["active_experts_per_token"] == 6
+    assert st1["parameter_stats"]["active_parameters"] > p_top2
+    assert ctrl.model is not None
+    assert ctrl.model.backbone.encoder_layers[0].moe.dense_subset_k == 6
+    assert ctrl.model.backbone.encoder_layers[0].moe.recurrent_coverage_penalty == 0.45
+
+    # 2. Run an interactive generation turn and verify trace segments + MoE heatmap
+    gen_res = ctrl.generate_turn(
+        {
+            "prompt": "Compute 3 + 4.",
+            "max_new_tokens": 24,
+            "dense_subset_k": 0,
+            "top_k": 2,
+        }
+    )
+    turn = gen_res["turn"]
+    assert turn["turn_id"] == 1
+    assert "thought" in turn["segments"] and "answer" in turn["segments"]
+    assert len(turn["expert_routing"]["encoder_loads"]) == 2
+
+    # 3. Ingest a rule into Quarantined Whiteboard and steer generation with Whiteboard active
+    wb_res = ctrl.whiteboard_action(
+        {
+            "action": "ingest",
+            "modality": "prose",
+            "text": "When the telemetry frame arrives on channel 9, the controller emits ack_vector_9.",
+        }
+    )
+    assert wb_res["status"]["whiteboard"]["episodic_rule_count"] >= 1
+    gen_wb = ctrl.generate_turn(
+        {
+            "prompt": "What happens when the telemetry frame arrives on channel 9?",
+            "max_new_tokens": 20,
+            "use_whiteboard": True,
+        }
+    )
+    assert gen_wb["turn"]["config_snapshot"]["use_whiteboard"] is True
+
+    # 4. Run Typed-COE Decision Probe
+    probe = ctrl.probe_decision(
+        {
+            "context": "Channel 9 received a telemetry frame.",
+            "question": "Which ack vector is emitted?",
+            "options": ["ack_vector_9", "ack_vector_0"],
+        }
+    )
+    assert len(probe["candidates"]) == 2
+    assert 0 <= probe["winner_index"] < 2
+
+    # 5. Verify HTTP server endpoints
+    server = start_inference_ui_server(ctrl, host="127.0.0.1", port=0)
+    port = server.server_address[1]
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    try:
+        html = urllib.request.urlopen(f"http://127.0.0.1:{port}/").read().decode("utf-8")
+        assert "opencode // mcl4-coe" in html
+        st_http = json.loads(
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status").read().decode("utf-8")
+        )
+        assert st_http["loaded_info"]["loaded"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
+def test_olmoe_graft_equivalence_and_inplace_mitosis(tmp_path) -> None:
+    """Verify full QK-Norm RoPE permutation equivalence, partition-invariant norm_topk_prob=False twin mitosis, and in-place mitosis with Generation-Scoped Plasticity."""
+    from mcl4_coe.backbone import MCL4CEDConfig, SparseMoE, SwiGLUExpert
+    from mcl4_coe.pipeline import BlockAlignedShardWriter
+    from mcl4_coe.trainer import MCL4COETrainer, TrainingRunConfig
+
+    torch.manual_seed(123)
+    moe = SparseMoE(
+        MCL4CEDConfig(
+            d_model=32,
+            n_heads=4,
+            expert_hidden_dim=48,
+            num_experts=4,
+            top_k=2,
+            norm_topk_prob=False,
+        )
+    )
+    x = torch.randn(2, 6, 32)
+    with torch.no_grad():
+        y_pre = moe(x)[0]
+        # Clone expert 0 into expert 4 with exact identical weights and router row
+        child = SwiGLUExpert(32, 48)
+        child.up_proj.weight.data.copy_(moe.experts[0].up_proj.weight.data)
+        child.down_proj.weight.data.copy_(moe.experts[0].down_proj.weight.data)
+        moe.experts.append(child)
+        new_rw = torch.cat([moe.router.weight.data, moe.router.weight.data[0:1].clone()], dim=0)
+        moe.router = torch.nn.Linear(32, 5, bias=False)
+        moe.router.weight.data.copy_(new_rw)
+        moe.num_experts = 5
+        moe.mitotic_pairs = [(0, 4)]
+        moe._grouped_weight_cache = None
+        moe._mitotic_idx_cache = None
+        y_post = moe(x)[0]
+    assert torch.allclose(y_pre, y_post, atol=1e-5), "Partition-invariant twin mitosis must be exact at Step 0 when norm_topk_prob=False"
+
+    # Verify full QK-Norm + untied embeddings + in-place mitosis in trainer
+    shards_dir = tmp_path / "shards"
+    runs_dir = tmp_path / "runs"
+    for track_name in ("pretrain_lm", "uta_trace", "typed_decision"):
+        w = BlockAlignedShardWriter(
+            shards_dir / track_name,
+            track=track_name,
+            split="train",
+            seq_len=16,
+            max_blocks_per_shard=4,
+            vocab_size=260,
+        )
+        for i in range(4):
+            w.add_pretrain_document(f"Sample document {i} " + ("alpha beta gamma " * 8))
+        w.flush_shard()
+    cfg = TrainingRunConfig(
+        run_id="test_olmoe_inplace_mitosis",
+        runs_root=str(runs_dir),
+        shards_root=str(shards_dir),
+        vocab_size=260,
+        max_seq_len=16,
+        d_model=32,
+        n_heads=4,
+        n_encoder_layers=1,
+        n_decoder_layers=1,
+        ple_dim=8,
+        expert_hidden_dim=48,
+        num_experts=4,
+        max_experts=6,
+        top_k=2,
+        use_qk_norm=True,
+        qk_norm_mode="full",
+        norm_topk_prob=False,
+        tie_word_embeddings=False,
+        preserve_residual_across_stacks=True,
+        plastic_experts_per_layer=2,
+        freeze_donor_embeddings=True,
+        enable_mitosis=True,
+        mitosis_milestones=((2, 6),),
+        total_steps=3,
+        batch_size=2,
+        micro_batch_size=2,
+        enable_ornith_rl=False,
+        enable_dream_rsi=False,
+        checkpoint_every=3,
+        save_optimizer_state=False,
+    )
+    trainer = MCL4COETrainer(cfg)
+    assert trainer.model.backbone.token_embedding.weight is not trainer.model.backbone.lm_head.weight
+    assert not trainer.model.backbone.token_embedding.weight.requires_grad
+    metrics = trainer.train()
+    assert metrics["num_experts"] == 6
+    plastic_count = sum(
+        1 for e in trainer.model.backbone.encoder_layers[0].moe.experts if e.up_proj.weight.requires_grad
+    )
+    assert plastic_count == 4  # 2 added twin pairs = 4 active twin experts >= cap(2)

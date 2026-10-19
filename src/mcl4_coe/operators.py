@@ -1743,7 +1743,7 @@ class CognitiveOperatorEnsemble(nn.Module):
             valid[:, 0] = True
         is_dec_only_donor = (
             self.backbone.config.n_encoder_layers == 0
-            and self.backbone.config.untied_lm_head
+            and not getattr(self.backbone.config, "tie_word_embeddings", True)
         )
         wb_gist = (
             None
@@ -3687,7 +3687,7 @@ class COEPlasticityController:
                         in_valid[:, 0] = True
                     is_dec_only_donor = (
                         self.backbone.config.n_encoder_layers == 0
-                        and self.backbone.config.untied_lm_head
+                        and not getattr(self.backbone.config, "tie_word_embeddings", True)
                     )
                     wb_gist_gen = (
                         None
@@ -3729,7 +3729,7 @@ class COEPlasticityController:
                         h_rms = h_v.norm(dim=-1, keepdim=True).mean().clamp_min(1e-4)
                         eff_delta_scale = (
                             min(float(0.70 * h_rms.item()), 1.25 * lm_scale)
-                            if self.backbone.config.untied_lm_head
+                            if not getattr(self.backbone.config, "tie_word_embeddings", True)
                             else (0.70 * h_rms)
                         )
                         delta_target = g_unit * eff_delta_scale

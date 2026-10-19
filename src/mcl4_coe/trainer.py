@@ -482,9 +482,8 @@ class MCL4COETrainer:
                 else None
             )
         c_cfg = payload.get("coe_config", {})
-        for key in ("projection_dim", "recurrence_steps"):
-            if key in c_cfg:
-                setattr(self.config, key, int(c_cfg[key]))
+        if "projection_dim" in c_cfg and c_cfg["projection_dim"] is not None:
+            self.config.projection_dim = int(c_cfg["projection_dim"])
         ckpt_experts = int(b_cfg.get("num_experts", self.config.num_experts))
         if self.config.num_experts < ckpt_experts:
             self.config.num_experts = ckpt_experts
@@ -915,7 +914,7 @@ class MCL4COETrainer:
                     e.down_proj.weight.requires_grad_(True)
             return set(range(n_exp))
 
-        pairs = self._get_model_mitotic_pairs()
+        pairs = self._get_model_mitotic_pairs() or getattr(self, "_released_mitotic_pairs", [])
         plastic_set: set[int] = {
             int(idx) for p in pairs for idx in p if 0 <= int(idx) < n_exp
         }
@@ -1814,6 +1813,7 @@ class MCL4COETrainer:
         with torch.no_grad():
             self.model.log_scale.data.clamp_(math.log(0.5), math.log(3.5))
         if self.config.release_mitotic_pairs:
+            self._released_mitotic_pairs = list(existing_pairs) + list(added_pairs)
             self._set_model_mitotic_pairs([])
         elif (existing_pairs or added_pairs) and not self._get_model_mitotic_pairs():
             newly_split = {idx for pair in added_pairs for idx in pair}

@@ -690,10 +690,132 @@ def build_v8_olmoe_12b_config(
     )
 
 
+def build_v8_olmoe_12b_stage2_rl_config(
+    *,
+    run_id: str = "colab_mcl4_coe_v8_olmoe_12b",
+    runs_root: str = "/content/runs" if Path("/content").is_dir() else r"X:\MCL4-COE\runs",
+    shards_root: str = (
+        "/content/data_shards_olmoe50k"
+        if Path("/content").is_dir()
+        else r"X:\MCL4-COE\data_shards_olmoe50k"
+    ),
+    corpora_root: str = (
+        "/content/MCL4-COE/corpora" if Path("/content").is_dir() else r"X:\corpora"
+    ),
+    resume_checkpoint: str = "/content/runs/colab_mcl4_coe_v8_olmoe_12b/checkpoints/step_02800.meta.json",
+    total_steps: int = 3200,
+    num_experts: int = 112,
+    top_k: int = 8,
+    top_k_milestones: tuple[tuple[int, int], ...] = ((2900, 12), (3050, 16)),
+    plastic_experts_per_layer: int = 64,
+    batch_size: int = 8,
+    micro_batch_size: int = 2,
+    max_seq_len: int = 1024,
+    lr: float = 8.0e-5,
+    hf_backup_repo: str | None = "mesmac/mcl4-coe-runs",
+) -> TrainingRunConfig:
+    """Build Stage-2 Post-Mitosis Twin-Release + Memory-Adaptive Density RL & RSI config (`steps 2801 -> 3200`).
+
+    - Un-ties all mitotic twin pairs (`release_mitotic_pairs=True`, `enable_mitosis=False`) so all `112`
+      experts per layer (`11.97B` total parameters) co-activate independently without twin suppression.
+    - Expands `plastic_experts_per_layer` to `64` (`32` newly released twins + `32` highest-load experts)
+      to leverage available RTX PRO 6000 VRAM headroom.
+    - Progressively scales active expert density `top_k: 8 -> 12 -> 16` (`1.71B -> 2.11B -> 2.52B` active).
+    - Runs high-cadence 9-Operator COE (`operator_every=2`), Ornith-2.0 Verified Execution GRPO
+      (`ornith_every=2`, `ornith_weight=0.25`), Dream-RSI (`dream_every=2`), and recurrent CED pondering
+      (`recurrence_steps=2`, `recurrent_kv=True`, `depth_ponder=True`).
+    """
+    return TrainingRunConfig(
+        run_id=run_id,
+        runs_root=runs_root,
+        shards_root=shards_root,
+        corpora_root=corpora_root,
+        resume_checkpoint=resume_checkpoint,
+        vocab_size=OLMOE_VOCAB_SIZE,
+        pad_id=1,
+        eos_token_id=50279,
+        max_seq_len=max_seq_len,
+        d_model=2048,
+        n_heads=16,
+        n_encoder_layers=8,
+        n_decoder_layers=8,
+        ple_dim=128,
+        expert_hidden_dim=1024,
+        num_experts=num_experts,
+        max_experts=num_experts,
+        top_k=top_k,
+        top_k_milestones=top_k_milestones,
+        rms_norm_eps=1e-5,
+        rope_theta=10000.0,
+        use_qk_norm=True,
+        qk_norm_mode="full",
+        norm_topk_prob=False,
+        tie_word_embeddings=False,
+        preserve_residual_across_stacks=True,
+        donor_backbone_lr_scale=0.15,
+        model_dtype="bfloat16",
+        plastic_experts_per_layer=plastic_experts_per_layer,
+        freeze_donor_embeddings=True,
+        enable_mitosis=False,
+        release_mitotic_pairs=True,
+        orthogonal_mitosis=True,
+        mitosis_every=0,
+        mitosis_step_size=0,
+        mitosis_milestones=(),
+        clear_consumed_shards=False,
+        mitotic_ortho_coef=0.0,
+        sequence_diversity_coef=0.025,
+        recurrent_coverage_penalty=0.25,
+        projection_dim=256,
+        recurrence_steps=2,
+        recurrent_kv=True,
+        depth_ponder=True,
+        deep_supervision_weight=0.15,
+        enable_gist_conditioning=True,
+        gist_conditioning_prob=0.45,
+        latent_prior_scale=0.18,
+        use_nvfp4=False,
+        cpu_offload_optimizer=False,
+        total_steps=total_steps,
+        batch_size=batch_size,
+        micro_batch_size=micro_batch_size,
+        decision_batch_size=2,
+        operator_every=2,
+        lr=lr,
+        warmup_ratio=0.08,
+        min_lr_ratio=0.20,
+        weight_decay=0.01,
+        grad_clip=1.0,
+        curriculum_mode="cosine",
+        start_weights={"pretrain_lm": 0.15, "uta_trace": 0.55, "typed_decision": 0.30},
+        end_weights={"pretrain_lm": 0.10, "uta_trace": 0.60, "typed_decision": 0.30},
+        stage_seq_lens=(),
+        enable_ornith_rl=True,
+        ornith_every=2,
+        ornith_weight=0.25,
+        ornith_warmup_ratio=0.0,
+        enable_dream_rsi=True,
+        dream_every=2,
+        dream_max_rounds=3,
+        dream_max_calls=4,
+        dream_workers=2,
+        dream_revisions=3,
+        checkpoint_every=100,
+        max_keep_checkpoints=2,
+        save_optimizer_state=False,
+        hf_backup_repo=hf_backup_repo,
+        hf_keep_checkpoints=3,
+        eval_every=100,
+        val_max_batches_per_track=4,
+        sample_every=50,
+    )
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Launch MCL4-COE v8-OLMoE-12B (7.08B -> 11.91B)")
+    parser = argparse.ArgumentParser(description="Launch MCL4-COE v8-OLMoE-12B (7.08B -> 11.97B + Stage-2 RL)")
     parser.add_argument("--dry-run", action="store_true", help="Print parameter profile and exit")
     parser.add_argument("--graft-only", action="store_true", help="Only graft OLMoE Step-0 checkpoint and exit")
+    parser.add_argument("--stage2-rl", action="store_true", help="Run Stage-2 Twin-Release + Multi-Active Density RL/RSI")
     parser.add_argument("--run-id", type=str, default="colab_mcl4_coe_v8_olmoe_12b")
     parser.add_argument(
         "--runs-root",
@@ -708,20 +830,21 @@ def main() -> None:
         else r"X:\MCL4-COE\data_shards_olmoe50k",
     )
     parser.add_argument("--src-shards-root", type=str, default="")
-    parser.add_argument("--total-steps", type=int, default=2800)
+    parser.add_argument("--total-steps", type=int, default=0)
     parser.add_argument("--max-experts", type=int, default=112)
     parser.add_argument("--top-k", type=int, default=8)
-    parser.add_argument("--plastic-experts", type=int, default=32)
+    parser.add_argument("--plastic-experts", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--micro-batch-size", type=int, default=2)
     parser.add_argument("--resume", type=str, default="")
     args = parser.parse_args()
 
+    eff_steps = args.total_steps or (3200 if args.stage2_rl else 2800)
     profile = compute_v8_olmoe_parameter_profile(
         start_experts=64,
         max_experts=args.max_experts,
         top_k=args.top_k,
-        total_steps=args.total_steps,
+        total_steps=eff_steps,
     )
     print(json.dumps(profile, indent=2), flush=True)
     if args.dry_run:
@@ -734,7 +857,7 @@ def main() -> None:
         existing_ckpts = sorted(ckpt_dir.glob("step_*.meta.json"))
         if existing_ckpts:
             resume_ckpt = str(existing_ckpts[-1])
-        else:
+        elif not args.stage2_rl:
             step0_meta = graft_olmoe_1b_7b_checkpoint(
                 ckpt_dir,
                 top_k=args.top_k,
@@ -750,29 +873,48 @@ def main() -> None:
             args.shards_root,
         )
 
-    cfg = build_v8_olmoe_12b_config(
-        run_id=args.run_id,
-        runs_root=args.runs_root,
-        shards_root=args.shards_root,
-        resume_checkpoint=resume_ckpt,
-        total_steps=args.total_steps,
-        max_experts=args.max_experts,
-        top_k=args.top_k,
-        plastic_experts_per_layer=args.plastic_experts,
-        batch_size=args.batch_size,
-        micro_batch_size=args.micro_batch_size,
-    )
+    if args.stage2_rl:
+        cfg = build_v8_olmoe_12b_stage2_rl_config(
+            run_id=args.run_id,
+            runs_root=args.runs_root,
+            shards_root=args.shards_root,
+            resume_checkpoint=resume_ckpt or str(ckpt_dir / "step_02800.meta.json"),
+            total_steps=eff_steps,
+            num_experts=args.max_experts,
+            top_k=args.top_k,
+            plastic_experts_per_layer=args.plastic_experts or 64,
+            batch_size=args.batch_size,
+            micro_batch_size=args.micro_batch_size,
+        )
+    else:
+        cfg = build_v8_olmoe_12b_config(
+            run_id=args.run_id,
+            runs_root=args.runs_root,
+            shards_root=args.shards_root,
+            resume_checkpoint=resume_ckpt,
+            total_steps=eff_steps,
+            max_experts=args.max_experts,
+            top_k=args.top_k,
+            plastic_experts_per_layer=args.plastic_experts or 32,
+            batch_size=args.batch_size,
+            micro_batch_size=args.micro_batch_size,
+        )
 
     def _on_step(rec: dict[str, Any]) -> None:
         st = int(rec.get("step", 0))
         if st == 1 or st % 10 == 0 or "mitosis_event" in rec:
             mev = rec.get("mitosis_event")
             m_str = f" | MITOSIS {mev['old_experts']}->{mev['new_experts']} ({mev['parameter_count']/1e9:.2f}B)" if mev and mev.get("action") == "expand" else ""
+            orn_str = (
+                f" | orn_rw={rec.get('ornith_harness_reward', 0.0):.3f} pass={rec.get('ornith_pass_rate', 0.0):.2f} drm={rec.get('dream_cycle', 0)}"
+                if "ornith_harness_reward" in rec
+                else ""
+            )
             print(
                 f"[step {st:4d}/{cfg.total_steps}] loss={rec.get('total_loss'):.4f} "
                 f"(lm={rec.get('lm_loss'):.4f} bpb={rec.get('train_bpb'):.4f} dec={rec.get('decision_loss'):.4f}) | "
                 f"E={rec.get('num_experts')} k={rec.get('top_k')} | "
-                f"{rec.get('tok_per_s'):.0f} tok/s | vram={rec.get('vram_allocated_mb'):.0f}MB{m_str}",
+                f"{rec.get('tok_per_s'):.0f} tok/s | vram={rec.get('vram_allocated_mb'):.0f}MB{orn_str}{m_str}",
                 flush=True,
             )
 

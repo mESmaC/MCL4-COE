@@ -1741,7 +1741,15 @@ class CognitiveOperatorEnsemble(nn.Module):
         if not valid.any(dim=-1).all():
             valid = valid.clone()
             valid[:, 0] = True
-        wb_gist = whiteboard.build_gist_state(self.backbone, batch_size=input_ids.shape[0])
+        is_dec_only_donor = (
+            self.backbone.config.n_encoder_layers == 0
+            and self.backbone.config.untied_lm_head
+        )
+        wb_gist = (
+            None
+            if is_dec_only_donor
+            else whiteboard.build_gist_state(self.backbone, batch_size=input_ids.shape[0])
+        )
         enc_lower = self.backbone.encode_state(input_ids, valid, causal=True)
         mod_lower = whiteboard.apply_adapter(enc_lower.hidden, valid)
         prior_vec = mod_lower.mean(dim=1)
@@ -1750,7 +1758,7 @@ class CognitiveOperatorEnsemble(nn.Module):
             input_ids,
             recurrence_steps=steps,
             latent_prior=prior_vec,
-            latent_prior_scale=0.15,
+            latent_prior_scale=0.02 if is_dec_only_donor else 0.15,
             recurrent_kv=use_rec_kv,
             depth_ponder=use_ponder,
             gist_state=wb_gist,
@@ -3677,8 +3685,16 @@ class COEPlasticityController:
                     if not in_valid.any(dim=-1).all():
                         in_valid = in_valid.clone()
                         in_valid[:, 0] = True
-                    wb_gist_gen = self.whiteboard.build_gist_state(
-                        self.backbone, batch_size=lm_in.shape[0]
+                    is_dec_only_donor = (
+                        self.backbone.config.n_encoder_layers == 0
+                        and self.backbone.config.untied_lm_head
+                    )
+                    wb_gist_gen = (
+                        None
+                        if is_dec_only_donor
+                        else self.whiteboard.build_gist_state(
+                            self.backbone, batch_size=lm_in.shape[0]
+                        )
                     )
                     enc_low_gen = self.backbone.encode_state(lm_in, in_valid, causal=True)
                     mod_low_gen = self.whiteboard.apply_adapter(enc_low_gen.hidden, in_valid)
@@ -3693,7 +3709,7 @@ class COEPlasticityController:
                         lm_in,
                         recurrence_steps=steps_gen,
                         latent_prior=prior_gen,
-                        latent_prior_scale=0.15,
+                        latent_prior_scale=0.02 if is_dec_only_donor else 0.15,
                         recurrent_kv=self.coe.config.recurrent_kv,
                         depth_ponder=use_ponder_gen,
                         gist_state=wb_gist_gen,
@@ -3711,7 +3727,12 @@ class COEPlasticityController:
                         g_v = F.embedding(y_v, w_lm) - (probs_v @ w_lm)
                         g_unit = F.normalize(g_v, dim=-1, eps=1e-6) * (1.0 - p_true).sqrt()
                         h_rms = h_v.norm(dim=-1, keepdim=True).mean().clamp_min(1e-4)
-                        delta_target = g_unit * (0.70 * h_rms)
+                        eff_delta_scale = (
+                            min(float(0.70 * h_rms.item()), 1.25 * lm_scale)
+                            if self.backbone.config.untied_lm_head
+                            else (0.70 * h_rms)
+                        )
+                        delta_target = g_unit * eff_delta_scale
 
                         old_gen_w = 0.50 * (
                             self.whiteboard.gen_key_A.float() @ self.whiteboard.gen_val_B.float()

@@ -424,11 +424,21 @@ class MultiPassController(nn.Module):
             is_morph = vocab_size > 1024
             is_hf_donor = bool(getattr(self.tokenizer, "is_hf_donor", False))
             period_id = int(getattr(self.tokenizer, "period_id", 32)) if is_hf_donor else ord(".")
+            eff_user_prompt = user_prompt.strip()
+            if is_hf_donor and whiteboard is not None:
+                p_txts = getattr(whiteboard, "_rule_premise_texts", []) or []
+                c_txts = getattr(whiteboard, "_rule_conc_texts", []) or []
+                if p_txts and c_txts:
+                    wb_facts = " ".join(
+                        f"{p.strip().rstrip(':')}: {c.strip()}"
+                        for p, c in list(zip(p_txts, c_txts))[-4:]
+                    )
+                    eff_user_prompt = f"Context: {wb_facts}\nQuestion: {user_prompt.strip()}"
             if is_morph:
                 # Match encode_masked_turn exact token sequence: <bos> #U$# {prompt}\n #T$#
                 # without a trailing standalone space token (since MorphCode-16K / BPE words carry their own leading space)
                 tokens = self.tokenizer.encode(
-                    f"#U$# {user_prompt.strip()}\n", add_bos=True, add_eos=False
+                    f"#U$# {eff_user_prompt}\n", add_bos=True, add_eos=False
                 ) + self.tokenizer.encode("#T$#", add_bos=False, add_eos=False)
                 a_tag_tokens = self.tokenizer.encode("\n#A$#", add_bos=False, add_eos=False)
             else:
@@ -1035,6 +1045,9 @@ class MultiPassController(nn.Module):
 
             decoded = self.tokenizer.decode(tokens).rstrip()
             if is_hf_donor:
+                if eff_user_prompt != user_prompt.strip() and "#T$#" in decoded:
+                    _, after_t = decoded.split("#T$#", 1)
+                    decoded = f"#U$# {user_prompt.strip()}\n#T$#{after_t}"
                 decoded = re.sub(r"#T\$#[ \n]*", "#T$# ", decoded)
                 decoded = re.sub(r"#A\$#[ \n]*", "#A$# ", decoded)
             elif is_morph:

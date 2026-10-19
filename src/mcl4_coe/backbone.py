@@ -303,7 +303,7 @@ class SparseMoE(nn.Module):
         ]
         if not valid_pairs:
             return torch.zeros((), dtype=torch.float32, device=device)
-        max_pairs = 2 if (self.num_experts * self.d_model >= 65536) else 16
+        max_pairs = 2 if (self.num_experts * self.router.in_features >= 65536) else 16
         if len(valid_pairs) > max_pairs:
             offset = int(getattr(self, "_ortho_pair_cursor", 0)) % len(valid_pairs)
             self._ortho_pair_cursor = offset + max_pairs

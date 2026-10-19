@@ -970,17 +970,18 @@ class MultiPassController(nn.Module):
                 ):
                     a_slice = tokens[a_start_token_idx:]
                     is_code_a = any(t in donor_code_start_ids for t in a_slice[:3])
+                    min_complete_a = max(44, (max_new_tokens - thought_budget) // 2)
                     if tokens[-1] in pure_newline_ids:
                         if next_id in (hash_id, lt_id):
                             break
-                        if is_code_a and any(t in donor_return_ids for t in a_slice):
+                        if is_code_a and len(a_slice) >= 28 and any(t in donor_return_ids for t in a_slice):
                             if next_id in pure_newline_ids or not self.tokenizer.decode([next_id]).startswith(" "):
                                 break
                     elif (
                         not is_code_a
                         and tokens[-1] in punct_sent_end_ids
                         and next_id in pure_newline_ids
-                        and len(a_slice) >= 12
+                        and len(a_slice) >= min_complete_a
                     ):
                         break
                 elif (

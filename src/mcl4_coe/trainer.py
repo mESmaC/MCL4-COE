@@ -153,6 +153,7 @@ class TrainingRunConfig:
     mitosis_every: int = 300
     mitosis_step_size: int = 2
     mitosis_milestones: tuple[tuple[int, int], ...] = ()
+    top_k_milestones: tuple[tuple[int, int], ...] = ()
     clear_consumed_shards: bool = False
     max_seq_len: int = 2048
     projection_dim: int = 32
@@ -1720,6 +1721,24 @@ class MCL4COETrainer:
                 t_step0 = time.perf_counter()
                 self.current_step = step
                 mitosis_event = self.perform_bounded_mitosis(step)
+                if self.config.top_k_milestones:
+                    desired_k = int(self.model.backbone.config.top_k)
+                    for m_step, target_k in self.config.top_k_milestones:
+                        if step >= int(m_step):
+                            desired_k = min(int(target_k), int(self.model.backbone.config.num_experts))
+                    cur_k_now = int(self.model.backbone.config.top_k)
+                    if desired_k != cur_k_now:
+                        self.config.top_k = desired_k
+                        self.model.backbone.config.top_k = desired_k
+                        for blk in list(self.model.backbone.encoder_layers) + list(
+                            self.model.backbone.decoder_layers
+                        ):
+                            blk.moe.top_k = desired_k
+                        print(
+                            f"  [density-ramp @ step {step}] top_k={cur_k_now}->{desired_k} | "
+                            f"experts={self.model.backbone.config.num_experts}",
+                            flush=True,
+                        )
                 if warm_continuation:
                     progress = min(1.0, max(0.0, step / max(1, self.config.total_steps)))
                 else:
@@ -1757,8 +1776,13 @@ class MCL4COETrainer:
                         for mb in micro_batches
                     ]
                 cur_e = int(self.model.backbone.config.num_experts)
+                cur_k = int(self.model.backbone.config.top_k)
                 if cur_e >= 96:
-                    max_mb_cap = 2 if cur_e >= 256 else (4 if cur_e >= 128 else 8)
+                    max_mb_cap = (
+                        1
+                        if (cur_e >= 256 and cur_k >= 16)
+                        else (2 if cur_e >= 256 else (4 if cur_e >= 128 else 8))
+                    )
                     split_mbs: list[dict[str, torch.Tensor]] = []
                     for mb in micro_batches:
                         n_rows = int(mb["input_ids"].shape[0])
@@ -2100,6 +2124,7 @@ class MCL4COETrainer:
                     "vram_allocated_mb": round(vram_alloc_mb, 1),
                     "vram_reserved_mb": round(vram_res_mb, 1),
                     "num_experts": self.model.backbone.config.num_experts,
+                    "top_k": int(self.model.backbone.config.top_k),
                     "expert_load": expert_loads,
                     "quotas": quotas,
                     "weights": {k: round(v, 4) for k, v in cur_weights.items()},

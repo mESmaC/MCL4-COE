@@ -280,6 +280,92 @@ def build_v7_config(
     )
 
 
+def build_v7_rl_config(
+    *,
+    preset: str = "balanced_768",
+    run_id: str = "colab_mcl4_coe_v7_3b_rl",
+    runs_root: str = "/content/runs" if Path("/content").is_dir() else r"X:\MCL4-COE\runs",
+    shards_root: str = (
+        "/content/data_shards_morph16k"
+        if Path("/content").is_dir()
+        else r"X:\MCL4-COE\data_shards_morph16k"
+    ),
+    corpora_root: str = (
+        "/content/MCL4-COE/corpora" if Path("/content").is_dir() else r"X:\corpora"
+    ),
+    resume_checkpoint: str = "/content/runs/colab_mcl4_coe_v7_mitotic_3b_fast/checkpoints/step_05500.pt",
+    base_step: int = 5500,
+    rl_steps: int = 300,
+    batch_size: int = 4,
+    micro_batch_size: int = 4,
+    max_seq_len: int = 1024,
+    lr: float = 1.5e-4,
+    ornith_weight: float = 0.45,
+    top_k_schedule: tuple[int, int, int] = (4, 8, 16),
+) -> TrainingRunConfig:
+    """Construct Stage-2 Progressive Multi-Active Density RL (`top_k: 4 -> 8 -> 16`) config for 3.001B (`E=416`)."""
+    if preset not in V7_PRESETS:
+        raise ValueError(f"Unknown preset {preset!r}; choose from {sorted(V7_PRESETS)}")
+    p = V7_PRESETS[preset]
+    total_steps = base_step + rl_steps
+    k0, k1, k2 = top_k_schedule
+    s1 = base_step + max(1, rl_steps // 3)
+    s2 = base_step + max(2, (2 * rl_steps) // 3)
+    return TrainingRunConfig(
+        run_id=run_id,
+        runs_root=runs_root,
+        shards_root=shards_root,
+        corpora_root=corpora_root,
+        resume_checkpoint=resume_checkpoint,
+        vocab_size=MORPHCODE_16K_VOCAB_SIZE,
+        max_seq_len=max_seq_len,
+        d_model=int(p["d_model"]),
+        n_heads=int(p["n_heads"]),
+        n_encoder_layers=int(p["n_encoder_layers"]),
+        n_decoder_layers=int(p["n_decoder_layers"]),
+        ple_dim=int(p["ple_dim"]),
+        expert_hidden_dim=int(p["expert_hidden_dim"]),
+        num_experts=int(p["max_experts"]),
+        max_experts=int(p["max_experts"]),
+        top_k=int(k0),
+        top_k_milestones=((s1, int(k1)), (s2, int(k2))),
+        projection_dim=int(p["projection_dim"]),
+        enable_mitosis=False,
+        release_mitotic_pairs=True,
+        orthogonal_mitosis=True,
+        clear_consumed_shards=False,
+        mitotic_ortho_coef=0.0,
+        sequence_diversity_coef=0.02,
+        recurrent_coverage_penalty=0.25,
+        recurrence_steps=1,
+        recurrent_kv=True,
+        depth_ponder=False,
+        deep_supervision_weight=0.0,
+        enable_gist_conditioning=False,
+        total_steps=total_steps,
+        batch_size=batch_size,
+        micro_batch_size=micro_batch_size,
+        decision_batch_size=2,
+        operator_every=1,
+        lr=lr,
+        warmup_ratio=0.05,
+        min_lr_ratio=0.20,
+        curriculum_mode="cosine",
+        start_weights={"pretrain_lm": 0.15, "uta_trace": 0.55, "typed_decision": 0.30},
+        end_weights={"pretrain_lm": 0.10, "uta_trace": 0.55, "typed_decision": 0.35},
+        enable_ornith_rl=True,
+        ornith_every=1,
+        ornith_weight=ornith_weight,
+        ornith_warmup_ratio=0.0,
+        enable_dream_rsi=True,
+        dream_every=4,
+        checkpoint_every=100,
+        max_keep_checkpoints=1,
+        eval_every=50,
+        sample_every=50,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Launch MCL4-COE v7-Mitotic-3B training")
     parser.add_argument("--preset", default="balanced_768", choices=sorted(V7_PRESETS))

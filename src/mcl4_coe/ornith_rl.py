@@ -2019,6 +2019,11 @@ class OrnithSelfImprover:
             self.novelty_buffer.device = model_dev
             self.novelty_buffer._buffer = self.novelty_buffer._buffer.to(model_dev)
 
+        num_exp = int(getattr(coe.backbone.config, "num_experts", 4))
+        high_expert_mode = num_exp >= 256
+        if high_expert_mode and batch_size > 1:
+            batch_size = 1
+
         self._step_counter += 1
         use_compact = eff_seq_len < 220
         tasks = [
@@ -2076,12 +2081,20 @@ class OrnithSelfImprover:
         targets = batch["targets"]
 
         # 1. Stage 2 & 3: Evaluate all COE operators on the rollout group (single encoder pass)
+        op_kwargs: dict[str, Any] = {}
+        if high_expert_mode:
+            op_kwargs = {
+                "recurrence_steps": 1,
+                "depth_ponder": False,
+                "margin_halt_threshold": None,
+            }
         op_out = coe.forward_all_operators(
             ctx_ids,
             ctx_lens,
             opt_ids,
             opt_lens,
             targets,
+            **op_kwargs,
         )
 
         # 2. Stage 1 (#Q$#): Compute <0.1ms Association Novelty N(q) & update NoveltyTaskBuffer
@@ -2231,12 +2244,13 @@ class OrnithSelfImprover:
             dtype=torch.long,
             device=self.device,
         )
+        inf_kwargs = {"recurrence_steps": 1, "depth_ponder": False} if high_expert_mode else {}
         if has_genuine_lm_target:
-            lm_distill_out = coe.forward_inference(inp_tensor, targets=lbl_tensor)
+            lm_distill_out = coe.forward_inference(inp_tensor, targets=lbl_tensor, **inf_kwargs)
             assert lm_distill_out.loss is not None
             self_distill_loss = 0.85 * decision_distill_loss + 0.15 * lm_distill_out.loss
         else:
-            lm_distill_out = coe.forward_inference(inp_tensor, targets=None)
+            lm_distill_out = coe.forward_inference(inp_tensor, targets=None, **inf_kwargs)
             self_distill_loss = decision_distill_loss
 
         # LiquidAI Antidoom FTPO (supports ByteTokenizer, MorphCode-16K, and DonorHFTokenizer):

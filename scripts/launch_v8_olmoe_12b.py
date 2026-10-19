@@ -245,15 +245,29 @@ def graft_olmoe_1b_7b_checkpoint(
         eos_id=50279,
     )
 
-    print("[graft] Initializing empty bfloat16 MCL4-COE (7.08B, E=64)...", flush=True)
+    print("[graft] Initializing empty bfloat16 MCL4-COE (7.18B, E=64)...", flush=True)
     torch.manual_seed(seed)
-    with torch.device("cpu"):
-        old_default_dtype = torch.get_default_dtype()
+    orig_lin_reset = torch.nn.Linear.reset_parameters
+    orig_emb_reset = torch.nn.Embedding.reset_parameters
+    old_default_dtype = torch.get_default_dtype()
+    try:
         torch.set_default_dtype(torch.bfloat16)
-        try:
+        torch.nn.Linear.reset_parameters = lambda _self: None  # type: ignore[method-assign]
+        torch.nn.Embedding.reset_parameters = lambda _self: None  # type: ignore[method-assign]
+        with torch.device("cpu"):
             model = CognitiveOperatorEnsemble(MCL4CEDBackbone(backbone_cfg), coe_cfg)
-        finally:
-            torch.set_default_dtype(old_default_dtype)
+    finally:
+        torch.set_default_dtype(old_default_dtype)
+        torch.nn.Linear.reset_parameters = orig_lin_reset  # type: ignore[method-assign]
+        torch.nn.Embedding.reset_parameters = orig_emb_reset  # type: ignore[method-assign]
+
+    # Initialize only the newly added MCL4-COE modules (<0.26B params), skipping the 6.92B donor layers
+    for name, mod in model.named_modules():
+        if isinstance(mod, torch.nn.Linear) and (
+            not name.startswith("backbone.")
+            or any(tag in name for tag in (".ple.", ".markov_router.", ".global_q", ".global_kv", "feedback."))
+        ):
+            mod.reset_parameters()
 
     # Zero-initialize MCL4-COE residual gates so Step-0 forward pass is 100% continuous with OLMoE
     for layer_idx in range(8):

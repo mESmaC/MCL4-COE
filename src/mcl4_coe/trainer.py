@@ -1242,7 +1242,8 @@ class MCL4COETrainer:
                                 )
                             except Exception:
                                 pass
-                except Exception:
+                except Exception as exc:
+                    print('hf_backup warning:', step_name, repo_id, exc, flush=True)
                     try:
                         tmp_cloud_pt.unlink(missing_ok=True)
                     except Exception:

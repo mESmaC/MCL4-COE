@@ -1,0 +1,4904 @@
+{
+  "accepted_revisions": 2,
+  "cycle": 91,
+  "discarded_worlds": 43,
+  "initial_program": {
+    "patience": 0,
+    "rank": [
+      "SHALLOW",
+      "SCORE"
+    ],
+    "root_every": 1,
+    "rounds": 3,
+    "stop": null,
+    "width": 1
+  },
+  "initial_score": 0.695,
+  "latest_score": 0.692649,
+  "program": {
+    "patience": 2,
+    "rank": [
+      "UTILITY",
+      "SCORE",
+      "GAIN",
+      "CONFIDENCE"
+    ],
+    "root_every": 1,
+    "rounds": 3,
+    "stop": null,
+    "width": 2
+  },
+  "program_text": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+  "recent_receipts": [
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 0.70747,
+      "cycle": 60,
+      "final_replay_score": 0.69153,
+      "initial_replay_score": 0.69153,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0060_comb_t1_p2_tr2_m2_216"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 61,
+      "final_replay_score": 0.691533,
+      "initial_replay_score": 0.691533,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0061_bitmask_xor_74_26_17"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 62,
+      "final_replay_score": 0.691537,
+      "initial_replay_score": 0.691537,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0062_code_odd_sum_26_6"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 63,
+      "final_replay_score": 0.691539,
+      "initial_replay_score": 0.691539,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0063_comb_t1_p6_tr2_m2_228"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 64,
+      "final_replay_score": 0.691542,
+      "initial_replay_score": 0.691542,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0064_physics_calorimetry_82_6_4"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 65,
+      "final_replay_score": 0.691554,
+      "initial_replay_score": 0.691554,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0065_comb_t8_p6_tr0_m2_236"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 0.70898,
+      "cycle": 66,
+      "final_replay_score": 0.690636,
+      "initial_replay_score": 0.690636,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0066_comb_t1_p2_tr2_m2_240"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 67,
+      "final_replay_score": 0.690639,
+      "initial_replay_score": 0.690639,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0067_bitmask_xor_55_71_10"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 68,
+      "final_replay_score": 0.690642,
+      "initial_replay_score": 0.690642,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0068_code_odd_sum_83_7"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 69,
+      "final_replay_score": 0.690647,
+      "initial_replay_score": 0.690647,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0069_comb_t1_p6_tr2_m2_252"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 70,
+      "final_replay_score": 0.690649,
+      "initial_replay_score": 0.690649,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0070_physics_calorimetry_22_5_5"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 71,
+      "final_replay_score": 0.690655,
+      "initial_replay_score": 0.690655,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0071_comb_t8_p6_tr0_m2_260"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 0.70758,
+      "cycle": 72,
+      "final_replay_score": 0.689543,
+      "initial_replay_score": 0.689543,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0072_comb_t1_p2_tr2_m2_264"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 73,
+      "final_replay_score": 0.689546,
+      "initial_replay_score": 0.689546,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0073_bitmask_xor_33_10_16"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 74,
+      "final_replay_score": 0.689549,
+      "initial_replay_score": 0.689549,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0074_code_odd_sum_61_6"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 75,
+      "final_replay_score": 0.689551,
+      "initial_replay_score": 0.689551,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0075_comb_t1_p6_tr2_m2_276"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 76,
+      "final_replay_score": 0.689554,
+      "initial_replay_score": 0.689554,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0076_physics_calorimetry_22_4_6"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 77,
+      "final_replay_score": 0.689556,
+      "initial_replay_score": 0.689556,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0077_comb_t8_p6_tr0_m2_284"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 0.70915,
+      "cycle": 78,
+      "final_replay_score": 0.691207,
+      "initial_replay_score": 0.691207,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0078_comb_t1_p2_tr2_m2_288"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 79,
+      "final_replay_score": 0.691209,
+      "initial_replay_score": 0.691209,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0079_bitmask_xor_106_14_3"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 80,
+      "final_replay_score": 0.691212,
+      "initial_replay_score": 0.691212,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0080_code_odd_sum_39_7"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 81,
+      "final_replay_score": 0.691214,
+      "initial_replay_score": 0.691214,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0081_comb_t1_p6_tr2_m2_300"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 82,
+      "final_replay_score": 0.691216,
+      "initial_replay_score": 0.691216,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0082_physics_calorimetry_95_3_9"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 83,
+      "final_replay_score": 0.691219,
+      "initial_replay_score": 0.691219,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0083_comb_t8_p6_tr0_m2_308"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 0.7093,
+      "cycle": 84,
+      "final_replay_score": 0.691715,
+      "initial_replay_score": 0.691715,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0084_comb_t1_p2_tr2_m2_312"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 85,
+      "final_replay_score": 0.691717,
+      "initial_replay_score": 0.691717,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0085_bitmask_xor_106_20_12"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 86,
+      "final_replay_score": 0.691719,
+      "initial_replay_score": 0.691719,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0086_code_odd_sum_20_7"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 87,
+      "final_replay_score": 0.691721,
+      "initial_replay_score": 0.691721,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0087_comb_t1_p6_tr2_m2_324"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 88,
+      "final_replay_score": 0.691722,
+      "initial_replay_score": 0.691722,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0088_physics_calorimetry_73_2_7"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 89,
+      "final_replay_score": 0.691723,
+      "initial_replay_score": 0.691723,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0089_comb_t8_p6_tr0_m2_332"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 90,
+      "final_replay_score": 0.692647,
+      "initial_replay_score": 0.692647,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0090_comb_t1_p2_tr2_m2_336"
+    },
+    {
+      "accepted_revision": 0,
+      "active_policy": "WIDTH 2\nROOT 1\nRANK UTILITY SCORE GAIN CONFIDENCE\nSTOP NEVER\nPATIENCE 2\nROUNDS 3",
+      "best_node_score": 1.0,
+      "cycle": 91,
+      "final_replay_score": 0.692649,
+      "initial_replay_score": 0.692649,
+      "online_calls": 4,
+      "online_rounds": 3,
+      "world_id": "world_0091_bitmask_xor_46_50_6"
+    }
+  ],
+  "total_calls": 364,
+  "total_replays_dreamed": 64800,
+  "total_revisions": 273,
+  "version": 1,
+  "worlds": [
+    {
+      "metadata": {
+        "cycle": 44,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_32_3"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.78011,
+            "deduction_entailed": 0.78118,
+            "depth": 1,
+            "expected_verdict": 0.99782,
+            "gold_prob": 0.99749,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99833
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.78161,
+            "deduction_entailed": 0.80743,
+            "depth": 2,
+            "expected_verdict": 0.99782,
+            "gold_prob": 0.99748,
+            "node_id": 2,
+            "novelty": 0.00109,
+            "parent_id": 1,
+            "scaffold": "abstraction -> synthesis -> deduction -> abduction -> association -> metacognition",
+            "utility": 0.99584,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.7873,
+            "deduction_entailed": 0.78734,
+            "depth": 1,
+            "expected_verdict": 0.99782,
+            "gold_prob": 0.99748,
+            "node_id": 3,
+            "novelty": 0.00108,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99584,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99833
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.77946,
+            "deduction_entailed": 0.78227,
+            "depth": 3,
+            "expected_verdict": 0.99782,
+            "gold_prob": 0.99748,
+            "node_id": 4,
+            "novelty": 0.0015,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0044_code_odd_sum_32_3"
+    },
+    {
+      "metadata": {
+        "cycle": 45,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t1_p6_tr2_m2_156"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.77873,
+            "deduction_entailed": 0.79084,
+            "depth": 1,
+            "expected_verdict": 0.99773,
+            "gold_prob": 0.99748,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99578,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99828
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.80494,
+            "deduction_entailed": 0.82316,
+            "depth": 2,
+            "expected_verdict": 0.99775,
+            "gold_prob": 0.99749,
+            "node_id": 2,
+            "novelty": 0.0017,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.76881,
+            "deduction_entailed": 0.77254,
+            "depth": 1,
+            "expected_verdict": 0.99775,
+            "gold_prob": 0.9975,
+            "node_id": 3,
+            "novelty": 0.00125,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99579,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99828
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.79541,
+            "deduction_entailed": 0.8153,
+            "depth": 3,
+            "expected_verdict": 0.99774,
+            "gold_prob": 0.99749,
+            "node_id": 4,
+            "novelty": 0.00112,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99578,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0045_comb_t1_p6_tr2_m2_156"
+    },
+    {
+      "metadata": {
+        "cycle": 46,
+        "domain": "physics_kinematics"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "physics_kinematics",
+            "task_id": "physics_calorimetry_31_6_4"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.80509,
+            "deduction_entailed": 0.79096,
+            "depth": 1,
+            "expected_verdict": 0.99776,
+            "gold_prob": 0.99746,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99577,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99829
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.80108,
+            "deduction_entailed": 0.80491,
+            "depth": 2,
+            "expected_verdict": 0.99779,
+            "gold_prob": 0.9975,
+            "node_id": 2,
+            "novelty": 0.00151,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99584,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.80864,
+            "deduction_entailed": 0.79167,
+            "depth": 1,
+            "expected_verdict": 0.99778,
+            "gold_prob": 0.99749,
+            "node_id": 3,
+            "novelty": 0.00115,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99831
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.78978,
+            "deduction_entailed": 0.81183,
+            "depth": 3,
+            "expected_verdict": 0.9978,
+            "gold_prob": 0.99751,
+            "node_id": 4,
+            "novelty": 0.00107,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99585,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0046_physics_calorimetry_31_6_4"
+    },
+    {
+      "metadata": {
+        "cycle": 47,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t8_p6_tr0_m2_164"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.7647,
+            "deduction_entailed": 0.77703,
+            "depth": 1,
+            "expected_verdict": 0.99772,
+            "gold_prob": 0.99746,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99567,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99826
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.78657,
+            "deduction_entailed": 0.80317,
+            "depth": 2,
+            "expected_verdict": 0.99772,
+            "gold_prob": 0.99746,
+            "node_id": 2,
+            "novelty": 0.00807,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99569,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.78779,
+            "deduction_entailed": 0.79979,
+            "depth": 1,
+            "expected_verdict": 0.99771,
+            "gold_prob": 0.99745,
+            "node_id": 3,
+            "novelty": 0.00106,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99564,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99825
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.7895,
+            "deduction_entailed": 0.81592,
+            "depth": 3,
+            "expected_verdict": 0.99771,
+            "gold_prob": 0.99746,
+            "node_id": 4,
+            "novelty": 0.00098,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99567,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0047_comb_t8_p6_tr0_m2_164"
+    },
+    {
+      "metadata": {
+        "cycle": 48,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t1_p2_tr2_m2_168"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.78669,
+            "deduction_entailed": 0.82124,
+            "depth": 1,
+            "expected_verdict": 0.54971,
+            "gold_prob": 0.49967,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.65728
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 2,
+            "confidence": 0.80681,
+            "deduction_entailed": 0.80631,
+            "depth": 2,
+            "expected_verdict": 0.54845,
+            "gold_prob": 0.49827,
+            "node_id": 2,
+            "novelty": 0.00305,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99584,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 0.45632
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 2,
+            "confidence": 0.795,
+            "deduction_entailed": 0.80731,
+            "depth": 1,
+            "expected_verdict": 0.54913,
+            "gold_prob": 0.49903,
+            "node_id": 3,
+            "novelty": 0.00146,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99585,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.43184
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.79313,
+            "deduction_entailed": 0.80388,
+            "depth": 3,
+            "expected_verdict": 0.54964,
+            "gold_prob": 0.4996,
+            "node_id": 4,
+            "novelty": 0.00126,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 0.70723
+        }
+      ],
+      "world_id": "world_0048_comb_t1_p2_tr2_m2_168"
+    },
+    {
+      "metadata": {
+        "cycle": 49,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_42_18_15"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.78662,
+            "deduction_entailed": 0.80434,
+            "depth": 1,
+            "expected_verdict": 0.99772,
+            "gold_prob": 0.99751,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99579,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99827
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.78178,
+            "deduction_entailed": 0.81827,
+            "depth": 2,
+            "expected_verdict": 0.99775,
+            "gold_prob": 0.99755,
+            "node_id": 2,
+            "novelty": 0.00172,
+            "parent_id": 1,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.78152,
+            "deduction_entailed": 0.80069,
+            "depth": 1,
+            "expected_verdict": 0.99774,
+            "gold_prob": 0.99753,
+            "node_id": 3,
+            "novelty": 0.00112,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99828
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.78125,
+            "deduction_entailed": 0.81467,
+            "depth": 3,
+            "expected_verdict": 0.99775,
+            "gold_prob": 0.99754,
+            "node_id": 4,
+            "novelty": 0.00513,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99584,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0049_bitmask_xor_42_18_15"
+    },
+    {
+      "metadata": {
+        "cycle": 50,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_70_4"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.74027,
+            "deduction_entailed": 0.82691,
+            "depth": 1,
+            "expected_verdict": 0.99786,
+            "gold_prob": 0.99753,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99578,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99836
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.72407,
+            "deduction_entailed": 0.78321,
+            "depth": 2,
+            "expected_verdict": 0.99784,
+            "gold_prob": 0.99751,
+            "node_id": 2,
+            "novelty": 0.00107,
+            "parent_id": 1,
+            "scaffold": "abstraction -> synthesis -> deduction -> abduction -> association -> metacognition",
+            "utility": 0.99574,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.75219,
+            "deduction_entailed": 0.83293,
+            "depth": 1,
+            "expected_verdict": 0.99785,
+            "gold_prob": 0.99752,
+            "node_id": 3,
+            "novelty": 0.00094,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99578,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99836
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.72429,
+            "deduction_entailed": 0.80497,
+            "depth": 3,
+            "expected_verdict": 0.99784,
+            "gold_prob": 0.99751,
+            "node_id": 4,
+            "novelty": 0.00125,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99575,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0050_code_odd_sum_70_4"
+    },
+    {
+      "metadata": {
+        "cycle": 51,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t1_p6_tr2_m2_180"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.77393,
+            "deduction_entailed": 0.7966,
+            "depth": 1,
+            "expected_verdict": 0.9978,
+            "gold_prob": 0.99756,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99833
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.78261,
+            "deduction_entailed": 0.819,
+            "depth": 2,
+            "expected_verdict": 0.9978,
+            "gold_prob": 0.99756,
+            "node_id": 2,
+            "novelty": 0.00141,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.77892,
+            "deduction_entailed": 0.815,
+            "depth": 1,
+            "expected_verdict": 0.99781,
+            "gold_prob": 0.99756,
+            "node_id": 3,
+            "novelty": 0.00135,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99585,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99833
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.77842,
+            "deduction_entailed": 0.8116,
+            "depth": 3,
+            "expected_verdict": 0.99781,
+            "gold_prob": 0.99756,
+            "node_id": 4,
+            "novelty": 0.00102,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99584,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0051_comb_t1_p6_tr2_m2_180"
+    },
+    {
+      "metadata": {
+        "cycle": 52,
+        "domain": "physics_kinematics"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "physics_kinematics",
+            "task_id": "physics_calorimetry_28_6_4"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.8003,
+            "deduction_entailed": 0.81124,
+            "depth": 1,
+            "expected_verdict": 0.99784,
+            "gold_prob": 0.99755,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99835
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.7948,
+            "deduction_entailed": 0.79263,
+            "depth": 2,
+            "expected_verdict": 0.99782,
+            "gold_prob": 0.99753,
+            "node_id": 2,
+            "novelty": 0.0023,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99579,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.79795,
+            "deduction_entailed": 0.82827,
+            "depth": 1,
+            "expected_verdict": 0.99784,
+            "gold_prob": 0.99755,
+            "node_id": 3,
+            "novelty": 0.00148,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99584,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99835
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.77072,
+            "deduction_entailed": 0.78506,
+            "depth": 3,
+            "expected_verdict": 0.99783,
+            "gold_prob": 0.99755,
+            "node_id": 4,
+            "novelty": 0.00102,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0052_physics_calorimetry_28_6_4"
+    },
+    {
+      "metadata": {
+        "cycle": 53,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t8_p6_tr0_m2_188"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.78996,
+            "deduction_entailed": 0.82487,
+            "depth": 1,
+            "expected_verdict": 0.99781,
+            "gold_prob": 0.99756,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99833
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.77263,
+            "deduction_entailed": 0.81742,
+            "depth": 2,
+            "expected_verdict": 0.9978,
+            "gold_prob": 0.99756,
+            "node_id": 2,
+            "novelty": 0.0056,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.76609,
+            "deduction_entailed": 0.80078,
+            "depth": 1,
+            "expected_verdict": 0.99781,
+            "gold_prob": 0.99756,
+            "node_id": 3,
+            "novelty": 0.00181,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99833
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.775,
+            "deduction_entailed": 0.81076,
+            "depth": 3,
+            "expected_verdict": 0.9978,
+            "gold_prob": 0.99756,
+            "node_id": 4,
+            "novelty": 0.00134,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0053_comb_t8_p6_tr0_m2_188"
+    },
+    {
+      "metadata": {
+        "cycle": 54,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t1_p2_tr2_m2_192"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 2,
+            "confidence": 0.79779,
+            "deduction_entailed": 0.83304,
+            "depth": 1,
+            "expected_verdict": 0.54922,
+            "gold_prob": 0.49913,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99584,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.43191
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.80144,
+            "deduction_entailed": 0.83226,
+            "depth": 2,
+            "expected_verdict": 0.55177,
+            "gold_prob": 0.50197,
+            "node_id": 2,
+            "novelty": 0.00092,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99584,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 0.68385
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.79794,
+            "deduction_entailed": 0.82983,
+            "depth": 1,
+            "expected_verdict": 0.54986,
+            "gold_prob": 0.49984,
+            "node_id": 3,
+            "novelty": 0.00099,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.65739
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 2,
+            "confidence": 0.79601,
+            "deduction_entailed": 0.83918,
+            "depth": 3,
+            "expected_verdict": 0.54848,
+            "gold_prob": 0.49831,
+            "node_id": 4,
+            "novelty": 0.00116,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 0.48135
+        }
+      ],
+      "world_id": "world_0054_comb_t1_p2_tr2_m2_192"
+    },
+    {
+      "metadata": {
+        "cycle": 55,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_58_22_16"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.79276,
+            "deduction_entailed": 0.83788,
+            "depth": 1,
+            "expected_verdict": 0.99778,
+            "gold_prob": 0.99758,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99832
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.79147,
+            "deduction_entailed": 0.83493,
+            "depth": 2,
+            "expected_verdict": 0.99778,
+            "gold_prob": 0.99758,
+            "node_id": 2,
+            "novelty": 0.00123,
+            "parent_id": 1,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.80567,
+            "deduction_entailed": 0.85032,
+            "depth": 1,
+            "expected_verdict": 0.99777,
+            "gold_prob": 0.99757,
+            "node_id": 3,
+            "novelty": 0.00117,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99831
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.77721,
+            "deduction_entailed": 0.83633,
+            "depth": 3,
+            "expected_verdict": 0.99778,
+            "gold_prob": 0.99758,
+            "node_id": 4,
+            "novelty": 0.0009,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0055_bitmask_xor_58_22_16"
+    },
+    {
+      "metadata": {
+        "cycle": 56,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_86_5"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.80969,
+            "deduction_entailed": 0.82379,
+            "depth": 1,
+            "expected_verdict": 0.99789,
+            "gold_prob": 0.99757,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99839
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.79692,
+            "deduction_entailed": 0.8428,
+            "depth": 2,
+            "expected_verdict": 0.99791,
+            "gold_prob": 0.99759,
+            "node_id": 2,
+            "novelty": 0.00164,
+            "parent_id": 1,
+            "scaffold": "abstraction -> synthesis -> deduction -> abduction -> association -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.79854,
+            "deduction_entailed": 0.82937,
+            "depth": 1,
+            "expected_verdict": 0.99791,
+            "gold_prob": 0.99759,
+            "node_id": 3,
+            "novelty": 0.00163,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.9984
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.79153,
+            "deduction_entailed": 0.8243,
+            "depth": 3,
+            "expected_verdict": 0.99791,
+            "gold_prob": 0.99759,
+            "node_id": 4,
+            "novelty": 0.0014,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0056_code_odd_sum_86_5"
+    },
+    {
+      "metadata": {
+        "cycle": 57,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t1_p6_tr2_m2_204"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.8222,
+            "deduction_entailed": 0.79362,
+            "depth": 1,
+            "expected_verdict": 0.99783,
+            "gold_prob": 0.99759,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99835
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84251,
+            "deduction_entailed": 0.83805,
+            "depth": 2,
+            "expected_verdict": 0.99784,
+            "gold_prob": 0.9976,
+            "node_id": 2,
+            "novelty": 0.0029,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99584,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83436,
+            "deduction_entailed": 0.80098,
+            "depth": 1,
+            "expected_verdict": 0.99783,
+            "gold_prob": 0.99759,
+            "node_id": 3,
+            "novelty": 0.00094,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99835
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.80717,
+            "deduction_entailed": 0.82315,
+            "depth": 3,
+            "expected_verdict": 0.99784,
+            "gold_prob": 0.9976,
+            "node_id": 4,
+            "novelty": 0.00146,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0057_comb_t1_p6_tr2_m2_204"
+    },
+    {
+      "metadata": {
+        "cycle": 58,
+        "domain": "physics_kinematics"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "physics_kinematics",
+            "task_id": "physics_calorimetry_66_2_3"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84123,
+            "deduction_entailed": 0.83411,
+            "depth": 1,
+            "expected_verdict": 0.99786,
+            "gold_prob": 0.99758,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99578,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99837
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.82901,
+            "deduction_entailed": 0.83894,
+            "depth": 2,
+            "expected_verdict": 0.99787,
+            "gold_prob": 0.99759,
+            "node_id": 2,
+            "novelty": 0.00127,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83497,
+            "deduction_entailed": 0.80573,
+            "depth": 1,
+            "expected_verdict": 0.99788,
+            "gold_prob": 0.9976,
+            "node_id": 3,
+            "novelty": 0.00142,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99838
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83392,
+            "deduction_entailed": 0.82959,
+            "depth": 3,
+            "expected_verdict": 0.99786,
+            "gold_prob": 0.99758,
+            "node_id": 4,
+            "novelty": 0.00126,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99579,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0058_physics_calorimetry_66_2_3"
+    },
+    {
+      "metadata": {
+        "cycle": 59,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t8_p6_tr0_m2_212"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83392,
+            "deduction_entailed": 0.83124,
+            "depth": 1,
+            "expected_verdict": 0.99781,
+            "gold_prob": 0.99757,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99574,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99833
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.82441,
+            "deduction_entailed": 0.82835,
+            "depth": 2,
+            "expected_verdict": 0.99784,
+            "gold_prob": 0.9976,
+            "node_id": 2,
+            "novelty": 0.00203,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.82842,
+            "deduction_entailed": 0.83727,
+            "depth": 1,
+            "expected_verdict": 0.99784,
+            "gold_prob": 0.9976,
+            "node_id": 3,
+            "novelty": 0.00137,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99836
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.82958,
+            "deduction_entailed": 0.83343,
+            "depth": 3,
+            "expected_verdict": 0.99785,
+            "gold_prob": 0.99761,
+            "node_id": 4,
+            "novelty": 0.00102,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0059_comb_t8_p6_tr0_m2_212"
+    },
+    {
+      "metadata": {
+        "cycle": 60,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t1_p2_tr2_m2_216"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83438,
+            "deduction_entailed": 0.82622,
+            "depth": 1,
+            "expected_verdict": 0.55075,
+            "gold_prob": 0.50083,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99584,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.65807
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.82799,
+            "deduction_entailed": 0.81127,
+            "depth": 2,
+            "expected_verdict": 0.54974,
+            "gold_prob": 0.49971,
+            "node_id": 2,
+            "novelty": 0.0011,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99584,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 0.6823
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.82349,
+            "deduction_entailed": 0.82653,
+            "depth": 1,
+            "expected_verdict": 0.55036,
+            "gold_prob": 0.5004,
+            "node_id": 3,
+            "novelty": 0.00097,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.65777
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.82915,
+            "deduction_entailed": 0.82933,
+            "depth": 3,
+            "expected_verdict": 0.54995,
+            "gold_prob": 0.49995,
+            "node_id": 4,
+            "novelty": 0.00103,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 0.70747
+        }
+      ],
+      "world_id": "world_0060_comb_t1_p2_tr2_m2_216"
+    },
+    {
+      "metadata": {
+        "cycle": 61,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_74_26_17"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84455,
+            "deduction_entailed": 0.82343,
+            "depth": 1,
+            "expected_verdict": 0.9978,
+            "gold_prob": 0.9976,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99833
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84264,
+            "deduction_entailed": 0.82507,
+            "depth": 2,
+            "expected_verdict": 0.99782,
+            "gold_prob": 0.99762,
+            "node_id": 2,
+            "novelty": 0.00116,
+            "parent_id": 1,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83583,
+            "deduction_entailed": 0.8077,
+            "depth": 1,
+            "expected_verdict": 0.9978,
+            "gold_prob": 0.9976,
+            "node_id": 3,
+            "novelty": 0.00109,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99578,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99833
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.82894,
+            "deduction_entailed": 0.80541,
+            "depth": 3,
+            "expected_verdict": 0.99781,
+            "gold_prob": 0.99761,
+            "node_id": 4,
+            "novelty": 0.00097,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0061_bitmask_xor_74_26_17"
+    },
+    {
+      "metadata": {
+        "cycle": 62,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_26_6"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.86063,
+            "deduction_entailed": 0.83556,
+            "depth": 1,
+            "expected_verdict": 0.99791,
+            "gold_prob": 0.99759,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.9984
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.8361,
+            "deduction_entailed": 0.80533,
+            "depth": 2,
+            "expected_verdict": 0.99791,
+            "gold_prob": 0.99759,
+            "node_id": 2,
+            "novelty": 0.00155,
+            "parent_id": 1,
+            "scaffold": "abstraction -> synthesis -> deduction -> abduction -> association -> metacognition",
+            "utility": 0.99578,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.86039,
+            "deduction_entailed": 0.83503,
+            "depth": 1,
+            "expected_verdict": 0.99792,
+            "gold_prob": 0.9976,
+            "node_id": 3,
+            "novelty": 0.00154,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99841
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.8232,
+            "deduction_entailed": 0.83349,
+            "depth": 3,
+            "expected_verdict": 0.99792,
+            "gold_prob": 0.9976,
+            "node_id": 4,
+            "novelty": 0.00194,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0062_code_odd_sum_26_6"
+    },
+    {
+      "metadata": {
+        "cycle": 63,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t1_p6_tr2_m2_228"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.80795,
+            "deduction_entailed": 0.7867,
+            "depth": 1,
+            "expected_verdict": 0.99785,
+            "gold_prob": 0.99761,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99836
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.82775,
+            "deduction_entailed": 0.80247,
+            "depth": 2,
+            "expected_verdict": 0.99786,
+            "gold_prob": 0.99762,
+            "node_id": 2,
+            "novelty": 0.00176,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83108,
+            "deduction_entailed": 0.81898,
+            "depth": 1,
+            "expected_verdict": 0.99785,
+            "gold_prob": 0.99761,
+            "node_id": 3,
+            "novelty": 0.00226,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99579,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99836
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.8165,
+            "deduction_entailed": 0.82406,
+            "depth": 3,
+            "expected_verdict": 0.99786,
+            "gold_prob": 0.99763,
+            "node_id": 4,
+            "novelty": 0.00128,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0063_comb_t1_p6_tr2_m2_228"
+    },
+    {
+      "metadata": {
+        "cycle": 64,
+        "domain": "physics_kinematics"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "physics_kinematics",
+            "task_id": "physics_calorimetry_82_6_4"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.85067,
+            "deduction_entailed": 0.82973,
+            "depth": 1,
+            "expected_verdict": 0.9979,
+            "gold_prob": 0.99763,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.9984
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84109,
+            "deduction_entailed": 0.83266,
+            "depth": 2,
+            "expected_verdict": 0.9979,
+            "gold_prob": 0.99763,
+            "node_id": 2,
+            "novelty": 0.00182,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.85577,
+            "deduction_entailed": 0.82252,
+            "depth": 1,
+            "expected_verdict": 0.9979,
+            "gold_prob": 0.99762,
+            "node_id": 3,
+            "novelty": 0.00129,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99584,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.9984
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83189,
+            "deduction_entailed": 0.83189,
+            "depth": 3,
+            "expected_verdict": 0.99789,
+            "gold_prob": 0.99762,
+            "node_id": 4,
+            "novelty": 0.00095,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0064_physics_calorimetry_82_6_4"
+    },
+    {
+      "metadata": {
+        "cycle": 65,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t8_p6_tr0_m2_236"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83344,
+            "deduction_entailed": 0.8257,
+            "depth": 1,
+            "expected_verdict": 0.99786,
+            "gold_prob": 0.99762,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99837
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.82853,
+            "deduction_entailed": 0.83108,
+            "depth": 2,
+            "expected_verdict": 0.99786,
+            "gold_prob": 0.99762,
+            "node_id": 2,
+            "novelty": 0.001,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83862,
+            "deduction_entailed": 0.83607,
+            "depth": 1,
+            "expected_verdict": 0.99785,
+            "gold_prob": 0.99761,
+            "node_id": 3,
+            "novelty": 0.00132,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99578,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99836
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.82798,
+            "deduction_entailed": 0.82885,
+            "depth": 3,
+            "expected_verdict": 0.99786,
+            "gold_prob": 0.99762,
+            "node_id": 4,
+            "novelty": 0.0012,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0065_comb_t8_p6_tr0_m2_236"
+    },
+    {
+      "metadata": {
+        "cycle": 66,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t1_p2_tr2_m2_240"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.81932,
+            "deduction_entailed": 0.83705,
+            "depth": 1,
+            "expected_verdict": 0.54969,
+            "gold_prob": 0.49966,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.65726
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.8088,
+            "deduction_entailed": 0.82194,
+            "depth": 2,
+            "expected_verdict": 0.55105,
+            "gold_prob": 0.50116,
+            "node_id": 2,
+            "novelty": 0.00225,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 0.6833
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.82151,
+            "deduction_entailed": 0.83503,
+            "depth": 1,
+            "expected_verdict": 0.55124,
+            "gold_prob": 0.50138,
+            "node_id": 3,
+            "novelty": 0.00127,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.65845
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.80805,
+            "deduction_entailed": 0.81853,
+            "depth": 3,
+            "expected_verdict": 0.55194,
+            "gold_prob": 0.50216,
+            "node_id": 4,
+            "novelty": 0.00106,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 0.70898
+        }
+      ],
+      "world_id": "world_0066_comb_t1_p2_tr2_m2_240"
+    },
+    {
+      "metadata": {
+        "cycle": 67,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_55_71_10"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.81297,
+            "deduction_entailed": 0.8169,
+            "depth": 1,
+            "expected_verdict": 0.99782,
+            "gold_prob": 0.99762,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99835
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83486,
+            "deduction_entailed": 0.82271,
+            "depth": 2,
+            "expected_verdict": 0.99783,
+            "gold_prob": 0.99763,
+            "node_id": 2,
+            "novelty": 0.00122,
+            "parent_id": 1,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83196,
+            "deduction_entailed": 0.81924,
+            "depth": 1,
+            "expected_verdict": 0.99782,
+            "gold_prob": 0.99763,
+            "node_id": 3,
+            "novelty": 0.00147,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99835
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84032,
+            "deduction_entailed": 0.83098,
+            "depth": 3,
+            "expected_verdict": 0.99784,
+            "gold_prob": 0.99764,
+            "node_id": 4,
+            "novelty": 0.00103,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0067_bitmask_xor_55_71_10"
+    },
+    {
+      "metadata": {
+        "cycle": 68,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_83_7"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.86839,
+            "deduction_entailed": 0.82238,
+            "depth": 1,
+            "expected_verdict": 0.99794,
+            "gold_prob": 0.99763,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99579,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99842
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83995,
+            "deduction_entailed": 0.81896,
+            "depth": 2,
+            "expected_verdict": 0.99794,
+            "gold_prob": 0.99763,
+            "node_id": 2,
+            "novelty": 0.00223,
+            "parent_id": 1,
+            "scaffold": "abstraction -> synthesis -> deduction -> abduction -> association -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.8594,
+            "deduction_entailed": 0.82486,
+            "depth": 1,
+            "expected_verdict": 0.99794,
+            "gold_prob": 0.99762,
+            "node_id": 3,
+            "novelty": 0.00137,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99842
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84436,
+            "deduction_entailed": 0.82178,
+            "depth": 3,
+            "expected_verdict": 0.99794,
+            "gold_prob": 0.99762,
+            "node_id": 4,
+            "novelty": 0.00129,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0068_code_odd_sum_83_7"
+    },
+    {
+      "metadata": {
+        "cycle": 69,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t1_p6_tr2_m2_252"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84111,
+            "deduction_entailed": 0.81109,
+            "depth": 1,
+            "expected_verdict": 0.99786,
+            "gold_prob": 0.99763,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99837
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83627,
+            "deduction_entailed": 0.79715,
+            "depth": 2,
+            "expected_verdict": 0.99787,
+            "gold_prob": 0.99763,
+            "node_id": 2,
+            "novelty": 0.00182,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83609,
+            "deduction_entailed": 0.80839,
+            "depth": 1,
+            "expected_verdict": 0.99788,
+            "gold_prob": 0.99764,
+            "node_id": 3,
+            "novelty": 0.0011,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99839
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83104,
+            "deduction_entailed": 0.81436,
+            "depth": 3,
+            "expected_verdict": 0.99787,
+            "gold_prob": 0.99763,
+            "node_id": 4,
+            "novelty": 0.00162,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0069_comb_t1_p6_tr2_m2_252"
+    },
+    {
+      "metadata": {
+        "cycle": 70,
+        "domain": "physics_kinematics"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "physics_kinematics",
+            "task_id": "physics_calorimetry_22_5_5"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83865,
+            "deduction_entailed": 0.80077,
+            "depth": 1,
+            "expected_verdict": 0.9979,
+            "gold_prob": 0.99763,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.9984
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.85209,
+            "deduction_entailed": 0.83978,
+            "depth": 2,
+            "expected_verdict": 0.99791,
+            "gold_prob": 0.99763,
+            "node_id": 2,
+            "novelty": 0.00103,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.85072,
+            "deduction_entailed": 0.8355,
+            "depth": 1,
+            "expected_verdict": 0.99791,
+            "gold_prob": 0.99763,
+            "node_id": 3,
+            "novelty": 0.00165,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99841
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84152,
+            "deduction_entailed": 0.81055,
+            "depth": 3,
+            "expected_verdict": 0.99791,
+            "gold_prob": 0.99763,
+            "node_id": 4,
+            "novelty": 0.00105,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99579,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0070_physics_calorimetry_22_5_5"
+    },
+    {
+      "metadata": {
+        "cycle": 71,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t8_p6_tr0_m2_260"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84464,
+            "deduction_entailed": 0.80709,
+            "depth": 1,
+            "expected_verdict": 0.99785,
+            "gold_prob": 0.99761,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99579,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99836
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84386,
+            "deduction_entailed": 0.82045,
+            "depth": 2,
+            "expected_verdict": 0.99785,
+            "gold_prob": 0.99761,
+            "node_id": 2,
+            "novelty": 0.00165,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84986,
+            "deduction_entailed": 0.81849,
+            "depth": 1,
+            "expected_verdict": 0.99786,
+            "gold_prob": 0.99762,
+            "node_id": 3,
+            "novelty": 0.00139,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99837
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84375,
+            "deduction_entailed": 0.83672,
+            "depth": 3,
+            "expected_verdict": 0.99786,
+            "gold_prob": 0.99763,
+            "node_id": 4,
+            "novelty": 0.00108,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0071_comb_t8_p6_tr0_m2_260"
+    },
+    {
+      "metadata": {
+        "cycle": 72,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t1_p2_tr2_m2_264"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83973,
+            "deduction_entailed": 0.82415,
+            "depth": 1,
+            "expected_verdict": 0.54965,
+            "gold_prob": 0.49961,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.65723
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 2,
+            "confidence": 0.83714,
+            "deduction_entailed": 0.81119,
+            "depth": 2,
+            "expected_verdict": 0.54898,
+            "gold_prob": 0.49886,
+            "node_id": 2,
+            "novelty": 0.00154,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 0.45672
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 2,
+            "confidence": 0.83851,
+            "deduction_entailed": 0.81718,
+            "depth": 1,
+            "expected_verdict": 0.54954,
+            "gold_prob": 0.49949,
+            "node_id": 3,
+            "novelty": 0.00121,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.43215
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.82719,
+            "deduction_entailed": 0.81447,
+            "depth": 3,
+            "expected_verdict": 0.55011,
+            "gold_prob": 0.50012,
+            "node_id": 4,
+            "novelty": 0.00105,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 0.70758
+        }
+      ],
+      "world_id": "world_0072_comb_t1_p2_tr2_m2_264"
+    },
+    {
+      "metadata": {
+        "cycle": 73,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_33_10_16"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.87383,
+            "deduction_entailed": 0.79345,
+            "depth": 1,
+            "expected_verdict": 0.99782,
+            "gold_prob": 0.99762,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99577,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99835
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.86804,
+            "deduction_entailed": 0.7918,
+            "depth": 2,
+            "expected_verdict": 0.99784,
+            "gold_prob": 0.99765,
+            "node_id": 2,
+            "novelty": 0.00263,
+            "parent_id": 1,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.87832,
+            "deduction_entailed": 0.81419,
+            "depth": 1,
+            "expected_verdict": 0.99783,
+            "gold_prob": 0.99764,
+            "node_id": 3,
+            "novelty": 0.00213,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99579,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99836
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.86925,
+            "deduction_entailed": 0.80732,
+            "depth": 3,
+            "expected_verdict": 0.99784,
+            "gold_prob": 0.99764,
+            "node_id": 4,
+            "novelty": 0.00136,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0073_bitmask_xor_33_10_16"
+    },
+    {
+      "metadata": {
+        "cycle": 74,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_61_6"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.89043,
+            "deduction_entailed": 0.83201,
+            "depth": 1,
+            "expected_verdict": 0.99795,
+            "gold_prob": 0.99764,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99843
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.86497,
+            "deduction_entailed": 0.80075,
+            "depth": 2,
+            "expected_verdict": 0.99796,
+            "gold_prob": 0.99765,
+            "node_id": 2,
+            "novelty": 0.00112,
+            "parent_id": 1,
+            "scaffold": "abstraction -> synthesis -> deduction -> abduction -> association -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.87583,
+            "deduction_entailed": 0.80876,
+            "depth": 1,
+            "expected_verdict": 0.99796,
+            "gold_prob": 0.99764,
+            "node_id": 3,
+            "novelty": 0.00075,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99844
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.85666,
+            "deduction_entailed": 0.83465,
+            "depth": 3,
+            "expected_verdict": 0.99796,
+            "gold_prob": 0.99764,
+            "node_id": 4,
+            "novelty": 0.00129,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0074_code_odd_sum_61_6"
+    },
+    {
+      "metadata": {
+        "cycle": 75,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t1_p6_tr2_m2_276"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.8505,
+            "deduction_entailed": 0.83965,
+            "depth": 1,
+            "expected_verdict": 0.99788,
+            "gold_prob": 0.99765,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99839
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84588,
+            "deduction_entailed": 0.82723,
+            "depth": 2,
+            "expected_verdict": 0.99789,
+            "gold_prob": 0.99765,
+            "node_id": 2,
+            "novelty": 0.00107,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84918,
+            "deduction_entailed": 0.8182,
+            "depth": 1,
+            "expected_verdict": 0.99789,
+            "gold_prob": 0.99765,
+            "node_id": 3,
+            "novelty": 0.00114,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99584,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99839
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84426,
+            "deduction_entailed": 0.83895,
+            "depth": 3,
+            "expected_verdict": 0.99789,
+            "gold_prob": 0.99766,
+            "node_id": 4,
+            "novelty": 0.00104,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99584,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0075_comb_t1_p6_tr2_m2_276"
+    },
+    {
+      "metadata": {
+        "cycle": 76,
+        "domain": "physics_kinematics"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "physics_kinematics",
+            "task_id": "physics_calorimetry_22_4_6"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.86394,
+            "deduction_entailed": 0.84951,
+            "depth": 1,
+            "expected_verdict": 0.99793,
+            "gold_prob": 0.99766,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99842
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.85425,
+            "deduction_entailed": 0.8422,
+            "depth": 2,
+            "expected_verdict": 0.99792,
+            "gold_prob": 0.99764,
+            "node_id": 2,
+            "novelty": 0.00139,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99578,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.842,
+            "deduction_entailed": 0.81355,
+            "depth": 1,
+            "expected_verdict": 0.99792,
+            "gold_prob": 0.99765,
+            "node_id": 3,
+            "novelty": 0.00093,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99841
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84728,
+            "deduction_entailed": 0.83173,
+            "depth": 3,
+            "expected_verdict": 0.99793,
+            "gold_prob": 0.99766,
+            "node_id": 4,
+            "novelty": 0.00117,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0076_physics_calorimetry_22_4_6"
+    },
+    {
+      "metadata": {
+        "cycle": 77,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t8_p6_tr0_m2_284"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.85876,
+            "deduction_entailed": 0.83184,
+            "depth": 1,
+            "expected_verdict": 0.99788,
+            "gold_prob": 0.99764,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99839
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83553,
+            "deduction_entailed": 0.8261,
+            "depth": 2,
+            "expected_verdict": 0.99787,
+            "gold_prob": 0.99764,
+            "node_id": 2,
+            "novelty": 0.0011,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.86537,
+            "deduction_entailed": 0.86626,
+            "depth": 1,
+            "expected_verdict": 0.99788,
+            "gold_prob": 0.99765,
+            "node_id": 3,
+            "novelty": 0.00114,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99839
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84464,
+            "deduction_entailed": 0.8402,
+            "depth": 3,
+            "expected_verdict": 0.99787,
+            "gold_prob": 0.99764,
+            "node_id": 4,
+            "novelty": 0.00129,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99578,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0077_comb_t8_p6_tr0_m2_284"
+    },
+    {
+      "metadata": {
+        "cycle": 78,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t1_p2_tr2_m2_288"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 2,
+            "confidence": 0.83691,
+            "deduction_entailed": 0.80745,
+            "depth": 1,
+            "expected_verdict": 0.54947,
+            "gold_prob": 0.49941,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.4321
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.82358,
+            "deduction_entailed": 0.82345,
+            "depth": 2,
+            "expected_verdict": 0.55032,
+            "gold_prob": 0.50036,
+            "node_id": 2,
+            "novelty": 0.00104,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 0.68274
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83216,
+            "deduction_entailed": 0.80928,
+            "depth": 1,
+            "expected_verdict": 0.55005,
+            "gold_prob": 0.50005,
+            "node_id": 3,
+            "novelty": 0.00087,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.65754
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83563,
+            "deduction_entailed": 0.83935,
+            "depth": 3,
+            "expected_verdict": 0.55216,
+            "gold_prob": 0.5024,
+            "node_id": 4,
+            "novelty": 0.00162,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 0.70915
+        }
+      ],
+      "world_id": "world_0078_comb_t1_p2_tr2_m2_288"
+    },
+    {
+      "metadata": {
+        "cycle": 79,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_106_14_3"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.85874,
+            "deduction_entailed": 0.82788,
+            "depth": 1,
+            "expected_verdict": 0.99784,
+            "gold_prob": 0.99765,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99836
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.86661,
+            "deduction_entailed": 0.82942,
+            "depth": 2,
+            "expected_verdict": 0.99784,
+            "gold_prob": 0.99765,
+            "node_id": 2,
+            "novelty": 0.00227,
+            "parent_id": 1,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.85488,
+            "deduction_entailed": 0.8148,
+            "depth": 1,
+            "expected_verdict": 0.99785,
+            "gold_prob": 0.99766,
+            "node_id": 3,
+            "novelty": 0.00141,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99837
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84987,
+            "deduction_entailed": 0.79363,
+            "depth": 3,
+            "expected_verdict": 0.99786,
+            "gold_prob": 0.99767,
+            "node_id": 4,
+            "novelty": 0.00121,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99584,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0079_bitmask_xor_106_14_3"
+    },
+    {
+      "metadata": {
+        "cycle": 80,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_39_7"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.88602,
+            "deduction_entailed": 0.83311,
+            "depth": 1,
+            "expected_verdict": 0.99797,
+            "gold_prob": 0.99765,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99844
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.86823,
+            "deduction_entailed": 0.82544,
+            "depth": 2,
+            "expected_verdict": 0.99796,
+            "gold_prob": 0.99765,
+            "node_id": 2,
+            "novelty": 0.00122,
+            "parent_id": 1,
+            "scaffold": "abstraction -> synthesis -> deduction -> abduction -> association -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.88679,
+            "deduction_entailed": 0.8213,
+            "depth": 1,
+            "expected_verdict": 0.99795,
+            "gold_prob": 0.99764,
+            "node_id": 3,
+            "novelty": 0.00098,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99578,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99843
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.87384,
+            "deduction_entailed": 0.81038,
+            "depth": 3,
+            "expected_verdict": 0.99797,
+            "gold_prob": 0.99766,
+            "node_id": 4,
+            "novelty": 0.00113,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0080_code_odd_sum_39_7"
+    },
+    {
+      "metadata": {
+        "cycle": 81,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t1_p6_tr2_m2_300"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.85269,
+            "deduction_entailed": 0.83164,
+            "depth": 1,
+            "expected_verdict": 0.99789,
+            "gold_prob": 0.99766,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.9984
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84206,
+            "deduction_entailed": 0.81473,
+            "depth": 2,
+            "expected_verdict": 0.9979,
+            "gold_prob": 0.99766,
+            "node_id": 2,
+            "novelty": 0.00118,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84649,
+            "deduction_entailed": 0.80221,
+            "depth": 1,
+            "expected_verdict": 0.99789,
+            "gold_prob": 0.99766,
+            "node_id": 3,
+            "novelty": 0.00111,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.9984
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83034,
+            "deduction_entailed": 0.82085,
+            "depth": 3,
+            "expected_verdict": 0.99789,
+            "gold_prob": 0.99766,
+            "node_id": 4,
+            "novelty": 0.00126,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0081_comb_t1_p6_tr2_m2_300"
+    },
+    {
+      "metadata": {
+        "cycle": 82,
+        "domain": "physics_kinematics"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "physics_kinematics",
+            "task_id": "physics_calorimetry_95_3_9"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.86534,
+            "deduction_entailed": 0.85088,
+            "depth": 1,
+            "expected_verdict": 0.99794,
+            "gold_prob": 0.99766,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99842
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.86225,
+            "deduction_entailed": 0.83319,
+            "depth": 2,
+            "expected_verdict": 0.99792,
+            "gold_prob": 0.99765,
+            "node_id": 2,
+            "novelty": 0.00118,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99577,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.86165,
+            "deduction_entailed": 0.82752,
+            "depth": 1,
+            "expected_verdict": 0.99793,
+            "gold_prob": 0.99766,
+            "node_id": 3,
+            "novelty": 0.00136,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99842
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.8554,
+            "deduction_entailed": 0.83286,
+            "depth": 3,
+            "expected_verdict": 0.99791,
+            "gold_prob": 0.99763,
+            "node_id": 4,
+            "novelty": 0.00152,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99576,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0082_physics_calorimetry_95_3_9"
+    },
+    {
+      "metadata": {
+        "cycle": 83,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t8_p6_tr0_m2_308"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83894,
+            "deduction_entailed": 0.80917,
+            "depth": 1,
+            "expected_verdict": 0.99788,
+            "gold_prob": 0.99764,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99579,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99838
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.86237,
+            "deduction_entailed": 0.84189,
+            "depth": 2,
+            "expected_verdict": 0.99787,
+            "gold_prob": 0.99763,
+            "node_id": 2,
+            "novelty": 0.00287,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99579,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84279,
+            "deduction_entailed": 0.8088,
+            "depth": 1,
+            "expected_verdict": 0.9979,
+            "gold_prob": 0.99766,
+            "node_id": 3,
+            "novelty": 0.00097,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.9984
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.85255,
+            "deduction_entailed": 0.84179,
+            "depth": 3,
+            "expected_verdict": 0.99787,
+            "gold_prob": 0.99764,
+            "node_id": 4,
+            "novelty": 0.00139,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0083_comb_t8_p6_tr0_m2_308"
+    },
+    {
+      "metadata": {
+        "cycle": 84,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t1_p2_tr2_m2_312"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.8521,
+            "deduction_entailed": 0.83529,
+            "depth": 1,
+            "expected_verdict": 0.55141,
+            "gold_prob": 0.50156,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.65857
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84421,
+            "deduction_entailed": 0.83283,
+            "depth": 2,
+            "expected_verdict": 0.5536,
+            "gold_prob": 0.504,
+            "node_id": 2,
+            "novelty": 0.00229,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 0.68524
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.85332,
+            "deduction_entailed": 0.8413,
+            "depth": 1,
+            "expected_verdict": 0.55191,
+            "gold_prob": 0.50213,
+            "node_id": 3,
+            "novelty": 0.00136,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99579,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.65896
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.83153,
+            "deduction_entailed": 0.84976,
+            "depth": 3,
+            "expected_verdict": 0.55236,
+            "gold_prob": 0.50263,
+            "node_id": 4,
+            "novelty": 0.00147,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99576,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 0.7093
+        }
+      ],
+      "world_id": "world_0084_comb_t1_p2_tr2_m2_312"
+    },
+    {
+      "metadata": {
+        "cycle": 85,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_106_20_12"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.88255,
+            "deduction_entailed": 0.83368,
+            "depth": 1,
+            "expected_verdict": 0.99785,
+            "gold_prob": 0.99765,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99837
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.87326,
+            "deduction_entailed": 0.80556,
+            "depth": 2,
+            "expected_verdict": 0.99785,
+            "gold_prob": 0.99765,
+            "node_id": 2,
+            "novelty": 0.00127,
+            "parent_id": 1,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.87502,
+            "deduction_entailed": 0.82377,
+            "depth": 1,
+            "expected_verdict": 0.99785,
+            "gold_prob": 0.99765,
+            "node_id": 3,
+            "novelty": 0.00087,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99579,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99836
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.87796,
+            "deduction_entailed": 0.82651,
+            "depth": 3,
+            "expected_verdict": 0.99786,
+            "gold_prob": 0.99766,
+            "node_id": 4,
+            "novelty": 0.0009,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0085_bitmask_xor_106_20_12"
+    },
+    {
+      "metadata": {
+        "cycle": 86,
+        "domain": "algorithmic_code"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "algorithmic_code",
+            "task_id": "code_odd_sum_20_7"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.88345,
+            "deduction_entailed": 0.81293,
+            "depth": 1,
+            "expected_verdict": 0.99797,
+            "gold_prob": 0.99766,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99579,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99844
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.88828,
+            "deduction_entailed": 0.82903,
+            "depth": 2,
+            "expected_verdict": 0.99797,
+            "gold_prob": 0.99766,
+            "node_id": 2,
+            "novelty": 0.00181,
+            "parent_id": 1,
+            "scaffold": "abstraction -> synthesis -> deduction -> abduction -> association -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.87653,
+            "deduction_entailed": 0.8018,
+            "depth": 1,
+            "expected_verdict": 0.99797,
+            "gold_prob": 0.99766,
+            "node_id": 3,
+            "novelty": 0.00114,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99844
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.86651,
+            "deduction_entailed": 0.83863,
+            "depth": 3,
+            "expected_verdict": 0.99797,
+            "gold_prob": 0.99766,
+            "node_id": 4,
+            "novelty": 0.0011,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0086_code_odd_sum_20_7"
+    },
+    {
+      "metadata": {
+        "cycle": 87,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t1_p6_tr2_m2_324"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.842,
+            "deduction_entailed": 0.8312,
+            "depth": 1,
+            "expected_verdict": 0.9979,
+            "gold_prob": 0.99767,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.9984
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.8609,
+            "deduction_entailed": 0.84266,
+            "depth": 2,
+            "expected_verdict": 0.9979,
+            "gold_prob": 0.99767,
+            "node_id": 2,
+            "novelty": 0.00157,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.86116,
+            "deduction_entailed": 0.83188,
+            "depth": 1,
+            "expected_verdict": 0.99789,
+            "gold_prob": 0.99766,
+            "node_id": 3,
+            "novelty": 0.00143,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.9984
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84232,
+            "deduction_entailed": 0.84707,
+            "depth": 3,
+            "expected_verdict": 0.99789,
+            "gold_prob": 0.99766,
+            "node_id": 4,
+            "novelty": 0.00112,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0087_comb_t1_p6_tr2_m2_324"
+    },
+    {
+      "metadata": {
+        "cycle": 88,
+        "domain": "physics_kinematics"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "physics_kinematics",
+            "task_id": "physics_calorimetry_73_2_7"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.8542,
+            "deduction_entailed": 0.81704,
+            "depth": 1,
+            "expected_verdict": 0.99794,
+            "gold_prob": 0.99767,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99843
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.86736,
+            "deduction_entailed": 0.84605,
+            "depth": 2,
+            "expected_verdict": 0.99793,
+            "gold_prob": 0.99766,
+            "node_id": 2,
+            "novelty": 0.00142,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99579,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.86434,
+            "deduction_entailed": 0.84318,
+            "depth": 1,
+            "expected_verdict": 0.99794,
+            "gold_prob": 0.99767,
+            "node_id": 3,
+            "novelty": 0.00101,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99843
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.86547,
+            "deduction_entailed": 0.82888,
+            "depth": 3,
+            "expected_verdict": 0.99795,
+            "gold_prob": 0.99768,
+            "node_id": 4,
+            "novelty": 0.00088,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0088_physics_calorimetry_73_2_7"
+    },
+    {
+      "metadata": {
+        "cycle": 89,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t8_p6_tr0_m2_332"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.85429,
+            "deduction_entailed": 0.82007,
+            "depth": 1,
+            "expected_verdict": 0.99788,
+            "gold_prob": 0.99765,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99839
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.85892,
+            "deduction_entailed": 0.81528,
+            "depth": 2,
+            "expected_verdict": 0.99789,
+            "gold_prob": 0.99765,
+            "node_id": 2,
+            "novelty": 0.00181,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.85213,
+            "deduction_entailed": 0.82553,
+            "depth": 1,
+            "expected_verdict": 0.99789,
+            "gold_prob": 0.99766,
+            "node_id": 3,
+            "novelty": 0.00088,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.9984
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.86481,
+            "deduction_entailed": 0.84836,
+            "depth": 3,
+            "expected_verdict": 0.99785,
+            "gold_prob": 0.99761,
+            "node_id": 4,
+            "novelty": 0.00215,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99575,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0089_comb_t8_p6_tr0_m2_332"
+    },
+    {
+      "metadata": {
+        "cycle": 90,
+        "domain": "compositional_physics_math"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "compositional_physics_math",
+            "task_id": "comb_t1_p2_tr2_m2_336"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.8449,
+            "deduction_entailed": 0.84318,
+            "depth": 1,
+            "expected_verdict": 0.94202,
+            "gold_prob": 0.93558,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.95587
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.82987,
+            "deduction_entailed": 0.81432,
+            "depth": 2,
+            "expected_verdict": 0.98487,
+            "gold_prob": 0.98319,
+            "node_id": 2,
+            "novelty": 0.00115,
+            "parent_id": 1,
+            "scaffold": "abduction -> induction -> deduction -> association -> decision -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.84881,
+            "deduction_entailed": 0.84204,
+            "depth": 1,
+            "expected_verdict": 0.94959,
+            "gold_prob": 0.94399,
+            "node_id": 3,
+            "novelty": 0.00082,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.96163
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.82874,
+            "deduction_entailed": 0.82494,
+            "depth": 3,
+            "expected_verdict": 0.88799,
+            "gold_prob": 0.87554,
+            "node_id": 4,
+            "novelty": 0.00088,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 0.96475
+        }
+      ],
+      "world_id": "world_0090_comb_t1_p2_tr2_m2_336"
+    },
+    {
+      "metadata": {
+        "cycle": 91,
+        "domain": "bitmask_verification"
+      },
+      "nodes": [
+        {
+          "id": 0,
+          "observation": {
+            "domain": "bitmask_verification",
+            "task_id": "bitmask_xor_46_50_6"
+          },
+          "parent": null,
+          "score": 0.0
+        },
+        {
+          "id": 1,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.87718,
+            "deduction_entailed": 0.83859,
+            "depth": 1,
+            "expected_verdict": 0.99787,
+            "gold_prob": 0.99767,
+            "node_id": 1,
+            "novelty": 1.0,
+            "parent_id": 0,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99582,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99838
+        },
+        {
+          "id": 2,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.8889,
+            "deduction_entailed": 0.84523,
+            "depth": 2,
+            "expected_verdict": 0.99786,
+            "gold_prob": 0.99766,
+            "node_id": 2,
+            "novelty": 0.00299,
+            "parent_id": 1,
+            "scaffold": "abduction -> association -> decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.9958,
+            "vetoed": false
+          },
+          "parent": 1,
+          "score": 1.0
+        },
+        {
+          "id": 3,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.87523,
+            "deduction_entailed": 0.82874,
+            "depth": 1,
+            "expected_verdict": 0.99786,
+            "gold_prob": 0.99767,
+            "node_id": 3,
+            "novelty": 0.00135,
+            "parent_id": 0,
+            "scaffold": "association -> deduction -> decision -> evaluation -> metacognition",
+            "utility": 0.99581,
+            "vetoed": false
+          },
+          "parent": 0,
+          "score": 0.99838
+        },
+        {
+          "id": 4,
+          "observation": {
+            "best_rollout_index": 0,
+            "confidence": 0.87933,
+            "deduction_entailed": 0.8391,
+            "depth": 3,
+            "expected_verdict": 0.99787,
+            "gold_prob": 0.99767,
+            "node_id": 4,
+            "novelty": 0.00131,
+            "parent_id": 2,
+            "scaffold": "decision -> deduction -> evaluation -> metacognition",
+            "utility": 0.99583,
+            "vetoed": false
+          },
+          "parent": 2,
+          "score": 1.0
+        }
+      ],
+      "world_id": "world_0091_bitmask_xor_46_50_6"
+    }
+  ]
+}

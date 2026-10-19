@@ -1,0 +1,281 @@
+{
+  "checkpoint_id": "colab_mcl4_coe_v7_mitotic_3b_fast/step_03000",
+  "config": {
+    "attention_multiplier": null,
+    "batch_size": 16,
+    "checkpoint_every": 500,
+    "clear_consumed_shards": true,
+    "combine_dense_and_sparse": false,
+    "corpora_root": "/content/MCL4-COE/corpora",
+    "cpu_offload_optimizer": false,
+    "curriculum_mode": "cosine",
+    "curriculum_stages": null,
+    "d_model": 768,
+    "decision_batch_size": 4,
+    "deep_supervision_weight": 0.2,
+    "dense_expert_indices": [],
+    "dense_subset_k": 0,
+    "depth_ponder": true,
+    "donor_backbone_lr_scale": 0.08,
+    "dream_every": 20,
+    "dream_max_calls": 4,
+    "dream_max_rounds": 3,
+    "dream_revisions": 3,
+    "dream_workers": 2,
+    "embedding_multiplier": 1.0,
+    "enable_dream_rsi": true,
+    "enable_gist_conditioning": true,
+    "enable_mitosis": true,
+    "enable_ornith_rl": true,
+    "end_weights": {
+      "pretrain_lm": 0.25,
+      "typed_decision": 0.2,
+      "uta_trace": 0.55
+    },
+    "eos_token_id": null,
+    "eval_every": 250,
+    "expert_hidden_dim": 384,
+    "gist_conditioning_prob": 0.15,
+    "grad_clip": 1.0,
+    "hf_backup_repo": null,
+    "hf_keep_checkpoints": 2,
+    "latent_prior_scale": 0.35,
+    "logits_scaling": 1.0,
+    "lr": 0.001,
+    "max_experts": 416,
+    "max_keep_checkpoints": 1,
+    "max_seq_len": 1024,
+    "micro_batch_size": 16,
+    "min_lr_ratio": 0.12,
+    "mitosis_every": 1000,
+    "mitosis_milestones": [
+      [
+        1100,
+        12
+      ],
+      [
+        1980,
+        16
+      ],
+      [
+        2805,
+        24
+      ],
+      [
+        3520,
+        32
+      ],
+      [
+        4125,
+        48
+      ],
+      [
+        4510,
+        80
+      ],
+      [
+        4840,
+        128
+      ],
+      [
+        5115,
+        208
+      ],
+      [
+        5308,
+        304
+      ],
+      [
+        5418,
+        416
+      ]
+    ],
+    "mitosis_step_size": 8,
+    "mitotic_ortho_coef": 0.02,
+    "n_decoder_layers": 4,
+    "n_encoder_layers": 4,
+    "n_heads": 8,
+    "num_experts": 24,
+    "nvfp4_sparsity_mode": "2to4_transposable",
+    "nvfp4_sr_ste_decay": 0.0001,
+    "operator_every": 4,
+    "ornith_every": 12,
+    "ornith_warmup_ratio": 0.5,
+    "ornith_weight": 0.2,
+    "orthogonal_mitosis": true,
+    "pad_id": 256,
+    "ple_dim": 192,
+    "preserve_residual_across_stacks": false,
+    "projection_dim": 192,
+    "recurrence_steps": 2,
+    "recurrent_coverage_penalty": 0.25,
+    "recurrent_kv": true,
+    "release_mitotic_pairs": false,
+    "residual_multiplier": 1.0,
+    "resume_checkpoint": "/content/runs/colab_mcl4_coe_v7_mitotic_3b_fast/checkpoints/step_00661_stopped.pt",
+    "rms_norm_eps": 1e-05,
+    "rope_theta": 10000.0,
+    "run_id": "colab_mcl4_coe_v7_mitotic_3b_fast",
+    "runs_root": "/content/runs",
+    "sample_every": 250,
+    "sample_prompt": "How do plants use capillary action to transport water?",
+    "seed": 42,
+    "sequence_diversity_coef": 0.02,
+    "shards_root": "/content/data_shards_morph16k",
+    "stage_seq_lens": [],
+    "start_weights": {
+      "pretrain_lm": 0.5,
+      "typed_decision": 0.15,
+      "uta_trace": 0.35
+    },
+    "top_k": 4,
+    "total_steps": 5500,
+    "use_nvfp4": false,
+    "use_qk_norm": true,
+    "val_max_batches_per_track": 8,
+    "vocab_size": 16384,
+    "warmup_ratio": 0.06,
+    "weight_decay": 0.01
+  },
+  "meta_file": "/content/runs/colab_mcl4_coe_v7_mitotic_3b_fast/checkpoints/step_03000.meta.json",
+  "metrics": {
+    "abstraction_loss": 0.01926,
+    "cumulative_tokens": 43198235,
+    "decision_loss": 1.53952,
+    "deduction_loss": 1.04823,
+    "dream_accepted_revisions": 1,
+    "dream_active_policy": "WIDTH 2\nROOT 1\nRANK SCORE GAIN UTILITY\nSTOP 0.84\nPATIENCE 2\nROUNDS 3",
+    "dream_cycle": 2,
+    "dream_initial_score": 0.70329,
+    "dream_replay_score": 0.70329,
+    "dream_replays_dreamed": 60,
+    "dream_worlds_archived": 2,
+    "evaluation_loss": 0.54797,
+    "expert_load": [
+      0.0346,
+      0.0258,
+      0.0503,
+      0.058,
+      0.0616,
+      0.0537,
+      0.0347,
+      0.0254,
+      0.029,
+      0.0276,
+      0.0263,
+      0.0322,
+      0.055,
+      0.0496,
+      0.051,
+      0.0615,
+      0.0488,
+      0.0421,
+      0.0414,
+      0.0406,
+      0.0451,
+      0.0406,
+      0.0321,
+      0.0332
+    ],
+    "lm_loss": 2.48909,
+    "loss_pretrain_lm": 3.48636,
+    "loss_typed_decision": 1.6976,
+    "loss_uta_trace": 1.29633,
+    "lr": 0.000537,
+    "metacognition_loss": 0.62099,
+    "mitotic_pairs": [
+      [
+        11,
+        16
+      ],
+      [
+        6,
+        17
+      ],
+      [
+        8,
+        18
+      ],
+      [
+        0,
+        19
+      ],
+      [
+        10,
+        20
+      ],
+      [
+        9,
+        21
+      ],
+      [
+        1,
+        22
+      ],
+      [
+        7,
+        23
+      ]
+    ],
+    "novelty_buffer_size": 42,
+    "num_experts": 24,
+    "nvfp4_gemms": 0,
+    "nvfp4_sparse_2to4_gemms": 0,
+    "ornith_harness_reward": 0.1872,
+    "ornith_loss": 2.05415,
+    "ornith_novelty": 0.0742,
+    "ornith_pass_rate": 0.342,
+    "ornith_rollout_reward": 0.4351,
+    "ornith_task_reward": 0.0586,
+    "progress": 0.5455,
+    "quotas": {
+      "pretrain_lm": 6,
+      "typed_decision": 3,
+      "uta_trace": 7
+    },
+    "scaffolds_cached": 42,
+    "step": 3000,
+    "step_time_s": 1.082,
+    "step_tokens": 11740,
+    "tok_per_s": 13249.5,
+    "total_loss": 3.79773,
+    "total_steps": 5500,
+    "train_bpb": 1.21923,
+    "train_bpt": 3.591,
+    "val_bpb": 1.20362,
+    "val_bpb_pretrain_lm": 1.16247,
+    "val_bpb_typed_decision": 1.08184,
+    "val_bpb_uta_trace": 1.4048,
+    "val_bpt": 3.63373,
+    "val_bpt_pretrain_lm": 3.30973,
+    "val_bpt_typed_decision": 3.97314,
+    "val_bpt_uta_trace": 3.96589,
+    "val_bytes_evaluated": 778025,
+    "val_lm_loss": 2.51871,
+    "val_loss_pretrain_lm": 2.29413,
+    "val_loss_typed_decision": 2.75397,
+    "val_loss_uta_trace": 2.74895,
+    "val_mcqa_acc": 0.2586,
+    "val_mcqa_ce_loss": 1.4072,
+    "val_mcqa_n": 263,
+    "val_tokens_evaluated": 257710,
+    "vram_allocated_mb": 3983.6,
+    "vram_reserved_mb": 48260.0,
+    "wall_time_s": 1282.88,
+    "weights": {
+      "pretrain_lm": 0.3572,
+      "typed_decision": 0.1786,
+      "uta_trace": 0.4642
+    }
+  },
+  "num_experts": 24,
+  "parameter_count": 224434571,
+  "pt_file": "/content/runs/colab_mcl4_coe_v7_mitotic_3b_fast/checkpoints/step_03000.pt",
+  "run_id": "colab_mcl4_coe_v7_mitotic_3b_fast",
+  "sample_prompt": "How do plants use capillary action to transport water?",
+  "sample_uta": "#U$# How do plants use capillary action to transport water?\n#T$# Okay, so I need to find the plants useierce action to transport water. Let me start by recalling what plants useierce. The plants useierce to transport water, which are the main types of plants that use them. The plants use their food to transport water, which is the main types of plants. \n\nFirst, plants use plants to transport water. The plants are also plants that use plants. They use plants that use plants to transport water, such as plants, and plants. The plants are also important for plants that use their food to transport water. The plant plants use plants to help plants.\n\nAlright, plants use plant plants that use their food for plants.\n#A$# <answer>\nThe plants use plant plants to transport their food to transport their food to transport water. They use plants to help plant plants to transport their food. The plants use plants to transport water to transport their food. The seeds use plants that use plant plants to help their food to transport their food, such as plants, and plants. \n\n1. **Carbons use plants**: The plant plants use plant flows to transport their animals.",
+  "step": 3000,
+  "timestamp": 1792364764.349101,
+  "total_steps": 5500,
+  "use_nvfp4": false
+}

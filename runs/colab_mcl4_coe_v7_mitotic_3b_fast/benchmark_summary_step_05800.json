@@ -1,0 +1,75 @@
+{
+  "run_id": "colab_mcl4_coe_v7_mitotic_3b_fast",
+  "step": 5800,
+  "total_params": 3001375115,
+  "num_experts_per_layer": 416,
+  "num_moe_layers": 8,
+  "total_experts": 3328,
+  "d_model": 768,
+  "expert_hidden_dim": 384,
+  "multi_active_density_sweep": {
+    "top_k_4": {
+      "active_params": 135470000,
+      "active_pct": 4.51,
+      "val_bpb": 1.0189,
+      "val_uta_trace": 1.006,
+      "val_typed_decision": 0.5203,
+      "val_pretrain_lm": 1.166,
+      "val_mcqa_acc": 0.3574,
+      "val_mcqa_ce_loss": 1.3493,
+      "eval_utility_gold": 0.1695,
+      "eval_utility_distractor": 0.1545,
+      "meta_correctness_conf": 0.2266,
+      "abstraction_alignment": 0.9859
+    },
+    "top_k_8": {
+      "active_params": 163780000,
+      "active_pct": 5.46,
+      "val_bpb": 1.0127,
+      "val_uta_trace": 0.9965,
+      "val_typed_decision": 0.516,
+      "val_pretrain_lm": 1.1608,
+      "val_mcqa_acc": 0.3496,
+      "val_mcqa_ce_loss": 1.3413,
+      "eval_utility_gold": 0.1911,
+      "eval_utility_distractor": 0.1758,
+      "meta_correctness_conf": 0.2368,
+      "abstraction_alignment": 0.9889
+    },
+    "top_k_16": {
+      "active_params": 220400000,
+      "active_pct": 7.34,
+      "val_bpb": 1.0126,
+      "val_uta_trace": 0.9937,
+      "val_typed_decision": 0.5151,
+      "val_pretrain_lm": 1.1619,
+      "val_mcqa_acc": 0.3672,
+      "val_mcqa_ce_loss": 1.3383,
+      "eval_utility_gold": 0.2107,
+      "eval_utility_distractor": 0.1937,
+      "meta_correctness_conf": 0.243,
+      "abstraction_alignment": 0.9906
+    },
+    "top_k_32": {
+      "active_params": 333650000,
+      "active_pct": 11.12,
+      "val_bpb": 1.0178,
+      "val_uta_trace": 0.9967,
+      "val_typed_decision": 0.5187,
+      "val_pretrain_lm": 1.1686,
+      "val_mcqa_acc": 0.3672,
+      "val_mcqa_ce_loss": 1.3381,
+      "eval_utility_gold": 0.2186,
+      "eval_utility_distractor": 0.2007,
+      "meta_correctness_conf": 0.2449,
+      "abstraction_alignment": 0.9907
+    }
+  },
+  "ornith_verified_benchmark": {
+    "total_tasks": 32,
+    "passed_tasks": 32,
+    "pass_rate": 1.0,
+    "mean_gold_prob": 0.9977,
+    "domains": 13
+  }
+}

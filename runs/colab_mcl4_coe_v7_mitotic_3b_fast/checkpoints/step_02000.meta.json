@@ -1,0 +1,242 @@
+{
+  "checkpoint_id": "colab_mcl4_coe_v7_mitotic_3b_fast/step_02000",
+  "config": {
+    "attention_multiplier": null,
+    "batch_size": 16,
+    "checkpoint_every": 500,
+    "clear_consumed_shards": true,
+    "combine_dense_and_sparse": false,
+    "corpora_root": "/content/MCL4-COE/corpora",
+    "cpu_offload_optimizer": false,
+    "curriculum_mode": "cosine",
+    "curriculum_stages": null,
+    "d_model": 768,
+    "decision_batch_size": 4,
+    "deep_supervision_weight": 0.2,
+    "dense_expert_indices": [],
+    "dense_subset_k": 0,
+    "depth_ponder": true,
+    "donor_backbone_lr_scale": 0.08,
+    "dream_every": 20,
+    "dream_max_calls": 4,
+    "dream_max_rounds": 3,
+    "dream_revisions": 3,
+    "dream_workers": 2,
+    "embedding_multiplier": 1.0,
+    "enable_dream_rsi": true,
+    "enable_gist_conditioning": true,
+    "enable_mitosis": true,
+    "enable_ornith_rl": true,
+    "end_weights": {
+      "pretrain_lm": 0.25,
+      "typed_decision": 0.2,
+      "uta_trace": 0.55
+    },
+    "eos_token_id": null,
+    "eval_every": 250,
+    "expert_hidden_dim": 384,
+    "gist_conditioning_prob": 0.15,
+    "grad_clip": 1.0,
+    "hf_backup_repo": null,
+    "hf_keep_checkpoints": 2,
+    "latent_prior_scale": 0.35,
+    "logits_scaling": 1.0,
+    "lr": 0.001,
+    "max_experts": 416,
+    "max_keep_checkpoints": 1,
+    "max_seq_len": 1024,
+    "micro_batch_size": 16,
+    "min_lr_ratio": 0.12,
+    "mitosis_every": 1000,
+    "mitosis_milestones": [
+      [
+        1100,
+        12
+      ],
+      [
+        1980,
+        16
+      ],
+      [
+        2805,
+        24
+      ],
+      [
+        3520,
+        32
+      ],
+      [
+        4125,
+        48
+      ],
+      [
+        4510,
+        80
+      ],
+      [
+        4840,
+        128
+      ],
+      [
+        5115,
+        208
+      ],
+      [
+        5308,
+        304
+      ],
+      [
+        5418,
+        416
+      ]
+    ],
+    "mitosis_step_size": 8,
+    "mitotic_ortho_coef": 0.02,
+    "n_decoder_layers": 4,
+    "n_encoder_layers": 4,
+    "n_heads": 8,
+    "num_experts": 16,
+    "nvfp4_sparsity_mode": "2to4_transposable",
+    "nvfp4_sr_ste_decay": 0.0001,
+    "operator_every": 4,
+    "ornith_every": 12,
+    "ornith_warmup_ratio": 0.5,
+    "ornith_weight": 0.2,
+    "orthogonal_mitosis": true,
+    "pad_id": 256,
+    "ple_dim": 192,
+    "preserve_residual_across_stacks": false,
+    "projection_dim": 192,
+    "recurrence_steps": 2,
+    "recurrent_coverage_penalty": 0.25,
+    "recurrent_kv": true,
+    "release_mitotic_pairs": false,
+    "residual_multiplier": 1.0,
+    "resume_checkpoint": "/content/runs/colab_mcl4_coe_v7_mitotic_3b_fast/checkpoints/step_00661_stopped.pt",
+    "rms_norm_eps": 1e-05,
+    "rope_theta": 10000.0,
+    "run_id": "colab_mcl4_coe_v7_mitotic_3b_fast",
+    "runs_root": "/content/runs",
+    "sample_every": 250,
+    "sample_prompt": "How do plants use capillary action to transport water?",
+    "seed": 42,
+    "sequence_diversity_coef": 0.02,
+    "shards_root": "/content/data_shards_morph16k",
+    "stage_seq_lens": [],
+    "start_weights": {
+      "pretrain_lm": 0.5,
+      "typed_decision": 0.15,
+      "uta_trace": 0.35
+    },
+    "top_k": 4,
+    "total_steps": 5500,
+    "use_nvfp4": false,
+    "use_qk_norm": true,
+    "val_max_batches_per_track": 8,
+    "vocab_size": 16384,
+    "warmup_ratio": 0.06,
+    "weight_decay": 0.01
+  },
+  "meta_file": "/content/runs/colab_mcl4_coe_v7_mitotic_3b_fast/checkpoints/step_02000.meta.json",
+  "metrics": {
+    "abstraction_loss": 0.00703,
+    "cumulative_tokens": 28955545,
+    "decision_loss": 1.61528,
+    "deduction_loss": 1.04256,
+    "evaluation_loss": 0.55547,
+    "expert_load": [
+      0.0719,
+      0.0701,
+      0.0184,
+      0.0303,
+      0.0323,
+      0.04,
+      0.0798,
+      0.0619,
+      0.0853,
+      0.086,
+      0.0802,
+      0.0835,
+      0.0595,
+      0.0718,
+      0.0645,
+      0.0643
+    ],
+    "lm_loss": 2.11851,
+    "loss_pretrain_lm": 2.31709,
+    "loss_typed_decision": 2.00928,
+    "loss_uta_trace": 1.73117,
+    "lr": 0.000792,
+    "metacognition_loss": 0.61755,
+    "mitotic_pairs": [
+      [
+        5,
+        12
+      ],
+      [
+        2,
+        13
+      ],
+      [
+        3,
+        14
+      ],
+      [
+        4,
+        15
+      ]
+    ],
+    "num_experts": 16,
+    "nvfp4_gemms": 0,
+    "nvfp4_sparse_2to4_gemms": 0,
+    "progress": 0.3636,
+    "quotas": {
+      "pretrain_lm": 7,
+      "typed_decision": 3,
+      "uta_trace": 6
+    },
+    "step": 2000,
+    "step_time_s": 0.73,
+    "step_tokens": 11513,
+    "tok_per_s": 19054.9,
+    "total_loss": 2.92506,
+    "total_steps": 5500,
+    "train_bpb": 1.09164,
+    "train_bpt": 3.05636,
+    "val_bpb": 1.08655,
+    "val_bpb_pretrain_lm": 0.94575,
+    "val_bpb_typed_decision": 0.99794,
+    "val_bpb_uta_trace": 1.43956,
+    "val_bpt": 3.28029,
+    "val_bpt_pretrain_lm": 2.69269,
+    "val_bpt_typed_decision": 3.66499,
+    "val_bpt_uta_trace": 4.06403,
+    "val_bytes_evaluated": 778025,
+    "val_lm_loss": 2.27372,
+    "val_loss_pretrain_lm": 1.86643,
+    "val_loss_typed_decision": 2.54038,
+    "val_loss_uta_trace": 2.81697,
+    "val_mcqa_acc": 0.3156,
+    "val_mcqa_ce_loss": 1.37525,
+    "val_mcqa_n": 263,
+    "val_tokens_evaluated": 257710,
+    "vram_allocated_mb": 2943.4,
+    "vram_reserved_mb": 44712.0,
+    "wall_time_s": 875.06,
+    "weights": {
+      "pretrain_lm": 0.4269,
+      "typed_decision": 0.1646,
+      "uta_trace": 0.4085
+    }
+  },
+  "num_experts": 16,
+  "parameter_count": 167762315,
+  "pt_file": "/content/runs/colab_mcl4_coe_v7_mitotic_3b_fast/checkpoints/step_02000.pt",
+  "run_id": "colab_mcl4_coe_v7_mitotic_3b_fast",
+  "sample_prompt": "How do plants use capillary action to transport water?",
+  "sample_uta": "#U$# How do plants use capillary action to transport water?\n#T$# The plants useevaporation to transport the plants.\nThe plants useevaporation to produce energy, so they can use photosynthesis.\nThe plants use photosynthesis.\nThe soil is a plant, so they can use photosynthesis, so they can also use photosynthesis.\n#A$# ### 1.1.1.1.2.1.1%m.\n### 1.2.1.2.2.1%m.\nif ## 1:1.2.2.2%m.\n# 2.3.2.1%m\n# 1.2.3.2.2%m\n# 1.3.2%m\n## 10.3.2\n# 10.3\n# 2.4.3.2\n## 100.3.2%m 1.3.2 1.3\n# 100.4.3.200.3\n## 2.5.3.2000.3\nif 2.5.3%m 1.3%m 100%m 1000.",
+  "step": 2000,
+  "timestamp": 1792364257.509756,
+  "total_steps": 5500,
+  "use_nvfp4": false
+}

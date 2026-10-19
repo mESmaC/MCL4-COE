@@ -1,0 +1,289 @@
+{
+  "checkpoint_id": "colab_mcl4_coe_v7_mitotic_3b_fast/step_04000",
+  "config": {
+    "attention_multiplier": null,
+    "batch_size": 16,
+    "checkpoint_every": 500,
+    "clear_consumed_shards": true,
+    "combine_dense_and_sparse": false,
+    "corpora_root": "/content/MCL4-COE/corpora",
+    "cpu_offload_optimizer": false,
+    "curriculum_mode": "cosine",
+    "curriculum_stages": null,
+    "d_model": 768,
+    "decision_batch_size": 4,
+    "deep_supervision_weight": 0.2,
+    "dense_expert_indices": [],
+    "dense_subset_k": 0,
+    "depth_ponder": true,
+    "donor_backbone_lr_scale": 0.08,
+    "dream_every": 20,
+    "dream_max_calls": 4,
+    "dream_max_rounds": 3,
+    "dream_revisions": 3,
+    "dream_workers": 2,
+    "embedding_multiplier": 1.0,
+    "enable_dream_rsi": true,
+    "enable_gist_conditioning": true,
+    "enable_mitosis": true,
+    "enable_ornith_rl": true,
+    "end_weights": {
+      "pretrain_lm": 0.25,
+      "typed_decision": 0.2,
+      "uta_trace": 0.55
+    },
+    "eos_token_id": null,
+    "eval_every": 250,
+    "expert_hidden_dim": 384,
+    "gist_conditioning_prob": 0.15,
+    "grad_clip": 1.0,
+    "hf_backup_repo": null,
+    "hf_keep_checkpoints": 2,
+    "latent_prior_scale": 0.35,
+    "logits_scaling": 1.0,
+    "lr": 0.001,
+    "max_experts": 416,
+    "max_keep_checkpoints": 1,
+    "max_seq_len": 1024,
+    "micro_batch_size": 16,
+    "min_lr_ratio": 0.12,
+    "mitosis_every": 1000,
+    "mitosis_milestones": [
+      [
+        1100,
+        12
+      ],
+      [
+        1980,
+        16
+      ],
+      [
+        2805,
+        24
+      ],
+      [
+        3520,
+        32
+      ],
+      [
+        4125,
+        48
+      ],
+      [
+        4510,
+        80
+      ],
+      [
+        4840,
+        128
+      ],
+      [
+        5115,
+        208
+      ],
+      [
+        5308,
+        304
+      ],
+      [
+        5418,
+        416
+      ]
+    ],
+    "mitosis_step_size": 8,
+    "mitotic_ortho_coef": 0.02,
+    "n_decoder_layers": 4,
+    "n_encoder_layers": 4,
+    "n_heads": 8,
+    "num_experts": 32,
+    "nvfp4_sparsity_mode": "2to4_transposable",
+    "nvfp4_sr_ste_decay": 0.0001,
+    "operator_every": 4,
+    "ornith_every": 12,
+    "ornith_warmup_ratio": 0.5,
+    "ornith_weight": 0.2,
+    "orthogonal_mitosis": true,
+    "pad_id": 256,
+    "ple_dim": 192,
+    "preserve_residual_across_stacks": false,
+    "projection_dim": 192,
+    "recurrence_steps": 2,
+    "recurrent_coverage_penalty": 0.25,
+    "recurrent_kv": true,
+    "release_mitotic_pairs": false,
+    "residual_multiplier": 1.0,
+    "resume_checkpoint": "/content/runs/colab_mcl4_coe_v7_mitotic_3b_fast/checkpoints/step_00661_stopped.pt",
+    "rms_norm_eps": 1e-05,
+    "rope_theta": 10000.0,
+    "run_id": "colab_mcl4_coe_v7_mitotic_3b_fast",
+    "runs_root": "/content/runs",
+    "sample_every": 250,
+    "sample_prompt": "How do plants use capillary action to transport water?",
+    "seed": 42,
+    "sequence_diversity_coef": 0.02,
+    "shards_root": "/content/data_shards_morph16k",
+    "stage_seq_lens": [],
+    "start_weights": {
+      "pretrain_lm": 0.5,
+      "typed_decision": 0.15,
+      "uta_trace": 0.35
+    },
+    "top_k": 4,
+    "total_steps": 5500,
+    "use_nvfp4": false,
+    "use_qk_norm": true,
+    "val_max_batches_per_track": 8,
+    "vocab_size": 16384,
+    "warmup_ratio": 0.06,
+    "weight_decay": 0.01
+  },
+  "meta_file": "/content/runs/colab_mcl4_coe_v7_mitotic_3b_fast/checkpoints/step_04000.meta.json",
+  "metrics": {
+    "abstraction_loss": 0.02217,
+    "cumulative_tokens": 57248488,
+    "decision_loss": 1.59217,
+    "deduction_loss": 1.05995,
+    "dream_accepted_revisions": 1,
+    "dream_active_policy": "WIDTH 2\nROOT 1\nRANK SCORE GAIN UTILITY\nSTOP 0.84\nPATIENCE 2\nROUNDS 3",
+    "dream_cycle": 6,
+    "dream_initial_score": 0.6935,
+    "dream_replay_score": 0.6935,
+    "dream_replays_dreamed": 420,
+    "dream_worlds_archived": 6,
+    "evaluation_loss": 0.53384,
+    "expert_load": [
+      0.0325,
+      0.0353,
+      0.021,
+      0.0294,
+      0.0248,
+      0.0247,
+      0.0404,
+      0.0257,
+      0.0379,
+      0.0329,
+      0.0373,
+      0.0346,
+      0.0232,
+      0.0221,
+      0.0231,
+      0.0216,
+      0.0381,
+      0.039,
+      0.0432,
+      0.0404,
+      0.0418,
+      0.0408,
+      0.0377,
+      0.0259,
+      0.0355,
+      0.0284,
+      0.0297,
+      0.0266,
+      0.0289,
+      0.0258,
+      0.0263,
+      0.0255
+    ],
+    "lm_loss": 2.22286,
+    "loss_pretrain_lm": 3.35861,
+    "loss_typed_decision": 2.26408,
+    "loss_uta_trace": 1.18759,
+    "lr": 0.00029,
+    "metacognition_loss": 0.62558,
+    "mitotic_pairs": [
+      [
+        12,
+        24
+      ],
+      [
+        3,
+        25
+      ],
+      [
+        15,
+        26
+      ],
+      [
+        4,
+        27
+      ],
+      [
+        5,
+        28
+      ],
+      [
+        14,
+        29
+      ],
+      [
+        13,
+        30
+      ],
+      [
+        2,
+        31
+      ]
+    ],
+    "novelty_buffer_size": 208,
+    "num_experts": 32,
+    "nvfp4_gemms": 0,
+    "nvfp4_sparse_2to4_gemms": 0,
+    "ornith_harness_reward": 0.3957,
+    "ornith_loss": 1.05972,
+    "ornith_novelty": 0.0254,
+    "ornith_pass_rate": 0.8171,
+    "ornith_rollout_reward": 0.8789,
+    "ornith_task_reward": 0.0026,
+    "progress": 0.7273,
+    "quotas": {
+      "pretrain_lm": 5,
+      "typed_decision": 3,
+      "uta_trace": 8
+    },
+    "scaffolds_cached": 208,
+    "step": 4000,
+    "step_time_s": 0.762,
+    "step_tokens": 12421,
+    "tok_per_s": 19432.1,
+    "total_loss": 3.10514,
+    "total_steps": 5500,
+    "train_bpb": 1.15327,
+    "train_bpt": 3.2069,
+    "val_bpb": 1.19841,
+    "val_bpb_pretrain_lm": 1.16712,
+    "val_bpb_typed_decision": 1.0906,
+    "val_bpb_uta_trace": 1.36693,
+    "val_bpt": 3.61801,
+    "val_bpt_pretrain_lm": 3.32299,
+    "val_bpt_typed_decision": 4.0053,
+    "val_bpt_uta_trace": 3.85897,
+    "val_bytes_evaluated": 778025,
+    "val_lm_loss": 2.50781,
+    "val_loss_pretrain_lm": 2.30332,
+    "val_loss_typed_decision": 2.77626,
+    "val_loss_uta_trace": 2.67484,
+    "val_mcqa_acc": 0.2966,
+    "val_mcqa_ce_loss": 1.36478,
+    "val_mcqa_n": 263,
+    "val_tokens_evaluated": 257710,
+    "vram_allocated_mb": 5011.1,
+    "vram_reserved_mb": 48816.0,
+    "wall_time_s": 1720.1,
+    "weights": {
+      "pretrain_lm": 0.2931,
+      "typed_decision": 0.1914,
+      "uta_trace": 0.5155
+    }
+  },
+  "num_experts": 32,
+  "parameter_count": 281106827,
+  "pt_file": "/content/runs/colab_mcl4_coe_v7_mitotic_3b_fast/checkpoints/step_04000.pt",
+  "run_id": "colab_mcl4_coe_v7_mitotic_3b_fast",
+  "sample_prompt": "How do plants use capillary action to transport water?",
+  "sample_uta": "#U$# How do plants use capillary action to transport water?\n#T$# Evaluate hypotheses against question stem -> [1] How to plants use struct action to transport water?\n#A$# [1] How to plants using struct action to transport water?",
+  "step": 4000,
+  "timestamp": 1792365274.8101215,
+  "total_steps": 5500,
+  "use_nvfp4": false
+}

@@ -221,6 +221,87 @@ class SparseMoE(nn.Module):
         self._mitotic_idx_cache: tuple[Any, Tensor, Tensor] | None = None
         self._grouped_weight_cache: tuple[Any, Tensor, Tensor] | None = None
         self.last_selected_mask: Tensor | None = None
+        self.lineage_num_roots: int = 0
+        self.lineage_top_families: int = 0
+        self.lineage_child_share: float = 0.25
+        self.lineage_root_ids: Tensor | None = None
+        self.lineage_logit_prior: Tensor | None = None
+
+    @torch.no_grad()
+    def configure_lineage_family_routing(
+        self,
+        num_roots: int = 64,
+        *,
+        top_families: int = 8,
+        child_share: float = 0.25,
+    ) -> None:
+        """Configure parent-anchored lineage-calibrated family routing for multi-generation mitotic MoE layers."""
+        if num_roots <= 0 or top_families <= 0 or num_roots >= self.num_experts:
+            self.lineage_num_roots = 0
+            self.lineage_top_families = 0
+            self.lineage_root_ids = None
+            self.lineage_logit_prior = None
+            return
+        dev = self.router.weight.device
+        ups = torch.stack(
+            [e.up_proj.weight.detach().float().reshape(-1) for e in self.experts], dim=0
+        )
+        ups = F.normalize(ups, p=2.0, dim=-1, eps=1e-8)
+        sim_roots = ups[num_roots:] @ ups[:num_roots].T
+        child_roots = sim_roots.argmax(dim=-1)
+        root_ids = torch.cat(
+            [torch.arange(num_roots, dtype=torch.long, device=dev), child_roots.to(dev)],
+            dim=0,
+        )
+        fam_counts = torch.bincount(root_ids, minlength=num_roots)
+        cs = float(max(0.0, min(0.95, child_share)))
+        prior_w = torch.ones(self.num_experts, dtype=torch.float32, device=dev)
+        for e_idx in range(self.num_experts):
+            r_idx = int(root_ids[e_idx].item())
+            m_r = int(fam_counts[r_idx].item())
+            if m_r > 1:
+                if e_idx < num_roots:
+                    prior_w[e_idx] = max(1e-6, 1.0 - cs)
+                else:
+                    prior_w[e_idx] = max(1e-6, cs / float(m_r - 1))
+        self.lineage_num_roots = int(num_roots)
+        self.lineage_top_families = int(min(top_families, num_roots))
+        self.lineage_child_share = cs
+        self.lineage_root_ids = root_ids
+        self.lineage_logit_prior = torch.log(prior_w)
+
+    def _route_lineage_families(
+        self,
+        router_logits: Tensor,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Compute calibrated probabilities, selected expert indices, and routing weights across root families."""
+        assert self.lineage_root_ids is not None and self.lineage_logit_prior is not None
+        dev = router_logits.device
+        if self.lineage_root_ids.device != dev:
+            self.lineage_root_ids = self.lineage_root_ids.to(dev)
+        if self.lineage_logit_prior.device != dev:
+            self.lineage_logit_prior = self.lineage_logit_prior.to(dev)
+        root_ids = self.lineage_root_ids
+        adj_logits = router_logits + self.lineage_logit_prior.unsqueeze(0)
+        probabilities = F.softmax(adj_logits, dim=-1)
+        n_tok = router_logits.shape[0]
+        fam_probs = router_logits.new_zeros((n_tok, self.lineage_num_roots))
+        fam_probs.scatter_add_(
+            1, root_ids.unsqueeze(0).expand(n_tok, -1), probabilities
+        )
+        _, top_fams = fam_probs.topk(self.lineage_top_families, dim=-1)
+        fam_mask = router_logits.new_zeros((n_tok, self.lineage_num_roots))
+        fam_mask.scatter_(1, top_fams, 1.0)
+        exp_mask = fam_mask.index_select(1, root_ids)
+        masked_probs = probabilities * exp_mask
+        max_active = (
+            int(exp_mask.sum(dim=-1).max().item()) if n_tok > 0 else self.top_k
+        )
+        k_sel = max(self.top_k, min(self.num_experts, max_active))
+        weights, selected = masked_probs.topk(k_sel, dim=-1)
+        if self.norm_topk_prob:
+            weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
+        return probabilities, weights, selected
 
     def forward_dense_subset(
         self,
@@ -666,19 +747,29 @@ class SparseMoE(nn.Module):
                             probabilities.index_select(1, p_t),
                             torch.zeros_like(p_wins, dtype=routed_probs.dtype),
                         )
-                if prior_expert_mask is not None and self.recurrent_coverage_penalty > 0.0:
-                    flat_prior = prior_expert_mask.reshape(-1, self.num_experts).to(
-                        routed_probs.dtype
+                if (
+                    self.lineage_top_families > 0
+                    and self.lineage_root_ids is not None
+                    and self.lineage_logit_prior is not None
+                    and pair_tensors is None
+                ):
+                    probabilities, weights, selected = self._route_lineage_families(
+                        router_logits
                     )
-                    selection_probs = routed_probs * (
-                        1.0 - self.recurrent_coverage_penalty * flat_prior
-                    ).clamp_min(0.05)
-                    _, selected = selection_probs.topk(self.top_k, dim=-1)
-                    weights = routed_probs.gather(-1, selected)
                 else:
-                    weights, selected = routed_probs.topk(self.top_k, dim=-1)
-                if self.norm_topk_prob:
-                    weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
+                    if prior_expert_mask is not None and self.recurrent_coverage_penalty > 0.0:
+                        flat_prior = prior_expert_mask.reshape(-1, self.num_experts).to(
+                            routed_probs.dtype
+                        )
+                        selection_probs = routed_probs * (
+                            1.0 - self.recurrent_coverage_penalty * flat_prior
+                        ).clamp_min(0.05)
+                        _, selected = selection_probs.topk(self.top_k, dim=-1)
+                        weights = routed_probs.gather(-1, selected)
+                    else:
+                        weights, selected = routed_probs.topk(self.top_k, dim=-1)
+                    if self.norm_topk_prob:
+                        weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
                 sel_mask_2d = x.new_zeros((flat.shape[0], self.num_experts), dtype=torch.float32)
                 sel_mask_2d.scatter_add_(
                     1,
@@ -718,9 +809,10 @@ class SparseMoE(nn.Module):
                         self.compute_mitotic_ortho_loss(x.device)
                     )
 
+            k_eff = selected.shape[1]
             flat_selected = selected.reshape(-1)
             perm = flat_selected.argsort(stable=True)
-            sorted_tokens = torch.div(perm, self.top_k, rounding_mode="floor")
+            sorted_tokens = torch.div(perm, k_eff, rounding_mode="floor")
             sorted_weights = weights.reshape(-1).index_select(0, perm).unsqueeze(-1)
             gathered_x = flat.index_select(0, sorted_tokens)
             offs = counts_int_all.to(torch.int32).cumsum(0, dtype=torch.int32)
@@ -732,7 +824,7 @@ class SparseMoE(nn.Module):
             unpermed = torch.empty_like(weighted)
             unpermed.index_copy_(0, perm, weighted)
             out = (
-                unpermed.view(flat.shape[0], self.top_k, flat.shape[-1])
+                unpermed.view(flat.shape[0], k_eff, flat.shape[-1])
                 .sum(dim=1)
                 .to(flat.dtype)
             )
@@ -795,21 +887,31 @@ class SparseMoE(nn.Module):
                         probabilities.index_select(1, p_t),
                         torch.zeros_like(p_wins, dtype=routed_probs.dtype),
                     )
-            if prior_expert_mask is not None and self.recurrent_coverage_penalty > 0.0:
-                flat_prior = (
-                    prior_expert_mask.reshape(-1, self.num_experts)
-                    .index_select(0, active_indices)
-                    .to(routed_probs.dtype)
+            if (
+                self.lineage_top_families > 0
+                and self.lineage_root_ids is not None
+                and self.lineage_logit_prior is not None
+                and pair_tensors is None
+            ):
+                probabilities, weights, selected = self._route_lineage_families(
+                    router_logits
                 )
-                selection_probs = routed_probs * (
-                    1.0 - self.recurrent_coverage_penalty * flat_prior
-                ).clamp_min(0.05)
-                _, selected = selection_probs.topk(self.top_k, dim=-1)
-                weights = routed_probs.gather(-1, selected)
             else:
-                weights, selected = routed_probs.topk(self.top_k, dim=-1)
-            if self.norm_topk_prob:
-                weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
+                if prior_expert_mask is not None and self.recurrent_coverage_penalty > 0.0:
+                    flat_prior = (
+                        prior_expert_mask.reshape(-1, self.num_experts)
+                        .index_select(0, active_indices)
+                        .to(routed_probs.dtype)
+                    )
+                    selection_probs = routed_probs * (
+                        1.0 - self.recurrent_coverage_penalty * flat_prior
+                    ).clamp_min(0.05)
+                    _, selected = selection_probs.topk(self.top_k, dim=-1)
+                    weights = routed_probs.gather(-1, selected)
+                else:
+                    weights, selected = routed_probs.topk(self.top_k, dim=-1)
+                if self.norm_topk_prob:
+                    weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
             one_hot_sel = F.one_hot(selected, num_classes=self.num_experts)
             full_sel_mask = x.new_zeros((flat.shape[0], self.num_experts), dtype=torch.float32)
             full_sel_mask.index_copy_(
@@ -832,9 +934,10 @@ class SparseMoE(nn.Module):
                     self.compute_mitotic_ortho_loss(x.device)
                 )
 
+        k_eff = selected.shape[1]
         flat_selected = selected.reshape(-1)
         perm = flat_selected.argsort(stable=True)
-        sorted_tokens = torch.div(perm, self.top_k, rounding_mode="floor")
+        sorted_tokens = torch.div(perm, k_eff, rounding_mode="floor")
         sorted_weights = weights.reshape(-1).index_select(0, perm).unsqueeze(-1)
         gathered_x = active_x.index_select(0, sorted_tokens)
         expert_chunks = gathered_x.split(counts_int.tolist(), dim=0)
@@ -852,7 +955,7 @@ class SparseMoE(nn.Module):
             unpermed = torch.empty_like(weighted)
             unpermed.index_copy_(0, perm, weighted)
             active_out = (
-                unpermed.view(active_x.shape[0], self.top_k, active_x.shape[-1])
+                unpermed.view(active_x.shape[0], k_eff, active_x.shape[-1])
                 .sum(dim=1)
                 .to(active_x.dtype)
             )
@@ -1382,6 +1485,21 @@ class MCL4CEDBackbone(nn.Module):
                 layer.moe.dense_subset_k = self.config.dense_subset_k
             if combine_dense_and_sparse is not None:
                 layer.moe.combine_dense_and_sparse = self.config.combine_dense_and_sparse
+
+    def set_lineage_family_routing(
+        self,
+        num_roots: int = 64,
+        *,
+        top_families: int = 8,
+        child_share: float = 0.25,
+    ) -> None:
+        """Configure parent-anchored lineage-calibrated family routing across all encoder and decoder MoE layers."""
+        for layer in list(self.encoder_layers) + list(self.decoder_layers):
+            layer.moe.configure_lineage_family_routing(
+                num_roots=num_roots,
+                top_families=top_families,
+                child_share=child_share,
+            )
 
     def encode_state(
         self,

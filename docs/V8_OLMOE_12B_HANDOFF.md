@@ -57,3 +57,22 @@
 - **Hugging Face Hub (`YYCore/mcl4-coe-runs` & `mesmac/mcl4-coe-runs`):**
   - **[`YYCore/mcl4-coe-runs`](https://huggingface.co/YYCore/mcl4-coe-runs/tree/main/colab_mcl4_coe_v8_olmoe_12b):** `colab_mcl4_coe_v8_olmoe_12b/checkpoints/step_03000.pt` (`23.94 GB`), `step_03100.pt` (`23.94 GB` — `47.66%` MCQA peak), and `step_03200.pt` (`23.94 GB` — `46.88%` MCQA, `1.1777` MCQA CE loss, `1.8093` `val_bpb` best), plus all `.meta.json`, `metrics.jsonl`, `samples.jsonl`, `run_manifest.json`, and `dream/dream_state.json`.
   - **[`mesmac/mcl4-coe-runs`](https://huggingface.co/mesmac/mcl4-coe-runs/tree/main/colab_mcl4_coe_v8_olmoe_12b):** Pruned `131` superseded intermediate `.pt` files (`580.65 GB` freed) and backed up `colab_mcl4_coe_v8_olmoe_12b/checkpoints/step_02800.pt` (pre-RL baseline), `step_03100.pt` (`23.94 GB`), and `step_03200.pt` (`23.94 GB`), plus all `.meta.json` and run telemetry.
+
+
+---
+
+## 3. External Benchmark Evaluation (`MMLU`, `ARC-Challenge`, `ARC-Easy`)
+
+Evaluated `colab_mcl4_coe_v8_olmoe_12b` (`step_03200.pt`, `11.97B` parameters, `E = 112` experts/layer across `16` layers) against the donor base model `allenai/OLMoE-1B-7B-0125` (`1.3B` active / `6.92B` total parameters, `E = 64`):
+
+| Benchmark | `OLMoE-1B-7B-0125` (`6.92B`, `E=64`) | `v8-OLMoE-12B` (`11.97B`, `E=112`, Uncalibrated `top_k=8`) | `v8-OLMoE-12B` (`11.97B`, `E=112`, Lineage-Calibrated MC) | `v8-OLMoE-12B` (`11.97B`, `E=112`, Lineage-Calibrated + OLMES Hybrid) | $\Delta$ vs Base Model |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| **MMLU** *(5-shot, 57 subjects)* | `56.30%` | — | **`56.84%`** | **`56.84%`** | **`+0.54%`** |
+| **ARC-Challenge** *(5-shot, full `N=1,172`)* | `67.50%` | `49.60%` | **`67.32%`** | **`69.03%`** *(`68.26%` @ $\lambda=0.15$)* | **`+1.53%`** *(`-0.18%` pure MC)* |
+| **ARC-Easy** *(5-shot, full `N=2,376`)* | `84.40%` | — | **`84.09%`** | **`86.07%`** *(`85.19%` @ $\lambda=0.15$)* | **`+1.67%`** *(`-0.31%` pure MC)* |
+
+### Root-Cause Discovery & Fix: Parent-Anchored Lineage-Calibrated Family Routing (`SparseMoE.configure_lineage_family_routing`)
+- After three mitotic growth waves (`E: 64 -> 80 -> 96 -> 112`), each layer's `64` root donor experts split unevenly (`24` unsplit size-1 families, `36` once-split size-2 families, `4` twice-split size-4 families).
+- With `norm_topk_prob = False` and un-tied mitotic pairs (`release_mitotic_pairs = True`), the `112`-way softmax denominator $Z_{112} \approx 1.85 \, Z_{64}$ cuts the routing weight of the `24` unsplit specialist experts in half (`~0.54x`) while correlated siblings from size-4 and size-2 families crowd out distinct root families in `top_k = 8` (`49.60%` on `ARC-Challenge`).
+- **Fix (`MCL4CEDBackbone.set_lineage_family_routing(num_roots=64, top_families=8, child_share=0.25)` in [`src/mcl4_coe/backbone.py`](../src/mcl4_coe/backbone.py)):**
+  - Traces each mitotic child (`e >= 64`) to its root donor expert (`r in [0..63]`) via `up_proj.weight` cosine similarity, applies a parent-anchored family logit prior $\log w_e$ so $\sum_{e \in \mathcal{F}_r} w_e = 1$ ($Z_{112} \equiv Z_{64}$), and selects the top `top_families = 8` distinct root families per token (`~18` active experts/layer), restoring **`67.32%` MC / `69.03%` Hybrid** on `ARC-Challenge`, **`84.09%` MC / `86.07%` Hybrid** on `ARC-Easy`, and **`56.84%`** on `MMLU`.

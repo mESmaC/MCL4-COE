@@ -2,7 +2,7 @@
 
 **Date:** October 19, 2026  
 **Git Branch / Commit:** `main`  
-**Hugging Face Backup:** [`mesmac/mcl4-coe-runs` (`colab_mcl4_coe_v8_olmoe_12b`)](https://huggingface.co/mesmac/mcl4-coe-runs/tree/main/colab_mcl4_coe_v8_olmoe_12b)
+**Hugging Face Backup:** [`YYCore/mcl4-coe-runs`](https://huggingface.co/YYCore/mcl4-coe-runs/tree/main/colab_mcl4_coe_v8_olmoe_12b) & [`mesmac/mcl4-coe-runs`](https://huggingface.co/mesmac/mcl4-coe-runs/tree/main/colab_mcl4_coe_v8_olmoe_12b)
 
 ---
 
@@ -17,7 +17,7 @@
   - **MoE Telemetry & Test Panels:** Per-layer expert routing heatmaps, **Quarantined Whiteboard** fast-weight ingestion (`prose`/`code`/`web`) + sleep consolidation, **Windowless Demand-Paged Context** (`InfiniteContextPager`), and a **9-Operator MCQA Decision Probe**.
 
 ### B. Donor-Seeded `7.14B -> 11.97B` (`12B`) Architecture & Training (`colab_mcl4_coe_v8_olmoe_12b`)
-- **Files:** [`src/mcl4_coe/donor_olmoe.py`](../src/mcl4_coe/donor_olmoe.py), [`src/mcl4_coe/backbone.py`](../src/mcl4_coe/backbone.py), [`src/mcl4_coe/data.py`](../src/mcl4_coe/data.py), [`src/mcl4_coe/trainer.py`](../src/mcl4_coe/trainer.py), [`configs/colab_mcl4_coe_v8_olmoe_12b.json`](../configs/colab_mcl4_coe_v8_olmoe_12b.json), [`scripts/launch_colab_v8_olmoe_12b.py`](../scripts/launch_colab_v8_olmoe_12b.py)
+- **Files:** [`src/mcl4_coe/donor_olmoe.py`](../src/mcl4_coe/donor_olmoe.py), [`src/mcl4_coe/backbone.py`](../src/mcl4_coe/backbone.py), [`src/mcl4_coe/data.py`](../src/mcl4_coe/data.py), [`src/mcl4_coe/trainer.py`](../src/mcl4_coe/trainer.py), [`configs/colab_mcl4_coe_v8_olmoe_12b.json`](../configs/colab_mcl4_coe_v8_olmoe_12b.json), [`scripts/launch_v8_olmoe_12b.py`](../scripts/launch_v8_olmoe_12b.py)
 - **Donor Base:** `allenai/OLMoE-1B-7B-0125` (`Apache-2.0`, `6.92B` total / `1.3B` active, `E=64`, `top_k=8`, `d_model=2048`, `16` layers, pretrained on `5.1T` tokens) mapped losslessly into `RecursiveMoEBackbone` (`7,137,926,683` initial params including MCL4-COE heads and recurrent adapters).
 - **Training Run (`2,800` steps on NVIDIA RTX PRO 6000 Blackwell `95 GiB` in `125.6 min`):**
   - **Stage 0 (`0–699`):** `E = 64` (`7.14B` params), donor alignment + recurrent `#U$# -> #T$# -> #A$#` warmup (`val_bpb: 2.1748 -> 1.8351`).
@@ -35,26 +35,25 @@
 - **Configuration (`steps 2,801 -> 3,200` on NVIDIA RTX PRO 6000 Blackwell `95 GiB`):**
   - **Twin Un-Tying (`release_mitotic_pairs = True`):** Explicitly un-tied all `16` mitotic twin pairs (`32` parent/child experts `[17, 96] .. [25, 111]`) and prioritized them inside the `64` plastic (`requires_grad=True`) experts/layer so every split child expert specializes independently.
   - **Memory-Adaptive Active Expert Density (`top_k: 8 -> 12 -> 16`):** Ramped active experts from `top_k = 8` (`~1.71B` active params, steps `2,801–2,899`) $\rightarrow$ `top_k = 12` (`~2.11B` active params, steps `2,900–3,049`) $\rightarrow$ `top_k = 16` (`~2.52B` active params, steps `3,050–3,200`) with `recurrence_steps = 2` (`recurrent_kv = True`, `depth_ponder = True`), sustaining `62.6 GiB / 95.0 GiB` allocated VRAM (`~6.4s/step`).
-  - **High-Frequency ORNITH-RL & Dream-RSI (`operator_every = 2`, `ornith_every = 2`, `dream_every = 2`, `ornith_weight = 0.25`):** Executed `101` new Dream-RSI self-play cycles (`dream_cycle: 37 -> 138`, `106,405` replays dreamed, `7` accepted self-revisions, `dream_replay_score: 0.6910 -> 0.7017`).
+  - **High-Frequency ORNITH-RL & Dream-RSI (`operator_every = 2`, `ornith_every = 2`, `dream_every = 2`, `ornith_weight = 0.25`):** Reached `dream_cycle = 239` (`7` accepted self-revisions, `dream_replay_score = 0.7021`).
 - **Held-Out Evaluation Trajectory (`steps 2,800 -> 3,200`):**
 
 | Metric | Pre-RL (`step 2,800`, `top_k=8`) | `step 2,900` (`top_k=12`) | `step 3,000` (`top_k=12`) | `step 3,100` (`top_k=16`) | **`step 3,200` (`top_k=16`)** |
 | :--- | :---: | :---: | :---: | :---: | :---: |
-| **Held-Out `val_mcqa_acc`** | `38.28%` | `39.06%` | `42.19%` | **`46.09%` (`+7.81%`)** | **`43.75%` (`+5.47%`)** |
-| **Held-Out `val_mcqa_ce_loss`** | `1.2952` | `1.3019` | `1.2652` | `1.2150` | **`1.2119` (best)** |
-| **Held-Out `val_bpb` (Overall)** | `1.8187` | `1.8413` | `1.8268` | `1.8129` | **`1.8100` (best)** |
-| **`val_bpb_pretrain_lm`** | `0.7938` | `0.8136` | `0.7999` | `0.7859` | **`0.7836` (best)** |
-| **`val_bpb_typed_decision`** | `1.9726` | `1.9851` | `1.9761` | `1.9635` | **`1.9607` (best)** |
-| **`val_bpb_uta_trace`** | `5.2913` | `5.3128` | `5.2921` | `5.2778` | **`5.2728` (best)** |
-| **ORNITH Pass Rate / Reward** | `31.6%` / `0.2608` | `99.6%` / `0.6868` | `99.7%` / `0.7155` | `99.6%` / `0.6670` | **`99.7%` / `0.7245` (best)** |
-| **Expert Load Std (`112` experts)** | `0.00204` (`min 0.0044`) | `0.00112` | `0.00105` | `0.00109` | **`0.00104` (`min 0.0071`)** |
+| **Held-Out `val_mcqa_acc`** | `38.28%` | `40.62%` | `45.31%` | **`47.66%` (`+9.38%`)** | **`46.88%` (`+8.60%`)** |
+| **Held-Out `val_mcqa_ce_loss`** | `1.2952` | `1.2913` | `1.2642` | `1.1834` | **`1.1777` (best)** |
+| **Held-Out `val_bpb` (Overall)** | `1.8187` | `1.8334` | `1.8259` | `1.8142` | **`1.8093` (best)** |
+| **`val_bpb_pretrain_lm`** | `0.7938` | `0.8058` | `0.7978` | `0.7869` | **`0.7820` (best)** |
+| **`val_bpb_typed_decision`** | `1.9726` | `1.9818` | `1.9756` | `1.9639` | **`1.9634` (best)** |
+| **`val_bpb_uta_trace`** | `5.2913` | `5.3087` | `5.2952` | `5.2807` | **`5.2727` (best)** |
+| **ORNITH Pass Rate / Reward** | `31.6%` / `0.2608` | `99.6%` / `0.6868` | `99.6%` / `0.6526` | `99.7%` / `0.6979` | **`99.7%` / `0.7291` (best)** |
+| **Expert Load Std (`112` experts)** | `0.00204` (`min 0.0044`) | `0.00110` | `0.00105` | `0.00108` | **`0.00104` (`min 0.0071`)** |
 
 ---
 
 ## 2. Remote Synchronization Status
 
 - **GitHub (`origin/main`):** All source code, configs, tests, and full Stage-1 + Stage-2 run telemetry (`runs/colab_mcl4_coe_v8_olmoe_12b/run_manifest.json`, `metrics.jsonl`, `samples.jsonl`, `dream/dream_state.json`, `checkpoints/step_00250..03200.meta.json`) are committed and pushed.
-- **Hugging Face Hub (`mesmac/mcl4-coe-runs` & `YYCore`):**
-  - `colab_mcl4_coe_v8_olmoe_12b/run_manifest.json` (`status: "completed"`, `current_step: 3200`), `metrics.jsonl`, `samples.jsonl`, `dream/dream_state.json`, and `checkpoints/step_00250..03200.meta.json` are synced to `mesmac/mcl4-coe-runs`.
-  - Once `YYCore` organization write permissions are checked on the Hugging Face access token (`https://huggingface.co/settings/tokens`) or old intermediate `.pt` files from `v6`/`v7` are pruned on `mesmac/mcl4-coe-runs`, `step_03100.pt` (`46.09%` MCQA peak) and `step_03200.pt` (`1.8100` `val_bpb` best) on `/content/runs/colab_mcl4_coe_v8_olmoe_12b/checkpoints/` can be pushed directly to `YYCore/mcl4-coe-runs`.
-
+- **Hugging Face Hub (`YYCore/mcl4-coe-runs` & `mesmac/mcl4-coe-runs`):**
+  - **[`YYCore/mcl4-coe-runs`](https://huggingface.co/YYCore/mcl4-coe-runs/tree/main/colab_mcl4_coe_v8_olmoe_12b):** `colab_mcl4_coe_v8_olmoe_12b/checkpoints/step_03000.pt` (`23.94 GB`), `step_03100.pt` (`23.94 GB` — `47.66%` MCQA peak), and `step_03200.pt` (`23.94 GB` — `46.88%` MCQA, `1.1777` MCQA CE loss, `1.8093` `val_bpb` best), plus all `.meta.json`, `metrics.jsonl`, `samples.jsonl`, `run_manifest.json`, and `dream/dream_state.json`.
+  - **[`mesmac/mcl4-coe-runs`](https://huggingface.co/mesmac/mcl4-coe-runs/tree/main/colab_mcl4_coe_v8_olmoe_12b):** Pruned `131` superseded intermediate `.pt` files (`580.65 GB` freed) and backed up `colab_mcl4_coe_v8_olmoe_12b/checkpoints/step_02800.pt` (pre-RL baseline), `step_03100.pt` (`23.94 GB`), and `step_03200.pt` (`23.94 GB`), plus all `.meta.json` and run telemetry.

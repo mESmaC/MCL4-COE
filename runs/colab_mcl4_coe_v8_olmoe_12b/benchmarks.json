@@ -1,0 +1,52 @@
+{
+  "model": "MCL4-COE v8-OLMoE-12B (colab_mcl4_coe_v8_olmoe_12b)",
+  "checkpoint": "step_03200.pt",
+  "total_params": 11971337755,
+  "num_experts_per_layer": 112,
+  "num_root_families": 64,
+  "donor_model": "allenai/OLMoE-1B-7B-0125",
+  "donor_benchmarks": {
+    "MMLU": 56.3,
+    "HellaSwag": 81.7,
+    "ARC-Challenge": 67.5,
+    "ARC-Easy": 84.4,
+    "PIQA": 78.7,
+    "WinoGrande": 70.6
+  },
+  "v8_12b_benchmarks": {
+    "MMLU_test_5shot_mc": {
+      "n": 2280,
+      "subjects": 57,
+      "accuracy_pct": 56.84,
+      "delta_vs_donor_pct": 0.54
+    },
+    "MMLU_validation_5shot_mc": {
+      "n": 1531,
+      "subjects": 57,
+      "macro_accuracy_pct": 53.87,
+      "micro_accuracy_pct": 51.93
+    },
+    "ARC_Challenge_test_5shot": {
+      "n": 1172,
+      "raw_uncalibrated_topk8_pct": 49.60,
+      "raw_uncalibrated_topk16_pct": 56.80,
+      "lineage_family_routing_tf12_mc_pct": 66.04,
+      "lineage_family_routing_tf8_cs035_mc_pct": 66.98,
+      "lineage_family_routing_tf8_cs025_mc_pct": 67.32,
+      "lineage_family_routing_olmes_hybrid_015_pct": 68.26,
+      "lineage_family_routing_olmes_hybrid_025_pct": 69.03,
+      "delta_mc_vs_donor_pct": -0.18,
+      "delta_hybrid_vs_donor_pct": 1.53
+    },
+    "ARC_Easy_test_5shot": {
+      "n": 2376,
+      "lineage_family_routing_tf12_mc_pct": 83.46,
+      "lineage_family_routing_tf8_cs025_mc_pct": 83.80,
+      "lineage_family_routing_tf8_cs035_mc_pct": 84.09,
+      "lineage_family_routing_olmes_hybrid_015_pct": 85.19,
+      "lineage_family_routing_olmes_hybrid_025_pct": 86.07,
+      "delta_mc_vs_donor_pct": -0.31,
+      "delta_hybrid_vs_donor_pct": 1.67
+    }
+  }
+}

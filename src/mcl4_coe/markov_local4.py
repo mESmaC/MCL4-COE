@@ -1059,6 +1059,8 @@ def _get_mcl4_cuda_ext() -> Any:
         import subprocess
         import sys
 
+        if sys.platform == "win32" and shutil.which("cl") is None:
+            return None
         if shutil.which("ninja") is None:
             subprocess.run([sys.executable, "-m", "pip", "install", "-q", "ninja"], check=False)
         from torch.utils.cpp_extension import load_inline

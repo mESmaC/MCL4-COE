@@ -576,6 +576,9 @@ class InferenceSessionController:
                 model.to(device=device, dtype=target_dtype).eval()
             else:
                 model.eval()
+            for mod in model.modules():
+                if isinstance(mod, torch.nn.LayerNorm):
+                    mod.float()
             self.model = model
 
             # Adopt checkpoint's native top_k and recurrence_steps as initial UI defaults
@@ -688,6 +691,9 @@ class InferenceSessionController:
 
             model = CognitiveOperatorEnsemble(MCL4CEDBackbone(b_cfg), c_cfg)
             model.to(device=device, dtype=target_dtype).eval()
+            for mod in model.modules():
+                if isinstance(mod, torch.nn.LayerNorm):
+                    mod.float()
             self.model = model
             self._saved_mitotic_pairs = [(0, 4), (1, 5)]
             self.inference_config["top_k"] = int(b_cfg.top_k)
@@ -1037,35 +1043,36 @@ class InferenceSessionController:
 
             rec_steps = int(self.inference_config.get("recurrence_steps", 2))
             use_wb = bool(self.inference_config.get("use_whiteboard", False)) and self.wb_controller is not None
-
-            if use_wb and self.wb_controller.whiteboard.episodic_rule_count > 0:
-                dec_out, _ = self.wb_controller.solve_decision_on_whiteboard(
-                    ctx_ids,
-                    ctx_lens,
-                    opt_ids,
-                    opt_lens,
-                    recurrence_steps=rec_steps,
-                    adapt_on_context=False,
-                )
-            else:
-                dec_out = self.model.forward_decision(
-                    ctx_ids,
-                    ctx_lens,
-                    opt_ids,
-                    opt_lens,
-                    recurrence_steps=rec_steps,
-                    depth_ponder=bool(self.inference_config.get("depth_ponder", True)),
-                )
-
+            use_amp = device.type == "cuda"
             k_opts = len(clean_opts)
             rep_ctx_ids = ctx_ids.expand(k_opts, -1).contiguous()
             rep_ctx_lens = ctx_lens.expand(k_opts).contiguous()
             flat_opt_ids = opt_ids[0]
             flat_opt_lens = opt_lens[0]
 
-            ded_out = self.model.forward_deduction(rep_ctx_ids, rep_ctx_lens, flat_opt_ids, flat_opt_lens)
-            eval_out = self.model.forward_evaluation(rep_ctx_ids, rep_ctx_lens, flat_opt_ids, flat_opt_lens)
-            meta_out = self.model.forward_metacognition(rep_ctx_ids, rep_ctx_lens, flat_opt_ids, flat_opt_lens)
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
+                if use_wb and self.wb_controller.whiteboard.episodic_rule_count > 0:
+                    dec_out, _ = self.wb_controller.solve_decision_on_whiteboard(
+                        ctx_ids,
+                        ctx_lens,
+                        opt_ids,
+                        opt_lens,
+                        recurrence_steps=rec_steps,
+                        adapt_on_context=False,
+                    )
+                else:
+                    dec_out = self.model.forward_decision(
+                        ctx_ids,
+                        ctx_lens,
+                        opt_ids,
+                        opt_lens,
+                        recurrence_steps=rec_steps,
+                        depth_ponder=bool(self.inference_config.get("depth_ponder", True)),
+                    )
+
+                ded_out = self.model.forward_deduction(rep_ctx_ids, rep_ctx_lens, flat_opt_ids, flat_opt_lens)
+                eval_out = self.model.forward_evaluation(rep_ctx_ids, rep_ctx_lens, flat_opt_ids, flat_opt_lens)
+                meta_out = self.model.forward_metacognition(rep_ctx_ids, rep_ctx_lens, flat_opt_ids, flat_opt_lens)
 
             probs = dec_out.probabilities[0].detach().float().cpu().tolist()
             sims = dec_out.similarities[0].detach().float().cpu().tolist()
@@ -1147,13 +1154,15 @@ class InferenceSessionController:
                 raise ValueError("Provide non-empty artifact text/code to ingest into the Whiteboard.")
             modality = str(payload.get("modality") or "prose").lower()
             reset_wb = bool(payload.get("reset_whiteboard", False))
-            rep, props = self.wb_controller.ingest_artifact(
-                raw_text,
-                tokenizer=self.tokenizer,
-                modality=modality,
-                pager=self.pager,
-                reset_whiteboard=reset_wb,
-            )
+            dev = next(self.model.parameters()).device
+            with torch.autocast(device_type=dev.type, dtype=torch.bfloat16, enabled=(dev.type == "cuda")):
+                rep, props = self.wb_controller.ingest_artifact(
+                    raw_text,
+                    tokenizer=self.tokenizer,
+                    modality=modality,
+                    pager=self.pager,
+                    reset_whiteboard=reset_wb,
+                )
             self.inference_config["use_whiteboard"] = True
             prop_dicts = [
                 (

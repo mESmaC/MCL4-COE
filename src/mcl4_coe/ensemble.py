@@ -1134,37 +1134,39 @@ class MultiPassController(nn.Module):
             opt_ids = batch["option_ids"]
             opt_lens = batch["option_lengths"]
 
-            # 1. Abstraction state compression norm
-            abs_vec = self.coe.compress_abstraction(ctx_ids, ctx_lens, level="standard")
-            abs_norm = float(abs_vec.float().norm(dim=-1).mean().item())
-
-            # 2. Decision (`Choice` / `Abduction` / `Induction`) with recurrent upper-CED passes
-            dec_out = self.coe.forward_decision(
-                ctx_ids,
-                ctx_lens,
-                opt_ids,
-                opt_lens,
-                recurrence_steps=self.schedule.recurrence_steps,
-            )
-            dec_sims = dec_out.similarities[0].detach().float().cpu().tolist()
-            dec_probs = dec_out.probabilities[0].detach().float().cpu().tolist()
-
-            # 3. Batched Deduction, Evaluation, and Metacognition across all K candidates
+            use_amp = device.type == "cuda"
             k_cands = len(cand_bodies)
             rep_ctx_ids = ctx_ids.expand(k_cands, -1).contiguous()
             rep_ctx_lens = ctx_lens.expand(k_cands).contiguous()
             flat_opt_ids = opt_ids[0]
             flat_opt_lens = opt_lens[0]
 
-            ded_out = self.coe.forward_deduction(
-                rep_ctx_ids, rep_ctx_lens, flat_opt_ids, flat_opt_lens
-            )
-            eval_out = self.coe.forward_evaluation(
-                rep_ctx_ids, rep_ctx_lens, flat_opt_ids, flat_opt_lens
-            )
-            meta_out = self.coe.forward_metacognition(
-                rep_ctx_ids, rep_ctx_lens, flat_opt_ids, flat_opt_lens
-            )
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
+                # 1. Abstraction state compression norm
+                abs_vec = self.coe.compress_abstraction(ctx_ids, ctx_lens, level="standard")
+                abs_norm = float(abs_vec.float().norm(dim=-1).mean().item())
+
+                # 2. Decision (`Choice` / `Abduction` / `Induction`) with recurrent upper-CED passes
+                dec_out = self.coe.forward_decision(
+                    ctx_ids,
+                    ctx_lens,
+                    opt_ids,
+                    opt_lens,
+                    recurrence_steps=self.schedule.recurrence_steps,
+                )
+
+                # 3. Batched Deduction, Evaluation, and Metacognition across all K candidates
+                ded_out = self.coe.forward_deduction(
+                    rep_ctx_ids, rep_ctx_lens, flat_opt_ids, flat_opt_lens
+                )
+                eval_out = self.coe.forward_evaluation(
+                    rep_ctx_ids, rep_ctx_lens, flat_opt_ids, flat_opt_lens
+                )
+                meta_out = self.coe.forward_metacognition(
+                    rep_ctx_ids, rep_ctx_lens, flat_opt_ids, flat_opt_lens
+                )
+            dec_sims = dec_out.similarities[0].detach().float().cpu().tolist()
+            dec_probs = dec_out.probabilities[0].detach().float().cpu().tolist()
 
             ded_probs = ded_out.probabilities.detach().float().cpu().tolist()
             eval_utils = eval_out.utilities.detach().float().cpu().tolist()

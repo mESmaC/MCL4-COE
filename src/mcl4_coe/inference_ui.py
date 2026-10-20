@@ -355,6 +355,14 @@ class InferenceSessionController:
             blk.moe.combine_dense_and_sparse = comb
             blk.moe.recurrent_coverage_penalty = tabu
             blk.moe.mitotic_pairs = list(active_pairs)
+        if int(b_cfg.vocab_size) == 50304 and num_e > 64 and not active_pairs:
+            self.model.backbone.set_lineage_family_routing(
+                num_roots=64,
+                top_families=min(64, max(8, top_k)),
+                child_share=0.25,
+            )
+        elif hasattr(self.model.backbone, "set_lineage_family_routing"):
+            self.model.backbone.set_lineage_family_routing(num_roots=0)
 
         rec_steps = max(1, int(self.inference_config.get("recurrence_steps", 2)))
         self.model.config.recurrence_steps = rec_steps
@@ -502,11 +510,37 @@ class InferenceSessionController:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
 
-            raw = torch.load(pt_path, map_location="cpu", weights_only=False)
+            pt_bytes = pt_path.stat().st_size
+            if device.type == "cuda":
+                vram_total = torch.cuda.get_device_properties(device).total_memory
+                if pt_bytes > int(vram_total * 0.90):
+                    print(
+                        f"[opencode // mcl4-coe] Checkpoint ({pt_bytes / 1e9:.2f} GB) exceeds GPU VRAM "
+                        f"({vram_total / 1e9:.2f} GB); loading in bfloat16 on CPU with mmap=True.",
+                        flush=True,
+                    )
+                    device = torch.device("cpu")
+                    target_dtype = torch.bfloat16
+                    req_dtype = "bfloat16"
+
+            try:
+                raw = torch.load(pt_path, map_location="cpu", weights_only=False, mmap=True)
+            except TypeError:
+                raw = torch.load(pt_path, map_location="cpu", weights_only=False)
             valid_b_keys = {f.name for f in fields(MCL4CEDConfig)}
             valid_c_keys = {f.name for f in fields(COEConfig)}
-            b_dict = {k: v for k, v in (raw.get("backbone_config") or {}).items() if k in valid_b_keys}
-            c_dict = {k: v for k, v in (raw.get("coe_config") or {}).items() if k in valid_c_keys}
+            src_b = raw.get("backbone_config") or raw.get("config") or meta.get("config") or {}
+            src_c = raw.get("coe_config") or raw.get("config") or meta.get("config") or {}
+            b_dict = {k: v for k, v in src_b.items() if k in valid_b_keys and v is not None}
+            c_dict = {k: v for k, v in src_c.items() if k in valid_c_keys and v is not None}
+            ms = raw.get("model_state") or {}
+            rw0 = ms.get("backbone.encoder_layers.0.moe.router.weight")
+            if isinstance(rw0, torch.Tensor) and rw0.ndim == 2:
+                b_dict["num_experts"] = int(rw0.shape[0])
+            mr0 = ms.get("backbone.encoder_layers.0.attention.markov_router.route_query.weight")
+            n_h = int(b_dict.get("n_heads", 4))
+            if isinstance(mr0, torch.Tensor) and mr0.ndim == 2 and mr0.shape[0] % n_h == 0:
+                b_dict["markov_router_dim"] = int(mr0.shape[0] // n_h)
             if "dense_expert_indices" in b_dict and isinstance(b_dict["dense_expert_indices"], list):
                 b_dict["dense_expert_indices"] = tuple(b_dict["dense_expert_indices"])
 
@@ -522,17 +556,26 @@ class InferenceSessionController:
                     stack.enter_context(patch.object(torch.nn.Linear, "reset_parameters", lambda self: None))
                     stack.enter_context(patch.object(torch.nn.Embedding, "reset_parameters", lambda self: None))
                     stack.enter_context(patch("torch.nn.init.normal_", lambda tensor, *a, **kw: tensor))
-                    model = CognitiveOperatorEnsemble(MCL4CEDBackbone(b_cfg), c_cfg)
+                    with torch.device("meta" if device.type == "cpu" and pt_bytes > 8_000_000_000 else "cpu"):
+                        model = CognitiveOperatorEnsemble(MCL4CEDBackbone(b_cfg), c_cfg)
             finally:
                 torch.set_default_dtype(prev_dtype)
-            model.load_state_dict(raw["model_state"], strict=False)
+            use_assign = next(model.parameters()).is_meta
+            model.load_state_dict(raw["model_state"], strict=False, assign=use_assign)
+            if use_assign:
+                for _, buf in model.named_buffers():
+                    if buf.is_meta:
+                        pass
 
             mp_list = [tuple(int(x) for x in pair) for pair in raw.get("mitotic_pairs", []) if len(pair) == 2]
             self._saved_mitotic_pairs = list(mp_list)
             for blk in list(model.backbone.encoder_layers) + list(model.backbone.decoder_layers):
                 blk.moe.mitotic_pairs = list(mp_list)
 
-            model.to(device=device, dtype=target_dtype).eval()
+            if not use_assign:
+                model.to(device=device, dtype=target_dtype).eval()
+            else:
+                model.eval()
             self.model = model
 
             # Adopt checkpoint's native top_k and recurrence_steps as initial UI defaults

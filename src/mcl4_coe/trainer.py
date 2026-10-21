@@ -438,7 +438,7 @@ class MCL4COETrainer:
             p = pt_candidate if pt_candidate.exists() else p.with_name(pt_candidate.name)
         payload = torch.load(p, map_location="cpu", weights_only=False)
         self._resume_payload = payload
-        b_cfg = payload.get("backbone_config", {})
+        b_cfg = payload.get("backbone_config") or payload.get("config") or {}
         for key in (
             "vocab_size",
             "pad_id",
@@ -839,6 +839,9 @@ class MCL4COETrainer:
             torch.nn.init.normal_ = orig_init_normal  # type: ignore[assignment]
         if use_bf16_init:
             self.model.to(dtype=torch.bfloat16)
+            for mod in self.model.modules():
+                if isinstance(mod, torch.nn.LayerNorm):
+                    mod.to(dtype=torch.float32)
         if self.config.use_nvfp4 and self.device.type == "cuda":
             reset_gemm_counts()
             self.nvfp4_layers_converted = convert_linear_to_nvfp4(
@@ -1786,10 +1789,11 @@ class MCL4COETrainer:
         else:
             payload = torch.load(ckpt_pt_path, map_location="cpu", weights_only=False)
 
-        b_cfg = payload.get("backbone_config", {})
+        b_cfg = payload.get("backbone_config") or payload.get("config") or {}
         ckpt_experts = int(b_cfg.get("num_experts", self.config.num_experts))
         model_state = payload["model_state"]
-        existing_pairs = [tuple(p) for p in payload.get("mitotic_pairs", [])]
+        raw_pairs = payload.get("mitotic_pairs") or payload.get("latest_metrics", {}).get("mitotic_pairs") or []
+        existing_pairs = [tuple(p) for p in raw_pairs]
         added_pairs: list[tuple[int, int]] = []
         if self.config.num_experts > ckpt_experts:
             prev_loads = payload.get("latest_metrics", {}).get("expert_load")

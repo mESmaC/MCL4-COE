@@ -131,14 +131,15 @@ def _swizzle_scales(scales: Tensor) -> Tensor:
     """Pack block scales into cuBLASLt's 128-row by 4-scale tiles with inner 32x4x4 layout."""
     rows, columns = scales.shape
     padded_rows, padded_columns = _round_up(rows, 128), _round_up(columns, 4)
-    padded = torch.zeros((padded_rows, padded_columns), dtype=torch.float32, device=scales.device)
-    padded[:rows, :columns] = scales.float()
+    s_u8 = scales.to(torch.float8_e4m3fn).view(torch.uint8)
+    if padded_rows != rows or padded_columns != columns:
+        s_u8 = F.pad(s_u8, (0, padded_columns - columns, 0, padded_rows - rows))
     return (
-        padded.view(padded_rows // 128, 4, 32, padded_columns // 4, 4)
+        s_u8.view(padded_rows // 128, 4, 32, padded_columns // 4, 4)
         .permute(0, 3, 2, 1, 4)
         .contiguous()
         .view(padded_rows, padded_columns)
-        .to(torch.float8_e4m3fn)
+        .view(torch.float8_e4m3fn)
     )
 
 
@@ -183,21 +184,13 @@ def _hadamard16_signs(device_str: str) -> Tensor:
 
 def _e2m1_codes(values: Tensor, stochastic: bool) -> Tensor:
     """Round normalized values to E2M1, returning one unsigned nibble per scalar."""
-    magnitude = values.abs().clamp(max=6).contiguous()
-    dev_str = str(values.device)
+    m = values.abs().clamp(max=6.0)
+    u = torch.where(m <= 2.0, m * 2.0, torch.where(m <= 4.0, m + 2.0, m * 0.5 + 4.0))
     if stochastic:
-        levels = _e2m1_levels(dev_str)
-        upper = torch.bucketize(magnitude, levels).clamp(max=7)
-        lower = (upper - 1).clamp(min=0)
-        low_value, high_value = levels[lower], levels[upper]
-        probability = (magnitude - low_value) / (high_value - low_value).clamp_min(0.5)
-        code = lower + (torch.rand_like(magnitude) < probability).long()
+        code = (u + torch.rand_like(u)).to(torch.uint8).clamp(max=7)
     else:
-        midpoints = _e2m1_midpoints(dev_str)
-        code = torch.bucketize(magnitude, midpoints)
-        tie = magnitude == midpoints[code.clamp(max=6)]
-        code = code + (tie & (code.remainder(2) == 1)).long()
-    return code.to(torch.uint8) | (torch.signbit(values).to(torch.uint8) << 3)
+        code = torch.round(u).to(torch.uint8)
+    return code | (torch.signbit(values).to(torch.uint8) << 3)
 
 
 @torch.no_grad()

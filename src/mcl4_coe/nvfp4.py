@@ -1036,10 +1036,10 @@ def _get_or_build_grouped_nvfp4_cache(experts: nn.ModuleList, proj_name: str) ->
         else:
             idx_t = torch.tensor(dirty, dtype=torch.long, device=device)
             entry["B_fwd"].index_copy_(0, idx_t, b_fwd)
-            entry["Bs_fwd"].index_copy_(0, idx_t, bs_fwd)
+            entry["Bs_fwd"].view(torch.uint8).index_copy_(0, idx_t, bs_fwd.view(torch.uint8))
             entry["Bg"].index_copy_(0, idx_t, bg)
             entry["B_bwd"].index_copy_(0, idx_t, b_bwd)
-            entry["Bs_bwd"].index_copy_(0, idx_t, bs_bwd)
+            entry["Bs_bwd"].view(torch.uint8).index_copy_(0, idx_t, bs_bwd.view(torch.uint8))
         entry["versions"] = cur_versions
         entry["sparsity_mode"] = sparsity_mode
         entry["sr_ste_decay"] = sr_ste_decay

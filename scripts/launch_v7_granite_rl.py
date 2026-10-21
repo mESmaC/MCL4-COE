@@ -49,7 +49,7 @@ def build_v7_granite_pure_rl_config(
     num_experts: int = 32,
     top_k: int = 8,
     batch_size: int = 8,
-    micro_batch_size: int = 2,
+    micro_batch_size: int = 8,
     max_seq_len: int = 512,
     lr: float = 2.0e-5,
     donor_backbone_lr_scale: float = 0.002,
@@ -170,7 +170,7 @@ def main() -> None:
     parser.add_argument("--num-experts", type=int, default=32)
     parser.add_argument("--top-k", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--micro-batch-size", type=int, default=2)
+    parser.add_argument("--micro-batch-size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=2.0e-5)
     parser.add_argument("--donor-lr-scale", type=float, default=0.002)
     parser.add_argument("--ornith-weight", type=float, default=0.30)

@@ -27,6 +27,7 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 
 from .markov_local4 import MarkovLocal4Router
+from .nvfp4 import NVFP4Linear, has_triton_nvfp4_grouped, nvfp4_grouped_linear
 from .ple import PerLayerEmbedding, RMSNorm
 
 
@@ -351,6 +352,34 @@ class SparseMoE(nn.Module):
                     w = w.reshape(-1, m_sub, 1)
                 act = act * w
             out = F.linear(act.reshape(n_tok, -1), down_cat).view_as(x)
+        elif (
+            self._can_use_grouped_dispatch(flat)
+            and isinstance(self.experts[0].up_proj, NVFP4Linear)
+            and len(set(idx_list)) == m_sub
+        ):
+            sorted_pairs = sorted(enumerate(idx_list), key=lambda pair: pair[1])
+            orig_order = [pos for pos, _ in sorted_pairs]
+            counts_list = [0] * self.num_experts
+            for _, e_idx in sorted_pairs:
+                counts_list[e_idx] = n_tok
+            offs_sub = torch.tensor(
+                counts_list, dtype=torch.int32, device=flat.device
+            ).cumsum(0, dtype=torch.int32)
+            flat_rep = flat.repeat(m_sub, 1)
+            out_rep = (
+                self._run_grouped_experts(flat_rep, offs_sub)
+                .view(m_sub, n_tok, -1)
+                .transpose(0, 1)
+                .to(flat.dtype)
+            )
+            if expert_weights is not None:
+                w = expert_weights.to(out_rep.dtype)
+                if w.ndim == 1:
+                    w = w[orig_order].view(1, m_sub, 1)
+                else:
+                    w = w.reshape(-1, m_sub)[:, orig_order].unsqueeze(-1)
+                out_rep = out_rep * w
+            out = out_rep.sum(dim=1).view_as(x)
         else:
             acc = torch.zeros_like(flat)
             for m_pos, e_idx in enumerate(idx_list):
@@ -496,6 +525,57 @@ class SparseMoE(nn.Module):
         self._grouped_weight_cache = (key, w_up, w_down)
         return w_up, w_down
 
+    def _can_use_nvfp4_grouped(self, device: torch.device) -> bool:
+        if not self.experts or not has_triton_nvfp4_grouped(device):
+            return False
+        e0_up = self.experts[0].up_proj
+        e0_dn = self.experts[0].down_proj
+        return (
+            isinstance(e0_up, NVFP4Linear)
+            and isinstance(e0_dn, NVFP4Linear)
+            and e0_up.in_features % 128 == 0
+            and e0_up.out_features % 128 == 0
+            and e0_dn.in_features % 128 == 0
+            and e0_dn.out_features % 128 == 0
+            and all(
+                isinstance(e.up_proj, NVFP4Linear)
+                and isinstance(e.down_proj, NVFP4Linear)
+                and e.up_proj.bias is None
+                and e.down_proj.bias is None
+                for e in self.experts
+            )
+        )
+
+    def _can_use_grouped_dispatch(self, flat: Tensor) -> bool:
+        if (
+            not flat.is_cuda
+            or flat.shape[0] == 0
+            or (self.num_experts * flat.shape[-1] >= 65536)
+        ):
+            return False
+        if not (flat.dtype == torch.bfloat16 or torch.is_autocast_enabled()):
+            return False
+        if self._can_use_nvfp4_grouped(flat.device):
+            return True
+        return (
+            hasattr(torch, "_grouped_mm")
+            and all(
+                type(e.up_proj) is nn.Linear and type(e.down_proj) is nn.Linear
+                for e in self.experts
+            )
+            and len({e.up_proj.weight.requires_grad for e in self.experts}) <= 1
+        )
+
+    def _run_grouped_experts(self, gx: Tensor, offs: Tensor) -> Tensor:
+        gx_bf = gx.to(torch.bfloat16)
+        if isinstance(self.experts[0].up_proj, NVFP4Linear):
+            up_out = nvfp4_grouped_linear(gx_bf, self.experts, "up_proj", offs)
+            gate, val = up_out.chunk(2, dim=-1)
+            return nvfp4_grouped_linear(F.silu(gate) * val, self.experts, "down_proj", offs)
+        w_up, w_down = self._get_grouped_expert_weights(gx.device)
+        gate, val = torch._grouped_mm(gx_bf, w_up, offs=offs).chunk(2, dim=-1)
+        return torch._grouped_mm(F.silu(gate) * val, w_down, offs=offs)
+
     def _save_to_state_dict(self, destination: dict, prefix: str, keep_vars: bool) -> None:
         super()._save_to_state_dict(destination, prefix, keep_vars)
         if self.mitotic_pairs:
@@ -515,6 +595,7 @@ class SparseMoE(nn.Module):
     ) -> None:
         self._mitotic_idx_cache = None
         self._grouped_weight_cache = None
+        setattr(self.experts, "_nvfp4_grouped_cache", None)
         mp_key = prefix + "mitotic_pairs_tensor"
         if mp_key in state_dict:
             mp_val = state_dict.pop(mp_key)
@@ -668,14 +749,9 @@ class SparseMoE(nn.Module):
                     sorted_tok_r = torch.div(perm_r, rem_k, rounding_mode="floor")
                     sorted_w_r = rem_w.reshape(-1).index_select(0, perm_r).unsqueeze(-1)
                     gathered_r = active_x.index_select(0, sorted_tok_r)
-                    chunks_r = gathered_r.split(rem_counts_int.tolist(), dim=0)
-                    outs_r = [
-                        expert(chunk)
-                        for expert, chunk in zip(self.experts, chunks_r)
-                        if chunk.shape[0] > 0
-                    ]
-                    if outs_r:
-                        all_r = torch.cat(outs_r, dim=0)
+                    if self._can_use_grouped_dispatch(gathered_r):
+                        offs_r = rem_counts_int.to(torch.int32).cumsum(0, dtype=torch.int32)
+                        all_r = self._run_grouped_experts(gathered_r, offs_r)
                         weighted_r = (all_r * sorted_w_r.to(all_r.dtype)).to(active_x.dtype)
                         unpermed_r = torch.empty_like(weighted_r)
                         unpermed_r.index_copy_(0, perm_r, weighted_r)
@@ -685,23 +761,30 @@ class SparseMoE(nn.Module):
                             .to(active_x.dtype)
                         )
                         active_out = alpha_dense * active_out + alpha_rem * sparse_add
+                    else:
+                        chunks_r = gathered_r.split(rem_counts_int.tolist(), dim=0)
+                        outs_r = [
+                            expert(chunk)
+                            for expert, chunk in zip(self.experts, chunks_r)
+                            if chunk.shape[0] > 0
+                        ]
+                        if outs_r:
+                            all_r = torch.cat(outs_r, dim=0)
+                            weighted_r = (all_r * sorted_w_r.to(all_r.dtype)).to(active_x.dtype)
+                            unpermed_r = torch.empty_like(weighted_r)
+                            unpermed_r.index_copy_(0, perm_r, weighted_r)
+                            sparse_add = (
+                                unpermed_r.view(active_x.shape[0], rem_k, active_x.shape[-1])
+                                .sum(dim=1)
+                                .to(active_x.dtype)
+                            )
+                            active_out = alpha_dense * active_out + alpha_rem * sparse_add
 
             output = torch.zeros_like(flat)
             output.index_copy_(0, active_indices, active_out)
             return output.view_as(x), aux_loss, router_z_loss, counts.detach()
 
-        use_grouped = (
-            flat.is_cuda
-            and hasattr(torch, "_grouped_mm")
-            and flat.shape[0] > 0
-            and (self.num_experts * x.shape[-1] < 65536)
-            and all(
-                type(e.up_proj) is nn.Linear and type(e.down_proj) is nn.Linear
-                for e in self.experts
-            )
-            and len({e.up_proj.weight.requires_grad for e in self.experts}) <= 1
-            and (flat.dtype == torch.bfloat16 or torch.is_autocast_enabled())
-        )
+        use_grouped = self._can_use_grouped_dispatch(flat)
         if use_grouped:
             with torch.autocast(device_type=x.device.type, enabled=False):
                 router_logits = F.linear(flat.float(), self.router.weight.float())
@@ -816,10 +899,7 @@ class SparseMoE(nn.Module):
             sorted_weights = weights.reshape(-1).index_select(0, perm).unsqueeze(-1)
             gathered_x = flat.index_select(0, sorted_tokens)
             offs = counts_int_all.to(torch.int32).cumsum(0, dtype=torch.int32)
-            gx_bf = gathered_x.to(torch.bfloat16)
-            w_up, w_down = self._get_grouped_expert_weights(x.device)
-            gate, val = torch._grouped_mm(gx_bf, w_up, offs=offs).chunk(2, dim=-1)
-            all_expert_out = torch._grouped_mm(F.silu(gate) * val, w_down, offs=offs)
+            all_expert_out = self._run_grouped_experts(gathered_x, offs)
             weighted = (all_expert_out * sorted_weights.to(all_expert_out.dtype)).to(flat.dtype)
             unpermed = torch.empty_like(weighted)
             unpermed.index_copy_(0, perm, weighted)

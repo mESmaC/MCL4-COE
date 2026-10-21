@@ -193,6 +193,43 @@ def _e2m1_codes(values: Tensor, stochastic: bool) -> Tensor:
     return code | (torch.signbit(values).to(torch.uint8) << 3)
 
 
+def _quantize_nvfp4_core(
+    values: Tensor,
+    two_dimensional: bool,
+    stochastic: bool,
+    causal_row_scale: bool,
+) -> tuple[Tensor, Tensor, Tensor]:
+    rows, columns = values.shape
+    if causal_row_scale and not two_dimensional:
+        global_scale = values.new_ones(1)
+    else:
+        amax = values.abs().amax()
+        global_scale = torch.where(amax > 0, amax / 2688.0, torch.ones_like(amax))
+        global_scale = global_scale.clamp_min(1.17549435e-38).reshape(1)
+    if two_dimensional:
+        block_amax = values.abs().view(rows // 16, 16, columns // 16, 16).amax(dim=(1, 3))
+        block_amax = block_amax.repeat_interleave(16, dim=0)
+    else:
+        block_amax = values.abs().view(rows, columns // 16, 16).amax(dim=-1)
+    block_scales = (block_amax / (6.0 * global_scale)).clamp(max=448.0).to(torch.float8_e4m3fn)
+    decoding = block_scales.float() * global_scale
+    inverse = torch.where(
+        decoding > 0,
+        decoding.reciprocal().clamp(max=3.402823466e38),
+        torch.zeros_like(decoding),
+    )
+    normalized = (values.view(rows, columns // 16, 16) * inverse.unsqueeze(-1)).reshape(rows, columns)
+    codes = _e2m1_codes(normalized, stochastic)
+    packed = (codes[:, 0::2] | (codes[:, 1::2] << 4)).contiguous()
+    return packed, block_scales, global_scale
+
+
+try:
+    _quantize_nvfp4_compiled = torch.compile(_quantize_nvfp4_core, dynamic=True)
+except Exception:
+    _quantize_nvfp4_compiled = _quantize_nvfp4_core
+
+
 @torch.no_grad()
 def quantize_nvfp4(
     matrix: Tensor,
@@ -201,12 +238,7 @@ def quantize_nvfp4(
     stochastic: bool = False,
     causal_row_scale: bool = False,
 ) -> tuple[Tensor, Tensor, Tensor]:
-    """Encode a CUDA matrix as packed FP4 (`float4_e2m1fn_x2`), swizzled FP8 scales, and FP32 scale.
-
-    When `causal_row_scale=True` (used for forward activations in causal sequences),
-    `global_scale` is fixed to `1.0` so each token row's `1x16` `FP8 E4M3` block scale
-    is 100% independent of future token rows.
-    """
+    """Encode a CUDA matrix as packed FP4 (`float4_e2m1fn_x2`), swizzled FP8 scales, and FP32 scale."""
     if matrix.ndim != 2 or not matrix.is_floating_point() or matrix.numel() == 0:
         raise ValueError("NVFP4 quantization requires a nonempty floating-point matrix")
     if matrix.device.type != "cuda":
@@ -215,27 +247,9 @@ def quantize_nvfp4(
     if columns % 16 or (two_dimensional and rows % 16):
         raise ValueError("NVFP4 blocks require aligned dimensions divisible by 16")
     values = matrix.detach().float().contiguous()
-    if causal_row_scale and not two_dimensional:
-        global_scale = values.new_ones(1)
-    else:
-        amax = values.abs().amax()
-        global_scale = torch.where(amax > 0, amax / 2688.0, torch.ones_like(amax))
-        global_scale = global_scale.clamp_min(torch.finfo(torch.float32).tiny).reshape(1)
-    if two_dimensional:
-        block_amax = values.abs().view(rows // 16, 16, columns // 16, 16).amax(dim=(1, 3))
-        block_amax = block_amax.repeat_interleave(16, dim=0)
-    else:
-        block_amax = values.abs().view(rows, columns // 16, 16).amax(dim=-1)
-    block_scales = (block_amax / (6.0 * global_scale)).clamp(max=448).to(torch.float8_e4m3fn)
-    decoding = block_scales.float() * global_scale
-    inverse = torch.where(
-        decoding > 0,
-        decoding.reciprocal().clamp(max=torch.finfo(torch.float32).max),
-        torch.zeros_like(decoding),
+    packed, block_scales, global_scale = _quantize_nvfp4_compiled(
+        values, two_dimensional, stochastic, causal_row_scale
     )
-    normalized = values.view(rows, columns // 16, 16) * inverse.unsqueeze(-1)
-    codes = _e2m1_codes(normalized.reshape(rows, columns), stochastic)
-    packed = (codes[:, 0::2] | (codes[:, 1::2] << 4)).contiguous()
     fp4_dtype = getattr(torch, "float4_e2m1fn_x2", torch.uint8)
     return (
         packed.view(fp4_dtype),
@@ -319,19 +333,25 @@ def nvfp4_mm(
     return result[:m, :n]
 
 
+@lru_cache(maxsize=8)
+def _hadamard16_matrix(device_str: str) -> Tensor:
+    """Return the precomputed 16x16 signed Walsh-Hadamard orthonormal matrix on `device_str`."""
+    values = torch.eye(16, dtype=torch.float32, device=torch.device(device_str)).reshape(16, 1, 16)
+    values = values * _hadamard16_signs(device_str)
+    for width in (1, 2, 4, 8):
+        pairs = values.reshape(16, 1, 16 // (2 * width), 2, width)
+        left, right = pairs[..., 0, :], pairs[..., 1, :]
+        values = torch.stack((left + right, left - right), dim=-2).reshape(16, 1, 16)
+    return (values * 0.25).reshape(16, 16).contiguous()
+
+
 def _hadamard16(matrix: Tensor) -> Tensor:
     """Shared fixed-sign orthonormal transform over groups of 16 columns."""
     rows, columns = matrix.shape
     cp = _round_up(columns, 16)
     values = F.pad(matrix.float(), (0, cp - columns)) if cp != columns else matrix.float()
-    values = values.reshape(rows, -1, 16)
-    signs = _hadamard16_signs(str(values.device))
-    values = values * signs
-    for width in (1, 2, 4, 8):
-        pairs = values.reshape(rows, -1, 16 // (2 * width), 2, width)
-        left, right = pairs[..., 0, :], pairs[..., 1, :]
-        values = torch.stack((left + right, left - right), dim=-2).reshape(rows, -1, 16)
-    return (values * 0.25).reshape(rows, -1)
+    h16 = _hadamard16_matrix(str(values.device))
+    return torch.matmul(values.reshape(-1, 16), h16).reshape(rows, cp)
 
 
 @torch.no_grad()

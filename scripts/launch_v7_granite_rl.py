@@ -54,6 +54,9 @@ def build_v7_granite_pure_rl_config(
     lr: float = 2.0e-5,
     donor_backbone_lr_scale: float = 0.002,
     ornith_weight: float = 0.30,
+    use_nvfp4: bool = True,
+    nvfp4_sparsity_mode: str = "none",
+    plastic_experts_per_layer: int = 8,
     hf_backup_repo: str | None = "mesmac/mcl4-coe-runs",
 ) -> TrainingRunConfig:
     """Construct pure RL + Dream-RSI `TrainingRunConfig` for `Granite 3.1 1B-A400M` (`E=32`, no mitosis)."""
@@ -86,6 +89,7 @@ def build_v7_granite_pure_rl_config(
         logits_scaling=6.0,
         preserve_residual_across_stacks=True,
         donor_backbone_lr_scale=donor_backbone_lr_scale,
+        plastic_experts_per_layer=plastic_experts_per_layer,
         freeze_donor_embeddings=True,
         enable_mitosis=False,
         release_mitotic_pairs=False,
@@ -104,7 +108,8 @@ def build_v7_granite_pure_rl_config(
         enable_gist_conditioning=False,
         gist_conditioning_prob=0.50,
         latent_prior_scale=0.18,
-        use_nvfp4=False,
+        use_nvfp4=use_nvfp4,
+        nvfp4_sparsity_mode=nvfp4_sparsity_mode,
         cpu_offload_optimizer=False,
         total_steps=total_steps,
         batch_size=batch_size,
@@ -215,7 +220,7 @@ def main() -> None:
             print(
                 f"[step {st:4d}/{cfg.total_steps}] loss={rec.get('total_loss'):.4f} "
                 f"(lm={rec.get('lm_loss'):.4f} bpb={rec.get('train_bpb'):.4f} dec={rec.get('decision_loss'):.4f}) | "
-                f"E={rec.get('num_experts')} k={rec.get('top_k')} | "
+                f"E={rec.get('num_experts')} k={rec.get('top_k')} fp4={rec.get('nvfp4_gemms', 0)} | "
                 f"{rec.get('tok_per_s'):.0f} tok/s | vram={rec.get('vram_allocated_mb'):.0f}MB"
                 f"{orn_str}{val_str}",
                 flush=True,

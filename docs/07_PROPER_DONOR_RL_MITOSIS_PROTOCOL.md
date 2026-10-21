@@ -48,3 +48,22 @@ Both IBM Granite 3.1 MoE models use `GraniteMoeForCausalLM` (`vocab_size = 49,15
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
 | **Option A (Recommended)** | **`ibm-granite/granite-3.1-3b-a800m-instruct`** | `32` (`16 + 16`) | `1536` / `512` | `E = 40` (`3.56B` total) | **`75.50M` / expert** | **`E = 160` (`12.62B`)** to **`E = 168` (`13.22B`)** (`4.0x–4.2x` base experts) | **`~890M`** |
 | **Option B** | **`ibm-granite/granite-3.1-1b-a400m-instruct`** *(or resume `v7_granite_overnight_mitosis` @ `E=48, 2.06B`)* | `24` (`12 + 12`) | `1024` / `512` | `E = 32` (`1.45B` total) / `E = 48` (`2.06B`) | **`37.75M` / expert** | **`E = 336` (`12.93B`)** (`10.5x` base experts) | **`~470M`** |
+
+---
+
+## 4. Native Blackwell (`sm_120`, Colab `g4`) `NVFP4` + `2:4` Sparsity Protocol (`4 PFLOPS`)
+
+Colab `g4` instances (`NVIDIA RTX PRO 6000 Blackwell Server Edition`) provide **`2 PFLOPS` dense `NVFP4`** and **`4 PFLOPS` `2:4` structured-sparse `NVFP4`** Tensor Core throughput (`torch.float4_e2m1fn_x2` with `1x16` `FP8 E4M3` block scales via `F.scaled_mm` in [`src/mcl4_coe/nvfp4.py`](../src/mcl4_coe/nvfp4.py)).
+
+To unlock that `4 PFLOPS` compute and `~3.55x` memory compression at `13B+` scale **without** shocking the donor base:
+
+1. **NVFP4 Donor Base (Pre-Quantized or In-House Block-Wise `E2M1` Quantization):**
+   - Start from an `NVFP4`-quantized Granite donor checkpoint or quantize the donor directly via [`quantize_nvfp4(..., two_dimensional=True)`](../src/mcl4_coe/nvfp4.py#L204-L251) (`1x16` `FP8 E4M3` block scales + `FP32` global scale).
+   - At `0.5625 bytes/param` (`0.5B` packed `E2M1` + `0.0625B` swizzled `FP8 E4M3` scale), a **`13B` parameter MoE occupies only `~7.3 GB` of VRAM** (vs. `26 GB` in `BF16` and `52 GB` in `FP32`).
+   - Because the root donor experts are anchored (`donor_backbone_lr_scale = 0.002`) or frozen in older mitotic generations (`plastic_experts_per_layer`), their pre-quantized `(packed_fp4, swizzled_fp8_scales, global_scale)` buffers remain permanently resident in VRAM with **zero per-step re-quantization overhead**.
+2. **Complementary `2:4` Sparsity via Mitosis (`1 Dense Parent -> 2 Sparse Twins = 100% Capacity Preserved`):**
+   - Applying `2:4` structured sparsity cold to a single dense donor expert drops 50% of its weights.
+   - Instead, when a parent expert splits via **mitosis (`E_parent -> E_parent + E_child`)**, the two twin `NVFP4Linear` experts together hold **`2x` the parameters (`2 * 50% = 100%` non-zero capacity)** and refine their `2to4_transposable` masks during RL/RSI with `SR-STE` (`sr_ste_decay = 1e-4`), unlocking the full **`4 PFLOPS` `2:4` sparse `NVFP4`** hardware path with zero information loss at birth.
+3. **Batched / Compiled `NVFP4` Expert Dispatch:**
+   - Replace per-expert Python loops with `torch.compile`-fused `quantize_nvfp4` + concatenated wide-subset `F.scaled_mm` dispatch so routed expert activations feed large contiguous matrices directly into the Blackwell `NVFP4` Tensor Cores.
+

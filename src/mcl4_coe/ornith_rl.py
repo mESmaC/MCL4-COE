@@ -3339,14 +3339,25 @@ class OrnithSelfImprover:
         # 2. Hierarchical Next-Concept GRPO across candidate rollouts using single-pass log-probs
         bsz = len(tasks)
         num_cands = len(group_cont_rows[0])
-        flat_prompts = prompt_tensor.unsqueeze(1).expand(bsz, num_cands, max_p).reshape(bsz * num_cands, max_p)
+        p_valid = (
+            (prompt_tensor != pad_id)
+            if pad_id >= 0
+            else torch.ones_like(prompt_tensor, dtype=torch.bool)
+        )
+        p_valid = p_valid.clone()
+        p_valid[:, 0] = True
+        enc_prompt = ncm_system.backbone.encode_state(prompt_tensor, p_valid, causal=True)
+        owner_rows = torch.arange(bsz, device=self.device, dtype=torch.long).repeat_interleave(
+            num_cands
+        )
         flat_cands = torch.tensor(
             group_cont_rows, dtype=torch.long, device=self.device
         ).reshape(bsz * num_cands, ncm_seq_len)
 
         hier_lp_flat, _ = ncm_system.compute_hierarchy_log_probs(
-            flat_prompts,
+            enc_prompt,
             flat_cands,
+            owner_rows=owner_rows,
             normalize_by_tokens=True,
         )
         hier_lp = hier_lp_flat.view(bsz, num_cands)

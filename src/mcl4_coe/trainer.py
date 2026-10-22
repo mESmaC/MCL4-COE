@@ -2623,13 +2623,33 @@ class MCL4COETrainer:
                         self.config.sample_prompt,
                         max_new_tokens=256,
                     )
-                    sample_entry = {
+                    sample_entry: dict[str, Any] = {
                         "step": step,
                         "prompt": self.config.sample_prompt,
                         "trace": sample_trace,
                         "total_loss": record["total_loss"],
                         "timestamp": time.time(),
                     }
+                    if self.config.enable_ncm and self.ncm_system is not None:
+                        try:
+                            tok = self.controller.tokenizer
+                            p_toks = tok.encode(
+                                f"#U$# {self.config.sample_prompt}\n#T$# ",
+                                add_bos=True,
+                                add_eos=False,
+                            )
+                            p_ids_t = torch.tensor([p_toks], dtype=torch.long, device=self.device)
+                            ncm_gen = self.ncm_system.generate(
+                                p_ids_t,
+                                temperature=0.0,
+                                enable_coe_guidance=True,
+                                enable_early_exit=False,
+                                tokenizer=tok,
+                            )
+                            sample_entry["ncm_trace"] = ncm_gen.text
+                            sample_entry["ncm_levels_executed"] = ncm_gen.levels_executed
+                        except Exception:
+                            pass
                     with self.samples_path.open("a", encoding="utf-8", newline="\n") as sh:
                         sh.write(json.dumps(sample_entry, sort_keys=True) + "\n")
 

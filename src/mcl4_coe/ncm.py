@@ -925,8 +925,11 @@ class DonorAnchoredMultiscaleVQVAE(nn.Module):
 
     def _project_to_vocab_logits(self, hidden_d_model: Tensor) -> Tensor:
         if self.backbone is not None:
-            normed = self.backbone.final_norm(hidden_d_model)
-            logits = F.linear(normed, self.backbone.lm_head.weight.to(normed.dtype))
+            fn = self.backbone.final_norm
+            x_f = hidden_d_model.float()
+            rms = torch.rsqrt(x_f.pow(2).mean(dim=-1, keepdim=True) + fn.eps)
+            normed = (x_f * rms).to(hidden_d_model.dtype) * fn.weight.detach().to(hidden_d_model.dtype)
+            logits = F.linear(normed, self.backbone.lm_head.weight.detach().to(normed.dtype))
             if self.logits_scaling != 1.0:
                 logits = logits / float(self.logits_scaling)
             return logits
@@ -949,10 +952,10 @@ class DonorAnchoredMultiscaleVQVAE(nn.Module):
         z = self.pre_quant_norm(z.float().transpose(1, 2)).transpose(1, 2).to(tok_emb.dtype)
         return z.masked_fill(~valid.unsqueeze(-1), 0.0)
 
-    def decode_from_z_hat(
+    def decode_hidden_from_z_hat(
         self, z_hat: Tensor, valid: Tensor | None = None
-    ) -> tuple[Tensor, Tensor]:
-        """Decode cumulative concept reconstruction `z_hat` (`[B, L, d_vq]`) to `(logits, d_model_hidden)`."""
+    ) -> Tensor:
+        """Decode cumulative concept reconstruction `z_hat` (`[B, L, d_vq]`) to `d_model_hidden` (`[B, L, d_model]`)."""
         h = z_hat.to(self.dec_out_proj.weight.dtype)
         for blk in self.dec_blocks:
             h = blk(h, valid=valid)
@@ -960,6 +963,13 @@ class DonorAnchoredMultiscaleVQVAE(nn.Module):
         d_model_hidden = self.dec_out_proj(h)
         if valid is not None:
             d_model_hidden = d_model_hidden.masked_fill(~valid.unsqueeze(-1), 0.0)
+        return d_model_hidden
+
+    def decode_from_z_hat(
+        self, z_hat: Tensor, valid: Tensor | None = None
+    ) -> tuple[Tensor, Tensor]:
+        """Decode cumulative concept reconstruction `z_hat` (`[B, L, d_vq]`) to `(logits, d_model_hidden)`."""
+        d_model_hidden = self.decode_hidden_from_z_hat(z_hat, valid=valid)
         logits = self._project_to_vocab_logits(d_model_hidden)
         return logits, d_model_hidden
 
@@ -1575,9 +1585,9 @@ class NCMSystem(nn.Module):
             k_brief = 0
             k_std = len(cum_z_hats) // 2
             k_det = len(cum_z_hats) - 1
-            _, h_brief_seq = self.vqvae.decode_from_z_hat(cum_z_hats[k_brief], valid=target_valid)
-            _, h_std_seq = self.vqvae.decode_from_z_hat(cum_z_hats[k_std], valid=target_valid)
-            _, h_det_seq = self.vqvae.decode_from_z_hat(cum_z_hats[k_det], valid=target_valid)
+            h_brief_seq = self.vqvae.decode_hidden_from_z_hat(cum_z_hats[k_brief], valid=target_valid)
+            h_std_seq = self.vqvae.decode_hidden_from_z_hat(cum_z_hats[k_std], valid=target_valid)
+            h_det_seq = self.vqvae.decode_hidden_from_z_hat(cum_z_hats[k_det], valid=target_valid)
 
             def _abs_vec(h_seq: Tensor, lvl_name: str) -> Tensor:
                 pooled = coe.pooler.pool_sequence(

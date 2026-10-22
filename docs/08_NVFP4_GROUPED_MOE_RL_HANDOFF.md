@@ -1,13 +1,13 @@
 # 08 — Native Blackwell `NVFP4` Fused Multi-Expert Grouped MoE Kernel & Pure RL Handoff
 
-**Date:** 2026-10-20  
+**Date:** 2026-10-21  
 **Active Run ID:** `colab_mcl4_coe_v7_granite_e32_pure_rl`  
-**Completed Step:** `1400 / 1400` (`status = "completed"`)  
+**Completed Step:** `3000 / 3000` (`status = "completed"`)  
 **Hugging Face Backup Repo:** `mesmac/mcl4-coe-runs` (`colab_mcl4_coe_v7_granite_e32_pure_rl/**`)
 
 ---
 
-## 1. Summary of Work Completed Today
+## 1. Summary of Work Completed
 
 ### A. Local Inference Platform Setup & Verification (`scripts/chat_web.py`)
 1. Downloaded the `2.06B` (`E = 48`) Mitotic RL Soup checkpoint (`step_06000_mitotic_rl_soup.pt`) from `mesmac/mcl4-coe-runs` into `X:\MCL4-COE\runs\colab_mcl4_coe_v7_granite_overnight_mitosis\checkpoints\step_06000.pt`.
@@ -51,18 +51,18 @@ To unlock the `NVIDIA RTX PRO 6000 Blackwell` (`sm_120`) `NVFP4` Tensor Cores on
 
 ---
 
-### C. Pure RL + Dream-RSI Progression (`step 400 -> 1400`, `enable_mitosis = False`)
+### C. Pure RL + Dream-RSI Progression (`step 400 -> 3000`, `enable_mitosis = False`)
 Starting from the unsplit `1.45B` (`E = 32`) Granite 3.1 MoE checkpoint (`colab_mcl4_coe_v7_granite_slingshot_r2/checkpoints/step_00400.pt`), we ran [`scripts/launch_v7_granite_rl.py`](../scripts/launch_v7_granite_rl.py) (`enable_mitosis = False`, `plastic_experts_per_layer = 8`, `ornith_every = 1`, `dream_every = 1`, `operator_every = 1`, `batch_size = 8`, `use_nvfp4 = True`, `nvfp4_sparsity_mode = "none"`):
 
-| Step | Mode | Held-Out `val_bpb` ($\downarrow$) | Held-Out `val_mcqa` ($\uparrow$) | `NVFP4` GEMMs Executed | Throughput (`tok/s`) |
+| Step | Mode | Held-Out `val_bpb` ($\downarrow$) | Held-Out `val_mcqa` ($\uparrow$) | `NVFP4` GEMMs (Session) | Throughput (`tok/s`) |
 | :---: | :--- | :---: | :---: | :---: | :---: |
 | `400` | Base Slingshot R2 (`BF16`) | `0.8123` | `0.2891` | `0` | — |
 | `600` | Pure RL (`BF16`, pre-PTQ) | `0.7334` | `0.3359` | `0` | `~1,350 tok/s` |
 | `601` | Cold PTQ into `NVFP4` (`1,536` layers) | `0.7662` | `0.3047` | `87,750` | `333 tok/s` (un-grouped) |
 | `700` | `NVFP4` Pure RL (un-grouped) | `0.7629` | `0.3359` | `4,085,000` | `331 tok/s` (un-grouped) |
 | `701` | Switched to Fused `nvfp4_grouped_linear` | `0.7621` | `0.3203` | `88,704` | **`1,434 – 1,553 tok/s`** |
-| `1388` | Fused `NVFP4` Pure RL + Dream-RSI | **`0.7494`** | **`0.3516`** | `26,591,616` | **`1,421 – 1,601 tok/s`** |
-| `1400` | Completed Checkpoint (`step_01400.pt`) | **`0.7495`** | `0.2969` ( noisy 8-batch eval; `0.3516` at step 1388) | **`27,042,048`** | **`1,255 – 1,601 tok/s`** |
+| `1400` | Fused `NVFP4` Pure RL + Dream-RSI | `0.7495` (`0.7494` best) | `0.3516` peak | `27,042,048` | **`1,255 – 1,601 tok/s`** |
+| `3000` | Completed Checkpoint (`step_03000.pt`) | **`0.7391`** | **`0.4141`** (`0.4375` peak) | **`61,927,680`** (`>93M` total) | **`1,273 – 1,601 tok/s`** |
 
 ---
 
@@ -70,31 +70,13 @@ Starting from the unsplit `1.45B` (`E = 32`) Granite 3.1 MoE checkpoint (`colab_
 
 ### On Hugging Face (`mesmac/mcl4-coe-runs`)
 All checkpoints and logs are backed up under `colab_mcl4_coe_v7_granite_e32_pure_rl/`:
-- `colab_mcl4_coe_v7_granite_e32_pure_rl/checkpoints/step_01400.pt` (`1.45B`, `E = 32`, calibrated for `NVFP4`)
-- `colab_mcl4_coe_v7_granite_e32_pure_rl/checkpoints/step_01400.meta.json`
-- `colab_mcl4_coe_v7_granite_e32_pure_rl/checkpoints/step_01300.pt` & `step_01200.pt`
-- `colab_mcl4_coe_v7_granite_e32_pure_rl/dream/dream_state.json` (`1,345` Dream-RSI cycles completed)
+- `colab_mcl4_coe_v7_granite_e32_pure_rl/checkpoints/step_03000.pt` (`1.45B`, `E = 32`, `val_bpb = 0.7391`, `val_mcqa = 0.4141 / 0.4375 peak`, calibrated for `NVFP4`)
+- `colab_mcl4_coe_v7_granite_e32_pure_rl/checkpoints/step_03000.meta.json`
+- `colab_mcl4_coe_v7_granite_e32_pure_rl/checkpoints/step_02900.pt` & `step_02800.pt`
+- `colab_mcl4_coe_v7_granite_e32_pure_rl/dream/dream_state.json` (`2,945` Dream-RSI cycles completed)
 - `colab_mcl4_coe_v7_granite_e32_pure_rl/run_manifest.json`, `metrics.jsonl`, `samples.jsonl`, `train.log`
 - Code bundle: `_bundles/mcl4_coe_v8_bundle.tar.gz`
 
 ### On Local Disk (`X:\MCL4-COE`)
-- `runs/colab_mcl4_coe_v7_granite_e32_pure_rl/`: `run_manifest.json`, `metrics.jsonl`, `samples.jsonl`, `train.log`, `dream/dream_state.json`, and `checkpoints/step_01400.meta.json`.
+- `runs/colab_mcl4_coe_v7_granite_e32_pure_rl/`: `run_manifest.json`, `metrics.jsonl`, `samples.jsonl`, `train.log`, `dream/dream_state.json`, and `.meta.json` checkpoints through `step_03000.meta.json`.
 - `runs/colab_mcl4_coe_v7_granite_overnight_mitosis/checkpoints/step_06000.pt`: `2.06B` (`E = 48`) Mitotic RL Soup checkpoint ready for local testing in `scripts/chat_web.py`.
-
----
-
-## 3. How to Pick Up Tomorrow
-
-1. **Continue Pure `NVFP4` RL + Dream-RSI on Colab (`step 1400 -> 3000+`) at `~1,450 tok/s`:**
-   ```bash
-   python -u scripts/launch_v7_granite_rl.py \
-     --resume /content/runs/colab_mcl4_coe_v7_granite_e32_pure_rl/checkpoints/step_01400.meta.json \
-     --total-steps 3000
-   ```
-2. **Test `step_01400.pt` Locally in the Inference Platform (`scripts/chat_web.py`):**
-   Download `colab_mcl4_coe_v7_granite_e32_pure_rl/checkpoints/step_01400.pt` to `X:\MCL4-COE\runs\colab_mcl4_coe_v7_granite_e32_pure_rl\checkpoints\step_01400.pt` and launch:
-   ```powershell
-   python scripts/chat_web.py --checkpoint runs/colab_mcl4_coe_v7_granite_e32_pure_rl/checkpoints/step_01400.pt --dtype bfloat16
-   ```
-3. **Optional Next Phase — Enable `2:4` Transposable Structured Sparsity or Mitotic Splitting (`E = 32 -> 48 -> 64`) on Top of `step_01400.pt`:**
-   Because `_get_or_build_grouped_nvfp4_cache` and `_NVFP4GroupedLinear` already support `sparsity_mode = "2to4_transposable"` + `SR-STE` (`sr_ste_decay = 1e-4`), we can switch `nvfp4_sparsity_mode` or enable mitosis whenever ready.

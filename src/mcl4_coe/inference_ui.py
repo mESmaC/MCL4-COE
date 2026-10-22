@@ -915,6 +915,42 @@ class InferenceSessionController:
                         "num_candidates": len(dream_out.candidates),
                     }
                 )
+            elif mode == "ncm":
+                ncm_sys = getattr(self.model, "ncm_system", None)
+                if ncm_sys is None:
+                    ncm_sys = self.model.create_ncm_system()
+                p_ids = torch.tensor(
+                    [self.tokenizer.encode(f"#U$# {prompt}", add_bos=True, add_eos=False)],
+                    dtype=torch.long,
+                    device=next(self.model.parameters()).device,
+                )
+                ncm_gen = ncm_sys.generate(
+                    p_ids,
+                    tokenizer=self.tokenizer,
+                    target_length=int(ncm_sys.config.target_length),
+                    temperature=temp,
+                    enable_mid_hierarchy_coe=True,
+                    enable_early_exit=bool(cfg.get("adaptive_recurrent_depth", False)),
+                    decode_all_levels=True,
+                )
+                lvl_lines = [
+                    f"Level {idx + 1} (ell={ncm_sys.config.levels[idx]}, top_k={ncm_gen.per_level_active_top_k[idx]}): {txt}"
+                    for idx, txt in enumerate(ncm_gen.level_decoded_texts)
+                ]
+                thought_str = "\n".join(lvl_lines) if lvl_lines else "NCM coarse-to-fine hierarchy executed."
+                trace_text = f"#U$# {prompt}\n#T$# {thought_str}\n#A$# {ncm_gen.text}"
+                mode_meta.update(
+                    {
+                        "levels_executed": ncm_gen.levels_executed,
+                        "total_levels": ncm_gen.total_levels,
+                        "halted_early": ncm_gen.halted_early,
+                        "lateral_refinements": ncm_gen.lateral_refinements,
+                        "per_level_active_top_k": ncm_gen.per_level_active_top_k,
+                        "per_level_metacognition": ncm_gen.per_level_metacognition,
+                        "per_level_deduction": ncm_gen.per_level_deduction,
+                        "level_decoded_texts": ncm_gen.level_decoded_texts,
+                    }
+                )
             else:
                 trace_text = self.controller.generate_uta(
                     prompt,

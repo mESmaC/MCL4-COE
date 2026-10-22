@@ -1331,11 +1331,19 @@ class MarkovLocal4Router(nn.Module):
             ).any(-1)
             return indices, valid & ~duplicate
 
-    def _allowed_nodes(self, key_valid: Tensor, positions: Tensor, causal: bool) -> Tensor:
+    def _allowed_nodes(
+        self,
+        key_valid: Tensor,
+        positions: Tensor,
+        causal: bool,
+        attn_mask: Tensor | None = None,
+    ) -> Tensor:
         n = key_valid.shape[-1]
         allowed = key_valid[:, None, None, :].expand(-1, 1, positions.numel(), -1)
         if causal:
             allowed = allowed & (torch.arange(n, device=positions.device) <= positions[:, None])
+        if attn_mask is not None:
+            allowed = allowed & attn_mask[:, :, positions, :]
         fallback = torch.arange(n, device=positions.device) == positions[:, None]
         return allowed | (~allowed.any(-1, keepdim=True) & fallback)
 
@@ -1604,6 +1612,7 @@ class MarkovLocal4Router(nn.Module):
         causal: bool = True,
         dropout_p: float = 0.0,
         attn_scale: float | None = None,
+        attn_mask: Tensor | None = None,
     ) -> Tensor:
         """Route and compute sparse QKV attention over 4 local anchors + 12 Markov walkers."""
         b, h, n, head_dim = q.shape
@@ -1627,7 +1636,7 @@ class MarkovLocal4Router(nn.Module):
         for start in range(0, n, self.query_chunk_size):
             end = min(start + self.query_chunk_size, n)
             positions = torch.arange(start, end, device=q.device)
-            allowed = self._allowed_nodes(key_valid, positions, causal=causal)
+            allowed = self._allowed_nodes(key_valid, positions, causal=causal, attn_mask=attn_mask)
             seed_ids, seed_mass = self.sparse_seeds(starts[:, :, start:end], keys, allowed)
             ids, mass = self.bounded_visits(
                 queries[:, :, start:end],

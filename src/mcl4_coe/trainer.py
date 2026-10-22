@@ -219,6 +219,17 @@ class TrainingRunConfig:
     dream_workers: int = 2
     dream_revisions: int = 3
 
+    # Next-Concept Modeling (NCM) multiscale coarse-to-fine hierarchy
+    enable_ncm: bool = False
+    ncm_target_length: int = 32
+    ncm_num_levels: int = 4
+    ncm_level_schedule: str = "quadratic"
+    ncm_codebook_size: int = 256
+    ncm_vq_embed_dim: int = 64
+    ncm_scale_adaptive_top_k: bool = True
+    ncm_every: int = 1
+    ncm_weight: float = 0.35
+
     # Checkpointing, held-out validation & live telemetry
     checkpoint_every: int = 10
     max_keep_checkpoints: int = 0
@@ -837,6 +848,25 @@ class MCL4COETrainer:
             torch.nn.Linear.reset_parameters = orig_lin_reset  # type: ignore[method-assign]
             torch.nn.Embedding.reset_parameters = orig_emb_reset  # type: ignore[method-assign]
             torch.nn.init.normal_ = orig_init_normal  # type: ignore[assignment]
+        if self.config.enable_ncm:
+            from .ncm import NCMConfig
+
+            ncm_cfg = NCMConfig(
+                target_length=int(self.config.ncm_target_length),
+                num_levels=int(self.config.ncm_num_levels),
+                level_schedule=str(self.config.ncm_level_schedule),
+                codebook_size=int(self.config.ncm_codebook_size),
+                vq_embed_dim=int(self.config.ncm_vq_embed_dim),
+                d_model=int(self.config.d_model),
+                vocab_size=int(self.config.vocab_size),
+                pad_id=int(self.config.pad_id),
+                rms_norm_eps=float(self.config.rms_norm_eps),
+                scale_adaptive_top_k=bool(self.config.ncm_scale_adaptive_top_k),
+            )
+            self.ncm_system = self.model.create_ncm_system(ncm_cfg)
+        else:
+            self.ncm_system = None
+
         if use_bf16_init:
             self.model.to(dtype=torch.bfloat16)
             for mod in self.model.modules():
@@ -2361,13 +2391,56 @@ class MCL4COETrainer:
                     scaled_op_loss.backward()
                     del scaled_op_loss
 
+                ncm_telemetry: dict[str, Any] = {}
+                if (
+                    self.config.enable_ncm
+                    and self.ncm_system is not None
+                    and micro_batches
+                    and step % max(1, int(self.config.ncm_every)) == 0
+                ):
+                    mb0_inp = micro_batches[0]["input_ids"].to(self.device, non_blocking=True)
+                    ncm_len = int(self.ncm_system.config.target_length)
+                    p_len = max(4, min(ncm_len, mb0_inp.shape[1] // 2))
+                    p_ids = mb0_inp[:, :p_len]
+                    t_slice = mb0_inp[:, p_len : p_len + ncm_len]
+                    if t_slice.shape[1] < ncm_len:
+                        pad_fill = torch.full(
+                            (t_slice.shape[0], ncm_len - t_slice.shape[1]),
+                            int(self.config.pad_id),
+                            dtype=t_slice.dtype,
+                            device=self.device,
+                        )
+                        t_slice = torch.cat([t_slice, pad_fill], dim=1)
+                    with torch.autocast(
+                        device_type=self.device.type,
+                        dtype=torch.bfloat16,
+                        enabled=use_amp,
+                    ):
+                        ncm_out = self.ncm_system.forward_training_step(p_ids, t_slice)
+                        scaled_ncm_loss = float(self.config.ncm_weight) * ncm_out.total_loss
+                        ncm_telemetry = {
+                            "ncm_loss": round(float(ncm_out.total_loss.detach().item()), 5),
+                            "ncm_ce_loss": round(float(ncm_out.ncm_ce_loss.item()), 5),
+                            "ncm_vq_recon_loss": round(float(ncm_out.vq_recon_loss.item()), 5),
+                            "ncm_recon_accuracy": round(float(ncm_out.recon_accuracy), 4),
+                            "ncm_codebook_utilization": round(float(ncm_out.codebook_utilization), 4),
+                            "ncm_per_level_acc": list(ncm_out.per_level_acc),
+                        }
+                    step_total_gpu = step_total_gpu + scaled_ncm_loss.detach().float()
+                    del ncm_out
+                    scaled_ncm_loss.backward()
+                    del scaled_ncm_loss
+
                 if run_ornith:
                     with torch.autocast(
                         device_type=self.device.type,
                         dtype=torch.bfloat16,
                         enabled=use_amp,
                     ):
-                        ornith_out = self.ornith_improver.step_self_improvement(self.model)
+                        if self.config.enable_ncm and self.ncm_system is not None:
+                            ornith_out = self.ornith_improver.step_ncm_self_improvement(self.ncm_system)
+                        else:
+                            ornith_out = self.ornith_improver.step_self_improvement(self.model)
                         step_ornith_gpu = ornith_out.loss.detach().float()
                         scaled_ornith_loss = self.config.ornith_weight * ornith_out.loss
                         ornith_telemetry = {
@@ -2531,6 +2604,7 @@ class MCL4COETrainer:
                     **({"mitotic_pairs": [list(p) for p in active_pairs]} if active_pairs else {}),
                     **({"mitosis_event": mitosis_event} if mitosis_event is not None else {}),
                     **ornith_telemetry,
+                    **ncm_telemetry,
                     **val_telemetry,
                     **{k: round(v, 5) for k, v in avg_track_losses.items()},
                 }

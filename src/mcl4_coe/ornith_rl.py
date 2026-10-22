@@ -3048,6 +3048,8 @@ class OrnithSelfImprover:
 
         # Group-normalized advantages A_i across the G=4 rollouts scaled by osu! PP placement weight
         advantages = group_normalized_advantages(h_scores) * pp_grad_t.unsqueeze(-1)
+        self._last_tasks = tasks
+        self._last_advantages = advantages.detach()
         grpo_loss = grpo_clipped_loss(
             log_probs,
             beh_log_probs,
@@ -3260,5 +3262,115 @@ class OrnithSelfImprover:
             recursion_depth=int(max_rec_depth),
             active_skill=str(tasks[0].skill) if tasks else "",
         )
+
+    def step_ncm_self_improvement(
+        self,
+        ncm_system: Any,
+        batch_size: int = 2,
+        max_seq_len: int | None = None,
+    ) -> OrnithStepOutput:
+        """Run an Ornith-2.5 (`pp = p * 0.95^(n-1)`) + Dream-RSI hierarchical RL step on `NCMSystem`.
+
+        Combines:
+        1. Full 3-stage `Ornith-2.5` + `Dream-RSI` + 9-operator `COE` supervision on `ncm_system.coe_model`.
+        2. Single-pass exact hierarchical Next-Concept log-likelihoods (`compute_hierarchy_log_probs`,
+           Eq. 13) across candidate rollouts for coarse-to-fine GRPO policy optimization.
+        3. Multiscale NCM coarse-to-fine self-distillation (`forward_training_step`) on verified
+           gold `#T$# -> #A$#` continuations.
+        """
+        if ncm_system.coe_model is None:
+            raise ValueError("step_ncm_self_improvement requires ncm_system.coe_model to be attached")
+
+        base_out = self.step_self_improvement(
+            ncm_system.coe_model,
+            batch_size=batch_size,
+            max_seq_len=max_seq_len,
+        )
+        tasks = getattr(self, "_last_tasks", [])
+        advantages = getattr(self, "_last_advantages", None)
+        if not tasks:
+            return base_out
+
+        ncm_seq_len = int(ncm_system.config.seq_len)
+        pad_id = int(ncm_system.config.pad_id)
+        prompt_rows: list[list[int]] = []
+        gold_cont_rows: list[list[int]] = []
+        group_cont_rows: list[list[list[int]]] = []
+
+        for t in tasks:
+            p_toks = self.tokenizer.encode(
+                f"{t.prompt_q}\n#S$# {t.scaffold_s}", add_bos=True, add_eos=False
+            )[: max(8, ncm_seq_len * 2)]
+            prompt_rows.append(p_toks)
+
+            gold_text = t.candidate_rollouts[int(t.gold_index)]
+            g_toks = self.tokenizer.encode(gold_text, add_bos=False, add_eos=True)[:ncm_seq_len]
+            if len(g_toks) < ncm_seq_len:
+                g_toks = g_toks + [pad_id] * (ncm_seq_len - len(g_toks))
+            gold_cont_rows.append(g_toks)
+
+            c_group: list[list[int]] = []
+            for cand in t.candidate_rollouts:
+                c_toks = self.tokenizer.encode(cand, add_bos=False, add_eos=True)[:ncm_seq_len]
+                if len(c_toks) < ncm_seq_len:
+                    c_toks = c_toks + [pad_id] * (ncm_seq_len - len(c_toks))
+                c_group.append(c_toks)
+            group_cont_rows.append(c_group)
+
+        max_p = max(len(r) for r in prompt_rows)
+        prompt_tensor = torch.tensor(
+            [r + [pad_id] * (max_p - len(r)) for r in prompt_rows],
+            dtype=torch.long,
+            device=self.device,
+        )
+        gold_cont_tensor = torch.tensor(
+            gold_cont_rows,
+            dtype=torch.long,
+            device=self.device,
+        )
+
+        # 1. Multiscale coarse-to-fine NCM self-distillation on verified gold continuations
+        ncm_distill_out = ncm_system.forward_training_step(
+            prompt_tensor,
+            gold_cont_tensor,
+            include_coe_abstraction_loss=True,
+        )
+
+        # 2. Hierarchical Next-Concept GRPO across candidate rollouts using single-pass log-probs
+        bsz = len(tasks)
+        num_cands = len(group_cont_rows[0])
+        flat_prompts = prompt_tensor.unsqueeze(1).expand(bsz, num_cands, max_p).reshape(bsz * num_cands, max_p)
+        flat_cands = torch.tensor(
+            group_cont_rows, dtype=torch.long, device=self.device
+        ).reshape(bsz * num_cands, ncm_seq_len)
+
+        hier_lp_flat, _ = ncm_system.compute_hierarchy_log_probs(
+            flat_prompts,
+            flat_cands,
+            normalize_by_tokens=True,
+        )
+        hier_lp = hier_lp_flat.view(bsz, num_cands)
+        if advantages is not None and advantages.shape == hier_lp.shape:
+            ncm_grpo_loss = grpo_clipped_loss(
+                hier_lp,
+                hier_lp.detach(),
+                advantages,
+                policy_age=0,
+            )
+        else:
+            ncm_grpo_loss = torch.zeros((), device=self.device)
+
+        combined_loss = (
+            base_out.loss
+            + 0.50 * ncm_distill_out.total_loss
+            + 0.25 * ncm_grpo_loss
+        )
+        return replace(
+            base_out,
+            loss=combined_loss,
+            grpo_loss=(base_out.grpo_loss + 0.25 * ncm_grpo_loss.detach()),
+            self_distill_loss=(base_out.self_distill_loss + 0.50 * ncm_distill_out.total_loss.detach()),
+        )
+
 
 

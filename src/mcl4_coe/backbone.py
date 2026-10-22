@@ -1123,7 +1123,19 @@ class LocalAttentionBlock(nn.Module):
             )
         )
 
-    def _get_rope_cos_sin(self, n: int, device: torch.device, dtype: torch.dtype) -> tuple[Tensor, Tensor]:
+    def _get_rope_cos_sin(
+        self,
+        n: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        *,
+        rope_positions: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        if rope_positions is not None:
+            positions = rope_positions.to(device=device, dtype=torch.float32)
+            inv_freq = self._get_inv_freq(device)
+            angles = positions[:, None] * inv_freq[None, :]
+            return angles.cos().to(dtype), angles.sin().to(dtype)
         key = (n, device, dtype, self.inv_freq.dtype, self.inv_freq.data_ptr())
         cached = self._rope_cache
         if cached is not None and cached[0] == key:
@@ -1146,9 +1158,18 @@ class LocalAttentionBlock(nn.Module):
         self._markov_gate_cache = (key, active)
         return active
 
-    def _sdpa_attend(self, q: Tensor, k: Tensor, v: Tensor, valid: Tensor, *, causal: bool) -> Tensor:
+    def _sdpa_attend(
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        valid: Tensor,
+        *,
+        causal: bool,
+        attn_mask: Tensor | None = None,
+    ) -> Tensor:
         b, _, n, _ = q.shape
-        if causal and _is_all_valid(valid):
+        if attn_mask is None and causal and _is_all_valid(valid):
             return F.scaled_dot_product_attention(
                 q,
                 k,
@@ -1162,6 +1183,8 @@ class LocalAttentionBlock(nn.Module):
         if causal:
             causal_mask = torch.ones(n, n, dtype=torch.bool, device=q.device).tril()
             allowed = allowed & causal_mask[None, None]
+        if attn_mask is not None:
+            allowed = allowed & attn_mask
         fallback = torch.eye(n, dtype=torch.bool, device=q.device)[None, None]
         allowed = allowed | (~allowed.any(-1, keepdim=True) & fallback)
         return F.scaled_dot_product_attention(
@@ -1173,7 +1196,15 @@ class LocalAttentionBlock(nn.Module):
             scale=self.attention_multiplier,
         )
 
-    def forward(self, x_norm: Tensor, valid: Tensor, *, causal: bool = True) -> Tensor:
+    def forward(
+        self,
+        x_norm: Tensor,
+        valid: Tensor,
+        *,
+        causal: bool = True,
+        local_attn_mask: Tensor | None = None,
+        rope_positions: Tensor | None = None,
+    ) -> Tensor:
         b, n, width = x_norm.shape
         if self.use_qk_norm and self.qk_norm_mode == "full":
             q_flat, k_flat, v_flat = self.qkv(x_norm).chunk(3, dim=-1)
@@ -1186,11 +1217,15 @@ class LocalAttentionBlock(nn.Module):
             q, k, v = (part.transpose(1, 2) for part in qkv.unbind(dim=2))
             if self.use_qk_norm:
                 q, k = self.q_norm(q), self.k_norm(k)
-        cos, sin = self._get_rope_cos_sin(n, x_norm.device, q.dtype)
+        cos, sin = self._get_rope_cos_sin(
+            n, x_norm.device, q.dtype, rope_positions=rope_positions
+        )
         q, k = self._apply_rope(q, cos, sin), self._apply_rope(k, cos, sin)
 
         if self.markov_router is not None and self.markov_gate is not None:
-            sdpa_attended = self._sdpa_attend(q, k, v, valid, causal=causal)
+            sdpa_attended = self._sdpa_attend(
+                q, k, v, valid, causal=causal, attn_mask=local_attn_mask
+            )
             if (
                 self.training
                 or torch.is_grad_enabled()
@@ -1205,6 +1240,7 @@ class LocalAttentionBlock(nn.Module):
                     causal=causal,
                     dropout_p=self.config.dropout,
                     attn_scale=self.attention_multiplier,
+                    attn_mask=local_attn_mask,
                 )
                 attended = (
                     sdpa_attended
@@ -1222,9 +1258,12 @@ class LocalAttentionBlock(nn.Module):
                 causal=causal,
                 dropout_p=self.config.dropout,
                 attn_scale=self.attention_multiplier,
+                attn_mask=local_attn_mask,
             )
         else:
-            attended = self._sdpa_attend(q, k, v, valid, causal=causal)
+            attended = self._sdpa_attend(
+                q, k, v, valid, causal=causal, attn_mask=local_attn_mask
+            )
         out = self.out_proj(attended.transpose(1, 2).contiguous().view(b, n, width))
         return out.masked_fill(~valid.unsqueeze(-1), 0)
 
@@ -1332,8 +1371,19 @@ class CEDDecoderLayer(nn.Module):
         )
 
     def _get_rope_cos_sin(
-        self, n: int, n_prefix: int, device: torch.device, dtype: torch.dtype
+        self,
+        n: int,
+        n_prefix: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        *,
+        rope_positions: Tensor | None = None,
     ) -> tuple[Tensor, Tensor]:
+        if rope_positions is not None:
+            positions = rope_positions.to(device=device, dtype=torch.float32)
+            inv_freq = self._get_inv_freq(device)
+            angles = positions[:, None] * inv_freq[None, :]
+            return angles.cos().to(dtype), angles.sin().to(dtype)
         key = (n, int(n_prefix), device, dtype, self.inv_freq.dtype, self.inv_freq.data_ptr())
         cached = self._rope_cache.get(key)
         if cached is not None:
@@ -1378,11 +1428,14 @@ class CEDDecoderLayer(nn.Module):
         owner_rows: Tensor | None = None,
         causal_cross_mask: Tensor | None = None,
         causal_cross: bool = False,
+        rope_positions: Tensor | None = None,
     ) -> Tensor:
         r, t_cand, width = q_norm.shape
         q = self.global_q_proj(q_norm).view(r, t_cand, self.n_heads, self.head_dim).transpose(1, 2)
         q = self.global_q_norm(q)
-        cos, sin = self._get_rope_cos_sin(t_cand, 0, q_norm.device, q.dtype)
+        cos, sin = self._get_rope_cos_sin(
+            t_cand, 0, q_norm.device, q.dtype, rope_positions=rope_positions
+        )
         q = self._apply_rope(q, cos, sin)
         if owner_rows is not None:
             k = k_global.index_select(0, owner_rows)
@@ -1440,6 +1493,8 @@ class CEDDecoderLayer(nn.Module):
         *,
         owner_rows: Tensor | None = None,
         causal_local: bool = True,
+        local_attn_mask: Tensor | None = None,
+        rope_positions: Tensor | None = None,
         causal_cross_mask: Tensor | None = None,
         causal_cross: bool = False,
         prior_expert_mask: Tensor | None = None,
@@ -1447,7 +1502,13 @@ class CEDDecoderLayer(nn.Module):
         if self.ple is not None:
             x = self.ple(x, original_inputs, token_ids=token_ids, valid=cand_valid)
         normed = self.attn_norm(x)
-        local_out = self.local_attention(normed, cand_valid, causal=causal_local)
+        local_out = self.local_attention(
+            normed,
+            cand_valid,
+            causal=causal_local,
+            local_attn_mask=local_attn_mask,
+            rope_positions=rope_positions,
+        )
         global_out = self._cross_attend(
             normed,
             k_global,
@@ -1457,6 +1518,7 @@ class CEDDecoderLayer(nn.Module):
             owner_rows=owner_rows,
             causal_cross_mask=causal_cross_mask,
             causal_cross=causal_cross,
+            rope_positions=rope_positions,
         )
         res_scale = self.residual_multiplier
         x = (

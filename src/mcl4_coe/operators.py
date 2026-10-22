@@ -1718,6 +1718,27 @@ class CognitiveOperatorEnsemble(nn.Module):
             max_anchor_drift=max_anchor_drift,
         )
 
+    def create_ncm_system(self, config: Any | None = None) -> Any:
+        """Create a Next-Concept Modeling (`NCMSystem`) anchored to this `CognitiveOperatorEnsemble`.
+
+        Shares `self.backbone` (`token_embedding`, `lm_head`, lower encoder stack, upper CED
+        decoder stack, and `SparseMoE` routers/experts) and attaches `self` for mid-hierarchy
+        9-operator `COE` verification and adaptive halting.
+        """
+        from .ncm import NCMConfig, NCMSystem
+
+        ncm_cfg = config if isinstance(config, NCMConfig) else NCMConfig(
+            d_model=int(self.backbone.config.d_model),
+            vocab_size=int(self.backbone.config.vocab_size),
+            pad_id=int(self.backbone.config.pad_id),
+            rms_norm_eps=float(self.backbone.config.rms_norm_eps),
+        )
+        system = NCMSystem(ncm_cfg, self.backbone, coe_model=self)
+        p0 = next(self.parameters())
+        system = system.to(device=p0.device, dtype=p0.dtype)
+        self.ncm_system = system
+        return system
+
     def forward_with_whiteboard(
         self,
         input_ids: Tensor,
@@ -5272,6 +5293,7 @@ class COEPlasticityController:
                     )
 
         return conflicts
+
 
 
 

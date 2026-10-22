@@ -111,6 +111,22 @@ from .ensemble import (
 )
 from .markov_local4 import MarkovLocal4Router, coalesce_candidates
 from .morph_tokenizer import MORPHCODE_16K_VOCAB_SIZE, MorphCodeTokenizer
+from .ncm import (
+    BidirectionalVQDecoderBlock,
+    DonorAnchoredMultiscaleVQVAE,
+    MultiscaleResidualQuantizer,
+    NCMConfig,
+    NCMGenerationOutput,
+    NCMGeneratorAdapter,
+    NCMSystem,
+    NCMTrainingOutput,
+    PhiResidualConv,
+    QuantizerOutput,
+    TiedCodebookHead,
+    VQVAETokenizerOutput,
+    compute_ncm_level_weights,
+    compute_ncm_levels,
+)
 from .nvfp4 import (
     NVFP4Conv2d,
     NVFP4Linear,
@@ -282,6 +298,20 @@ __all__ = [
     "MultiPassController",
     "MultiPassOutput",
     "MultiTrackMixtureDataset",
+    "BidirectionalVQDecoderBlock",
+    "DonorAnchoredMultiscaleVQVAE",
+    "MultiscaleResidualQuantizer",
+    "NCMConfig",
+    "NCMGenerationOutput",
+    "NCMGeneratorAdapter",
+    "NCMSystem",
+    "NCMTrainingOutput",
+    "PhiResidualConv",
+    "QuantizerOutput",
+    "TiedCodebookHead",
+    "VQVAETokenizerOutput",
+    "compute_ncm_level_weights",
+    "compute_ncm_levels",
     "NVFP4Conv2d",
     "NVFP4Linear",
     "NoveltyTaskBuffer",

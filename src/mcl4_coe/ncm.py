@@ -490,6 +490,27 @@ class MultiscaleResidualQuantizer(nn.Module):
         getattr(self, f"ema_cluster_size_{level_idx}").fill_(1.0)
         getattr(self, f"ema_w_{level_idx}").copy_(centers.to(emb.weight.dtype))
 
+    @torch.no_grad()
+    def init_codebooks_from_z(self, z: Tensor, n_iters: int = 15) -> None:
+        """Initialize all $K$ coarse-to-fine codebooks sequentially via residual k-means on `z` (`[B, L, d_vq]`)."""
+        z_rest = z.detach().float().clone()
+        b, full_len, c = z_rest.shape
+        for i, level_len in enumerate(self.levels):
+            eff_len = min(full_len, int(level_len)) if i < self.num_levels - 1 else full_len
+            flat_blc = (
+                self._down_for_quant(z_rest, i, eff_len) if i < self.num_levels - 1 else z_rest
+            )
+            self.kmeans_init_level(i, flat_blc.reshape(-1, c), n_iters=n_iters)
+            emb_i = self.embeddings[i]
+            d2 = self._distances(flat_blc.reshape(-1, c), emb_i.weight)
+            idx = d2.argmin(dim=1).view(b, eff_len)
+            q_blc = emb_i(idx).float()
+            quantized = (
+                self._up_to_full(q_blc, i, full_len) if i < self.num_levels - 1 else q_blc
+            )
+            quantized = self._apply_quant_resi(quantized, i)
+            z_rest = z_rest - quantized
+
     def forward(self, z: Tensor, *, force_cutoff_level: int | None = None) -> QuantizerOutput:
         """Quantize `z` (`[B, L, d_vq]`) across all $K$ coarse-to-fine residual levels."""
         orig_dtype = z.dtype

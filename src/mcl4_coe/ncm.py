@@ -454,7 +454,7 @@ class MultiscaleResidualQuantizer(nn.Module):
         new_vecs = flat_input[src].to(emb_i.weight.dtype)
         emb_i.weight.data[dead] = new_vecs
         ema_w[dead] = new_vecs.to(ema_w.dtype)
-        ema_cs[dead] = self.restart_threshold
+        ema_cs[dead] = 1.0
 
     @torch.no_grad()
     def kmeans_init_level(self, level_idx: int, samples: Tensor, n_iters: int = 15) -> None:
@@ -544,6 +544,12 @@ class MultiscaleResidualQuantizer(nn.Module):
                     encodings.scatter_(1, indices.view(-1, 1), 1.0)
                     ema_cs: Tensor = getattr(self, f"ema_cluster_size_{i}")
                     ema_w: Tensor = getattr(self, f"ema_w_{i}")
+                    if ema_cs.dtype != torch.float32:
+                        ema_cs = ema_cs.float()
+                        setattr(self, f"ema_cluster_size_{i}", ema_cs)
+                    if ema_w.dtype != torch.float32:
+                        ema_w = ema_w.float()
+                        setattr(self, f"ema_w_{i}", ema_w)
                     enc_sum = encodings.sum(0)
                     dw = torch.matmul(encodings.t(), flat_input.detach())
                     ema_cs.mul_(self.ema_decay).add_(enc_sum, alpha=1.0 - self.ema_decay)

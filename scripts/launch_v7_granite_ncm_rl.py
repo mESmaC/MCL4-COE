@@ -260,25 +260,13 @@ def fit_ncm_hierarchy_on_frozen_donor(
         fit_opt.zero_grad(set_to_none=True)
         p_ids, t_ids = _sample_ncm_pair(s)
         with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=use_amp):
-            # Phase A (first 40%): prioritize VQ-VAE reconstruction so codebooks stabilize first
-            # Phase B (remaining 60%): joint VQ-VAE + block-diagonal parallel NCM generator + COE Abstraction
-            if s <= int(0.40 * fit_steps):
-                vq_out = ncm_sys.vqvae(t_ids)
-                ncm_out = ncm_sys.forward_training_step(
-                    p_ids,
-                    t_ids,
-                    train_vqvae_jointly=False,
-                    include_coe_abstraction_loss=True,
-                )
-                loss = 2.0 * vq_out.total_loss + 0.5 * ncm_out.total_loss
-            else:
-                ncm_out = ncm_sys.forward_training_step(
-                    p_ids,
-                    t_ids,
-                    train_vqvae_jointly=True,
-                    include_coe_abstraction_loss=True,
-                )
-                loss = ncm_out.total_loss
+            ncm_out = ncm_sys.forward_training_step(
+                p_ids,
+                t_ids,
+                train_vqvae_jointly=True,
+                include_coe_abstraction_loss=True,
+            )
+            loss = ncm_out.total_loss
 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(ncm_params, 1.0)

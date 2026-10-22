@@ -712,6 +712,11 @@ SKILL_TAXONOMY: tuple[tuple[str, str], ...] = (
     # 34..35: Infinite-Horizon Recursive RL Loops
     ("recursion.unbounded_multihop_chain", "infinite_recursion"),
     ("recursion.self_referential_fixed_point", "infinite_recursion"),
+    # 36..39: Sherlockian Deductive, Abductive, Forensic Timeline & Cipher Induction Suite
+    ("deduction.sherlock_eliminative_grid", "sherlock_eliminative_deduction"),
+    ("abduction.sherlock_diagnostic_trace", "sherlock_diagnostic_abduction"),
+    ("deduction.sherlock_alibi_contradiction", "sherlock_forensic_timeline"),
+    ("induction.sherlock_cipher_induction", "sherlock_pattern_induction"),
 )
 
 
@@ -1305,7 +1310,8 @@ class OrnithEnvArchitect:
     NUM_COMPOSITIONAL_FAMILIES: int = 4
     NUM_SPECIALIZED_FAMILIES: int = 10
     NUM_RECURSIVE_FAMILIES: int = 2
-    TOTAL_FAMILIES: int = 36
+    NUM_SHERLOCK_FAMILIES: int = 4
+    TOTAL_FAMILIES: int = 40
 
     def __init__(
         self,
@@ -1333,7 +1339,7 @@ class OrnithEnvArchitect:
         k = kind % self.TOTAL_FAMILIES
         tier = self.difficulty_tier(k)
         if k >= 34:
-            # Unbounded linear hop growth (L = 3, 4, 5, 6, ... -> inf)
+            # Unbounded linear hop growth (L = 3, 4, 5, 6, ... -> inf) for recursive & Sherlockian chains
             return 3 + (tier - 1)
         if k >= 20:
             return 2 + (tier - 1) // 2
@@ -1342,6 +1348,12 @@ class OrnithEnvArchitect:
     def difficulty_mods(self, kind: int) -> tuple[str, ...]:
         k = kind % self.TOTAL_FAMILIES
         tier = self.difficulty_tier(k)
+        if k >= 36:
+            if tier <= 1:
+                return ("FL", "HD")
+            if tier <= 3:
+                return ("FL", "HD", "HR")
+            return ("INF", "FL", "DT", "HD", "HR")
         if k >= 34 and tier >= 3:
             return ("INF", "HD", "HR") if tier < 6 else ("INF", "FL", "DT", "HD", "HR")
         if tier <= 1:
@@ -1687,6 +1699,212 @@ class OrnithSelfImprover:
             difficulty_mods=mods,
         )
 
+    def _synthesize_sherlock_reasoning_task(
+        self,
+        idx: int,
+        *,
+        tier: int = 1,
+        mode: int = 0,
+    ) -> OrnithTask:
+        """Synthesize a multi-hop Sherlockian Deductive, Abductive, Forensic Timeline, or Cipher Induction task.
+
+        Modes (`kind = 36 .. 39`):
+        - `mode = 0` (`36`, `deduction.sherlock_eliminative_grid`):
+          *"When you have eliminated the impossible, whatever remains, however improbable, must be the truth."*
+          Multi-constraint elimination over suspects, rooms, key clearances, and negative evidence (`watchdog`).
+        - `mode = 1` (`37`, `abduction.sherlock_diagnostic_trace`):
+          *"Diagnostic Abduction & The Dog in the Night-Time."*
+          Reasoning backward from physical traces $O_1, O_2$ and an absent side-effect $\\neg O_3$ to eliminate
+          the naive "Lestrade surface trap" and isolate the unique causal mechanism.
+        - `mode = 2` (`38`, `deduction.sherlock_alibi_contradiction`):
+          *"Forensic Timeline & Alibi Cross-Examination."*
+          Detects which witness testimony violates spatial-temporal travel-time constraints and computes the exact
+          contradiction slack in minutes.
+        - `mode = 3` (`39`, `induction.sherlock_cipher_induction`):
+          *"The Adventure of the Dancing Men — Multi-Layer Cipher Induction."*
+          Induces a hidden multi-stage affine-XOR transformation from 3 intercepted messages and decodes the 4th.
+        """
+        t_val = max(1, int(tier))
+        m_id = int(mode) % 4
+        kind_slot = 36 + m_id
+        hops = 3 + (t_val - 1)
+        mods = self.env_architect.difficulty_mods(kind_slot)
+        stars = compute_star_difficulty(t_val, recursion_depth=hops, mods=mods)
+        skill_name, domain_name = self.env_architect.skill_and_domain(kind_slot)
+
+        a = 4 + ((idx * 7 + self._rng_seed) % (13 + 3 * t_val))
+        b = 3 + ((idx * 11 + self._rng_seed) % (9 + 2 * t_val))
+        c = 2 + ((idx * 5 + t_val) % (7 + t_val))
+
+        if m_id == 0:
+            # Mode 0: Eliminative Deduction ("Eliminate the impossible; whatever remains is the truth")
+            clearance_base = a * b
+            insider_badge = clearance_base + 3 * c
+            outsider_badge = clearance_base - c
+            decoy_badge = clearance_base + c
+            task_id = f"sherlock_elim_t{t_val}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Sherlockian Eliminative Deduction | ★{stars:.2f} | Hops={hops}] "
+                f"A cipher ledger was taken from the Vault between 21:00 and 21:30. Four suspects are on the estate: "
+                f"Badge-{outsider_badge} (external courier), Badge-{clearance_base} (archivist in the Conservatory), "
+                f"Badge-{decoy_badge} (steward without master-key offset), and Badge-{insider_badge} (seniorfellow). "
+                f"Clue 1 (Negative Evidence): The courtyard mastiff did not bark, eliminating any external courier with badge < `{a} * {b} = {clearance_base}`. "
+                f"Clue 2 (Spatial Alibi): The Conservatory register proves the archivist with exact badge `{clearance_base}` never entered the Vault corridor. "
+                f"Clue 3 (Lock Mechanism): The Vault acoustic seal requires a badge equal to `{clearance_base} + 3 * {c}` rather than a single `{c}` offset.\n"
+                f"#Q$# [deduction] Eliminate each impossible suspect step-by-step in `#T$#` and state the remaining culprit's badge number in lowercase with no commas, at least 6 words, including the keyword `eliminated`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:eliminated;exact_int:{insider_badge}"
+            gold_t = (
+                f"First we compute the baseline Vault clearance {a} * {b} = {clearance_base}; since the mastiff did not bark, external courier {outsider_badge} is impossible. "
+                f"Second, the Conservatory alibi eliminates badge {clearance_base}, and the triple acoustic offset 3 * {c} = {3 * c} rules out single-offset badge {decoy_badge}. "
+                f"When we have eliminated the impossible candidates, whatever remains must be the truth: {clearance_base} + {3 * c} = {insider_badge}."
+            )
+            gold_a = f"after impossible suspects are eliminated the culprit badge is {insider_badge}"
+            d1_t = (
+                f"We compute {a} * {b} = {clearance_base} and add a single offset {c} to get {decoy_badge}, overlooking the triple acoustic lock requirement."
+            )
+            d1_a = f"after impossible suspects are eliminated the culprit badge is {decoy_badge}"
+            d2_t = (
+                f"We ignore the silent mastiff negative evidence and select the external courier badge {clearance_base} - {c} = {outsider_badge}."
+            )
+            d2_a = f"After Impossible, Suspects Are Eliminated The Badge Is {outsider_badge}"
+            hack_a = "0"
+            default_scaffold = "abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 1:
+            # Mode 1: Diagnostic Abduction (Backward causal inference from physical traces + negative evidence)
+            base_temp = 20 + (a % 15)
+            cooling_drop = b * c
+            observed_reading = base_temp + cooling_drop
+            lestrade_trap = base_temp + b + c
+            partial_trap = base_temp + 2 * cooling_drop
+            task_id = f"sherlock_abd_t{t_val}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Sherlockian Diagnostic Abduction | ★{stars:.2f} | Hops={hops}] "
+                f"Forensic inspection of the Laboratory reveals three simultaneous facts: "
+                f"(O1) Ambient room baseline is `{base_temp}` units; "
+                f"(O2) The reaction vessel ran for `{b}` cycles at `{c}` units of thermal flux per cycle; "
+                f"(O3 - Negative Clue): The pressure relief valve remained unbroken, which falsifies any runaway hypothesis exceeding `{base_temp + cooling_drop + 5}` units, while Inspector Lestrade's additive guess (`{base_temp} + {b} + {c}`) fails flux conservation.\n"
+                f"#Q$# [abduction] Reason backward from observations (O1, O2, O3) to the unique causal vessel reading in `#T$#` and report the exact integer in lowercase with no commas, at least 6 words, including the keyword `abductive`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:abductive;exact_int:{observed_reading}"
+            gold_t = (
+                f"Reasoning backward from the physical traces, each of the {b} cycles contributes {c} flux units for a multiplicative rise of {b} * {c} = {cooling_drop}. "
+                f"Adding the ambient baseline {base_temp} + {cooling_drop} = {observed_reading} satisfies flux conservation while keeping the relief valve intact, whereas Lestrade's additive hypothesis {lestrade_trap} and runaway hypothesis {partial_trap} contradict the evidence."
+            )
+            gold_a = f"the unique abductive forensic reading is {observed_reading} units"
+            d1_t = (
+                f"Following Inspector Lestrade's surface hypothesis, we add {base_temp} + {b} = {base_temp + b} and + {c} = {lestrade_trap}."
+            )
+            d1_a = f"the unique abductive forensic reading is {lestrade_trap} units"
+            d2_t = (
+                f"Assuming double runaway flux, we compute {base_temp} + {2 * cooling_drop} = {partial_trap}, ignoring the unbroken relief valve."
+            )
+            d2_a = f"The Unique, Abductive Forensic Reading Is {partial_trap} units"
+            hack_a = "0"
+            default_scaffold = "abduction -> association -> deduction -> decision -> metacognition"
+
+        elif m_id == 2:
+            # Mode 2: Forensic Alibi Contradiction & Timeline Cross-Examination
+            dist_ab = (a + 4) * c
+            claimed_minutes = a * c
+            min_required_minutes = dist_ab
+            contradiction_discrepancy = min_required_minutes - claimed_minutes  # == 4 * c
+            wrong_discrepancy_1 = 2 * c
+            wrong_discrepancy_2 = dist_ab + claimed_minutes
+            task_id = f"sherlock_alibi_t{t_val}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Sherlockian Alibi Cross-Examination | ★{stars:.2f} | Hops={hops}] "
+                f"Transit between North Station and the East Wing requires `{a + 4}` corridor segments at `{c}` minutes per segment (`minimum travel time = ({a} + 4) * {c} = {min_required_minutes}` minutes). "
+                f"Witness A's alibi log is consistent (`{min_required_minutes}` minutes elapsed). "
+                f"However, Suspect B claims to have departed North Station and signed the East Wing ledger after only `{a} * {c} = {claimed_minutes}` minutes.\n"
+                f"#Q$# [deduction] Cross-examine Suspect B's timeline in `#T$#` and compute the exact travel-time contradiction deficit (`minimum_required - claimed_minutes`) in lowercase with no commas, at least 6 words, including the keyword `contradiction`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:contradiction;exact_int:{contradiction_discrepancy}"
+            gold_t = (
+                f"Cross-examining the transit graph, the minimum physically possible travel time across {a + 4} segments is ({a + 4}) * {c} = {min_required_minutes} minutes, whereas Suspect B's alibi claims {a} * {c} = {claimed_minutes} minutes. "
+                f"Subtracting {min_required_minutes} - {claimed_minutes} = {contradiction_discrepancy} proves Suspect B's alibi is physically impossible by {contradiction_discrepancy} minutes."
+            )
+            gold_a = f"the forensic alibi contradiction deficit is {contradiction_discrepancy} minutes"
+            d1_t = (
+                f"We underestimate the missing corridor segments and compute 2 * {c} = {wrong_discrepancy_1} minutes."
+            )
+            d1_a = f"the forensic alibi contradiction deficit is {wrong_discrepancy_1} minutes"
+            d2_t = (
+                f"We add the required time and claimed time {min_required_minutes} + {claimed_minutes} = {wrong_discrepancy_2} minutes."
+            )
+            d2_a = f"The Forensic, Alibi Contradiction Deficit Is {wrong_discrepancy_2} minutes"
+            hack_a = "0"
+            default_scaffold = "deduction -> evaluation -> decision -> metacognition"
+
+        else:
+            # Mode 3: Cryptographic & Behavioral Pattern Induction ("The Dancing Men")
+            slope_k = (c % 5) + 2
+            offset_m = a + b
+            x1, x2, x3, x_target = 2, 5, 8, (t_val + 9)
+            y1 = slope_k * x1 + offset_m
+            y2 = slope_k * x2 + offset_m
+            y3 = slope_k * x3 + offset_m
+            y_target = slope_k * x_target + offset_m
+            y_err1 = slope_k * x_target - offset_m
+            y_err2 = (slope_k + 1) * x_target + offset_m
+            task_id = f"sherlock_cipher_t{t_val}_{slope_k}_{offset_m}_{x_target}_{idx}"
+            prompt_q = (
+                f"#U$# [Sherlockian Cipher Induction ('Dancing Men') | ★{stars:.2f} | Hops={hops}] "
+                f"Three intercepted cipher symbols map to numeric codes as follows: "
+                f"`symbol({x1}) -> {y1}`, `symbol({x2}) -> {y2}`, and `symbol({x3}) -> {y3}`. "
+                f"Induce the underlying affine cipher law `solve(x)` that satisfies all three intercepts and evaluate `solve({x_target})`.\n"
+                f"#Q$# [code] Derive the cipher law from the intercepts in `#T$#` and implement `def solve(x):` in `#A$#`."
+            )
+            harness_h = f"assert solve({x_target}) == {y_target} and solve({x1}) == {y1} and solve({x2}) == {y2}"
+            gold_t = (
+                f"Comparing intercepts symbol({x2}) and symbol({x1}), we compute {y2} - {y1} = {y2 - y1} over step {x2} - {x1} = 3, inducing multiplier k = {slope_k}. "
+                f"Substituting x = {x1} gives offset {y1} - {slope_k * x1} = {offset_m}, which verifies {slope_k * x3} + {offset_m} = {y3} and predicts {slope_k * x_target} + {offset_m} = {y_target}."
+            )
+            gold_a = f"def solve(x):\n    return {slope_k} * x + {offset_m}"
+            d1_t = (
+                f"We induce multiplier {slope_k} but subtract the constant offset {offset_m} to get {y_err1}."
+            )
+            d1_a = f"def solve(x):\n    return {slope_k} * x - {offset_m}"
+            d2_t = (
+                f"We miscalculate the finite difference slope as {slope_k + 1} to get {y_err2}."
+            )
+            d2_a = f"def solve(x):\n    return {slope_k + 1} * x + {offset_m}"
+            hack_a = "def solve(x):\n    return 0"
+            default_scaffold = "induction -> abstraction -> deduction -> decision -> metacognition"
+
+        base_cands = (
+            f"#T$# {gold_t}\n#A$# {gold_a}",
+            f"#T$# {d1_t}\n#A$# {d1_a}",
+            f"#T$# {d2_t}\n#A$# {d2_a}",
+            f"#T$# Default fallback.\n#A$# {hack_a}",
+        )
+        base_scores = (1.0, 0.20, 0.10, 0.0)
+        order = [0, 1, 2, 3]
+        shift = idx % 4
+        order[0], order[shift] = order[shift], order[0]
+        p_cands = tuple(base_cands[i] for i in order)
+        p_scores = tuple(base_scores[i] for i in order)
+        g_idx = order.index(0)
+        self._last_task_kinds[task_id] = kind_slot
+        cached_s = self.scaffold_cache.get(task_id, default=default_scaffold)
+        return OrnithTask(
+            task_id=task_id,
+            domain=domain_name,
+            prompt_q=prompt_q,
+            harness_h=harness_h,
+            scaffold_s=cached_s,
+            candidate_rollouts=p_cands,
+            harness_scores=p_scores,
+            gold_index=g_idx,
+            gold_thought=gold_t,
+            gold_answer=gold_a,
+            skill=skill_name,
+            star_difficulty=stars,
+            recursion_depth=hops,
+            difficulty_mods=mods,
+        )
+
     def _synthesize_combinatorial_pipeline_task(self, idx: int, *, tier: int = 1) -> OrnithTask:
         """Synthesize a randomized 3-stage cross-template pipeline ($8 \\times 6 \\times 4 = 192$ combinations)
         with length-matched adversarial multi-stage distractors (Stage-1 vs Stage-2 error propagation).
@@ -1921,9 +2139,19 @@ class OrnithSelfImprover:
         )
 
     def _generate_task(self, idx: int, *, compact: bool = False) -> OrnithTask:
-        """Synthesize a verifiable coding, math, physics, logic, IFEval, specialized benchmark, or infinite-recursive task (#Q$#)."""
-        # Mix curated external HF RLVR tasks (when loaded and non-compact) with live procedural + compositional tasks
-        if not compact and self.external_tasks and (idx % 2 == 1):
+        """Synthesize a verifiable coding, math, physics, logic, Sherlockian deduction/abduction, or infinite-recursive task (#Q$#)."""
+        # Mix curated external HF RLVR tasks with live procedural, Sherlockian, & compositional tasks.
+        # Once `general.reasoning` saturates on the osu! PP leaderboard (weight 0.95^(n-1) < 0.25 after ~25 plays),
+        # automatically route 75% of external slots into the Sherlockian Advanced Reasoning & Recursive engines!
+        gen_plays = self.pp_leaderboard.play_counts.get("general.reasoning", 0)
+        gen_weight = PP_DECAY_BASE ** max(0, gen_plays)
+        use_external = (
+            not compact
+            and bool(self.external_tasks)
+            and (idx % 2 == 1)
+            and (gen_weight >= 0.25 or (idx % 8 == 1))
+        )
+        if use_external:
             ext_idx = ((idx // 2) * 131 + self._rng_seed) % len(self.external_tasks)
             ext_task = self.external_tasks[ext_idx]
             cached_s = self.scaffold_cache.get(
@@ -1936,13 +2164,19 @@ class OrnithSelfImprover:
             idx, seed=self._rng_seed, pp_leaderboard=self.pp_leaderboard
         )
         tier = self.env_architect.difficulty_tier(kind)
+        if not compact and 36 <= kind < 40:
+            return self._synthesize_sherlock_reasoning_task(idx, tier=tier, mode=kind - 36)
         if not compact and kind == 34:
             return self._synthesize_infinite_recursive_task(idx, tier=tier, mode="chain")
         if not compact and kind == 35:
             return self._synthesize_infinite_recursive_task(idx, tier=tier, mode="code_recursion")
-        # For online training steps beyond the initial 36-family sweep, dynamically invoke the 192-pipeline
-        # combinatorial synthesizer on compositional slots (20..23) or every 6th step, and infinite-recursion on every 8th step.
+        # For online training steps beyond the initial 40-family sweep, dynamically invoke Sherlockian reasoning,
+        # the 192-pipeline combinatorial synthesizer, and infinite-horizon recursion.
         if not compact and idx >= self.env_architect.TOTAL_FAMILIES:
+            if idx % 5 == 4:
+                sh_mode = (idx // 5) % 4
+                sh_tier = max(tier, self.env_architect.difficulty_tier(36 + sh_mode))
+                return self._synthesize_sherlock_reasoning_task(idx, tier=sh_tier, mode=sh_mode)
             if idx % 8 == 7:
                 rec_mode = "code_recursion" if (idx // 8) % 2 == 1 else "chain"
                 return self._synthesize_infinite_recursive_task(idx, tier=max(tier, 2), mode=rec_mode)

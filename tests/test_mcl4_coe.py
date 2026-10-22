@@ -2672,12 +2672,12 @@ def test_ornith_pp_weighting_granular_skills_and_infinite_recursion() -> None:
     assert breakthrough.skill_weight == pytest.approx(1.0)
     assert breakthrough.delta_skill_pp > 40.0
 
-    # 3. Verify all 36 granular skills & specialized benchmark families (0..35) verify gold == 1.0 and hack == 0.0
-    assert len(SKILL_TAXONOMY) == 36
+    # 3. Verify all 40 granular skills & specialized/Sherlockian families (0..39) verify gold == 1.0 and hack == 0.0
+    assert len(SKILL_TAXONOMY) == 40
     improver = OrnithSelfImprover(projection_dim=16, max_seq_len=384)
     seen_skills: set[str] = set()
     seen_domains: set[str] = set()
-    for k in range(36):
+    for k in range(40):
         t = improver._generate_task(k, compact=False)
         seen_skills.add(t.skill)
         seen_domains.add(t.domain)
@@ -2687,7 +2687,7 @@ def test_ornith_pp_weighting_granular_skills_and_infinite_recursion() -> None:
         )
         assert min(verify_python_rollout(c, t.harness_h, t.gold_answer) for c in t.candidate_rollouts) == 0.0
 
-    assert len(seen_skills) == 36
+    assert len(seen_skills) == 40
     for req_dom in (
         "arc_science",
         "arc_physics",
@@ -2700,6 +2700,10 @@ def test_ornith_pp_weighting_granular_skills_and_infinite_recursion() -> None:
         "mmlu_cs_systems",
         "recursive_code",
         "infinite_recursion",
+        "sherlock_eliminative_deduction",
+        "sherlock_diagnostic_abduction",
+        "sherlock_forensic_timeline",
+        "sherlock_pattern_induction",
     ):
         assert req_dom in seen_domains
 

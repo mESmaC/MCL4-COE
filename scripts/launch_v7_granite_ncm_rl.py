@@ -93,7 +93,7 @@ def build_v7_granite_ncm_pure_rl_config(
         mitosis_step_size=0,
         mitosis_milestones=(),
         clear_consumed_shards=False,
-        mitotic_ortho_coef=0.0,
+        mitotic_ortho_coef=0.02 if num_experts > 32 else 0.0,
         sequence_diversity_coef=0.02,
         recurrent_coverage_penalty=0.20,
         projection_dim=256,

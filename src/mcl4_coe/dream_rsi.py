@@ -288,10 +288,31 @@ def _view(
     return View(tuple(nodes), round_index, max_rounds, max_calls, workers, rho)
 
 
+def _fast_view(
+    nodes: Sequence[Node],
+    round_index: int,
+    max_rounds: int,
+    max_calls: int,
+    workers: int,
+    rho: float,
+) -> View:
+    v = object.__new__(View)
+    object.__setattr__(v, "nodes", nodes if isinstance(nodes, tuple) else tuple(nodes))
+    object.__setattr__(v, "round_index", round_index)
+    object.__setattr__(v, "max_rounds", max_rounds)
+    object.__setattr__(v, "max_calls", max_calls)
+    object.__setattr__(v, "workers", workers)
+    object.__setattr__(v, "rho", float(rho))
+    return v
+
+
 def _action(policy: Policy, view: View) -> tuple[int, ...]:
-    answer = policy(
-        _view(view.nodes, view.round_index, view.max_rounds, view.max_calls, view.workers, view.rho)
+    arg_view = (
+        _fast_view(view.nodes, view.round_index, view.max_rounds, view.max_calls, view.workers, view.rho)
+        if isinstance(policy, Program)
+        else _view(view.nodes, view.round_index, view.max_rounds, view.max_calls, view.workers, view.rho)
     )
+    answer = policy(arg_view)
     if not isinstance(answer, Sequence) or isinstance(answer, (str, bytes)):
         raise ValueError("policy must return a sequence of eligible node ids")
     action = tuple(answer)
@@ -338,14 +359,10 @@ def online_rollout(
             break
         additions = []
         executed = []
-        for parent_id in action:
-            if should_stop is not None and should_stop():
-                stopped = True
-                break
-            node_id = len(nodes) + len(additions)
+        if len(action) > 1 and hasattr(discover, "discover_batch") and should_stop is None:
             try:
-                outcome = discover(
-                    _view(
+                outcomes = discover.discover_batch(
+                    _fast_view(
                         view.nodes,
                         view.round_index,
                         max_rounds,
@@ -353,20 +370,56 @@ def online_rollout(
                         workers,
                         rho,
                     ),
-                    parent_id,
-                    node_id,
+                    action,
+                    len(nodes),
                 )
+                for idx_a, (parent_id, outcome) in enumerate(zip(action, outcomes)):
+                    if type(outcome) is not Outcome:
+                        raise ValueError("discover must return an Outcome")
+                    node_id = len(nodes) + idx_a
+                    additions.append(Node(node_id, parent_id, outcome.score, outcome.observation))
+                    executed.append(parent_id)
             except DiscoveryStopped:
                 stopped = True
-                break
-            if type(outcome) is not Outcome:
-                raise ValueError("discover must return an Outcome")
-            additions.append(Node(node_id, parent_id, outcome.score, outcome.observation))
-            executed.append(parent_id)
+        else:
+            for parent_id in action:
+                if should_stop is not None and should_stop():
+                    stopped = True
+                    break
+                node_id = len(nodes) + len(additions)
+                try:
+                    outcome = discover(
+                        _fast_view(
+                            view.nodes,
+                            view.round_index,
+                            max_rounds,
+                            max_calls,
+                            workers,
+                            rho,
+                        )
+                        if hasattr(discover, "discover_batch")
+                        else _view(
+                            view.nodes,
+                            view.round_index,
+                            max_rounds,
+                            max_calls,
+                            workers,
+                            rho,
+                        ),
+                        parent_id,
+                        node_id,
+                    )
+                except DiscoveryStopped:
+                    stopped = True
+                    break
+                if type(outcome) is not Outcome:
+                    raise ValueError("discover must return an Outcome")
+                additions.append(Node(node_id, parent_id, outcome.score, outcome.observation))
+                executed.append(parent_id)
         nodes.extend(additions)
         if executed:
             actions.append(tuple(executed))
-        view = _view(nodes, len(actions), max_rounds, max_calls, workers, rho)
+        view = _fast_view(nodes, len(actions), max_rounds, max_calls, workers, rho)
         if stopped:
             break
     world = World(world_id, tuple(nodes), initial.metadata)
@@ -385,7 +438,8 @@ def replay(
 ) -> ReplayResult:
     """Replay `policy` over a recorded `World` at zero model/verifier execution cost."""
     _check_stop(should_stop)
-    world = World.from_dict(world.to_dict())
+    if not (type(world) is World and isinstance(policy, Program)):
+        world = World.from_dict(world.to_dict())
     children: dict[int, list[Node]] = {}
     for node in world.nodes[1:]:
         children.setdefault(node.parent, []).append(node)
@@ -393,7 +447,7 @@ def replay(
     seen = {0}
     actions: list[tuple[int, ...]] = []
     exhausted = 0
-    view = _view(revealed, 0, max_rounds, max_calls, workers, rho)
+    view = _fast_view(revealed, 0, max_rounds, max_calls, workers, rho)
     while (
         view.round_index < max_rounds
         and view.calls < max_calls
@@ -416,7 +470,7 @@ def replay(
                 seen.add(child.id)
         revealed.extend(additions)
         actions.append(action)
-        view = _view(revealed, len(actions), max_rounds, max_calls, workers, rho)
+        view = _fast_view(revealed, len(actions), max_rounds, max_calls, workers, rho)
     _check_stop(should_stop)
     best = max((node.score for node in revealed[1:]), default=0.0)
     return ReplayResult(
@@ -454,7 +508,11 @@ def score_policy(
     total_replays = 0
     for original in worlds:
         _check_stop(should_stop)
-        world = World.from_dict(original.to_dict())
+        world = (
+            original
+            if (type(original) is World and isinstance(policy, Program))
+            else World.from_dict(original.to_dict())
+        )
         count = len(world.nodes) - 1
         ceiling = max((node.score for node in world.nodes[1:]), default=0.0)
         runs = []
@@ -833,7 +891,7 @@ def improve_policy(
     for world in worlds:
         if should_stop is not None and should_stop():
             raise DiscoveryStopped("Dream-RSI historical replay stopped")
-        copied_worlds.append(World.from_dict(world.to_dict()))
+        copied_worlds.append(world if type(world) is World else World.from_dict(world.to_dict()))
     worlds = tuple(copied_worlds)
     rhos = tuple(rhos)
     options = dict(
@@ -1190,17 +1248,47 @@ class MCL4DreamDiscovery:
             else next(coe.parameters()).device
         )
         self._node_embeddings: list[torch.Tensor] = []
+        self._max_tok_len = max(self.max_seq_len, 512)
+        self._vocab_size = int(getattr(self.coe.backbone.config, "vocab_size", 260))
+        self._bounded_descs = tuple(
+            d.encode("utf-8")[: self._max_tok_len - 4].decode("utf-8", errors="ignore")
+            for d in self.task.candidate_rollouts
+        )
+        from .data import get_tokenizer
+
+        self._tok = get_tokenizer(self._vocab_size)
+        pad_id = self._tok.pad_id
+        opt_rows: list[list[int]] = []
+        opt_lens: list[int] = []
+        for desc in self._bounded_descs:
+            ids = self._tok.encode(desc, add_bos=True, add_eos=True)[: self._max_tok_len]
+            opt_lens.append(len(ids))
+            opt_rows.append(ids)
+        max_o = max(opt_lens)
+        self._opt_ids_1 = torch.tensor(
+            [[ r + [pad_id] * (max_o - len(r)) for r in opt_rows ]],
+            dtype=torch.long,
+            device=self.device,
+        )
+        self._opt_lens_1 = torch.tensor([opt_lens], dtype=torch.long, device=self.device)
+        self._targets_1 = torch.tensor(
+            [self.task.gold_index], dtype=torch.long, device=self.device
+        )
+        self._h_scores = torch.tensor(
+            self.task.harness_scores, device=self.device, dtype=torch.float32
+        )
+        self._cached_cand_encoded: Any | None = None
 
     synthesize_operator_scaffold = staticmethod(synthesize_operator_scaffold)
 
-    @torch.no_grad()
-    def __call__(self, view: View, parent_id: int, node_id: int) -> Outcome:
-        from .data import DecisionExample, collate_decisions
-        from .operators import pearson_similarity
-
+    def _prepare_node_context(
+        self, view: View, parent_id: int, node_id: int, extra_root_children: int = 0
+    ) -> tuple[int, str, list[int]]:
         ancestors = _ancestry_chain(view, parent_id)
         depth = len(ancestors) - 1
-        root_children_count = sum(1 for n in view.nodes[1:] if n.parent == 0)
+        root_children_count = (
+            sum(1 for n in view.nodes[1:] if n.parent == 0) + extra_root_children
+        )
 
         if parent_id == 0:
             scaffold_idx = root_children_count % len(_SCAFFOLD_BRANCHES)
@@ -1228,7 +1316,9 @@ class MCL4DreamDiscovery:
                     else 0
                 )
                 step_shift = 2 if parent_vetoed else 1
-                scaffold = _SCAFFOLD_BRANCHES[(base_idx + step_shift + depth) % len(_SCAFFOLD_BRANCHES)]
+                scaffold = _SCAFFOLD_BRANCHES[
+                    (base_idx + step_shift + depth) % len(_SCAFFOLD_BRANCHES)
+                ]
 
         ancestor_trace = []
         for anc in ancestors[1:][-3:]:
@@ -1240,43 +1330,82 @@ class MCL4DreamDiscovery:
         history_block = (
             "\n#H_ANC$# " + " | ".join(ancestor_trace) if ancestor_trace else ""
         )
-        max_tok_len = max(self.max_seq_len, 512)
+        max_tok_len = self._max_tok_len
         suffix = f"\n#S$# {scaffold}"
         prefix = f"{self.task.prompt_q}{history_block}"
         max_prefix_bytes = max(64, max_tok_len - len(suffix.encode("utf-8")) - 4)
-        prefix_trimmed = prefix.encode("utf-8")[:max_prefix_bytes].decode("utf-8", errors="ignore")
+        prefix_trimmed = prefix.encode("utf-8")[:max_prefix_bytes].decode(
+            "utf-8", errors="ignore"
+        )
         context_text = f"{prefix_trimmed}{suffix}"
-        bounded_descs = tuple(
-            d.encode("utf-8")[: max_tok_len - 4].decode("utf-8", errors="ignore")
-            for d in self.task.candidate_rollouts
+        c_ids = self._tok.encode(context_text, add_bos=True, add_eos=True)[:max_tok_len]
+        return depth, scaffold, c_ids
+
+    def _ensure_cand_encoded(self) -> None:
+        if self._cached_cand_encoded is not None:
+            return
+        from .operators import _canonical_candidate_order
+
+        valid_options = self._opt_lens_1 > 0
+        valid_lengths = self._opt_lens_1[valid_options]
+        opt_width = int(valid_lengths.max().item())
+        flat_opt_ids = self._opt_ids_1[valid_options][:, :opt_width].long()
+        owner_rows = valid_options.nonzero(as_tuple=False)[:, 0]
+        perm, _ = _canonical_candidate_order(owner_rows, valid_lengths, flat_opt_ids)
+        canon_opt_ids = flat_opt_ids.index_select(0, perm)
+        canon_lengths = valid_lengths.index_select(0, perm)
+        canon_valid = (
+            torch.arange(opt_width, device=self.device)[None, :] < canon_lengths[:, None]
+        )
+        self._cached_cand_encoded = self.coe.backbone.encode_state(
+            canon_opt_ids, canon_valid, causal=True
         )
 
-        ex = DecisionExample(
-            question_id=f"{self.task.task_id}_n{node_id}",
-            kind="choice",
-            context=context_text,
-            descriptions=bounded_descs,
-            values=("opt_0", "opt_1", "opt_2", "opt_3"),
-            target=self.task.gold_index,
-        )
-        batch = collate_decisions(
-            [ex],
-            max_tok_len,
+    @torch.no_grad()
+    def discover_batch(
+        self, view: View, parent_ids: Sequence[int], start_node_id: int
+    ) -> list[Outcome]:
+        from .backbone import EncodedState
+        from .operators import pearson_similarity
+
+        b_cnt = len(parent_ids)
+        if b_cnt == 1:
+            return [self(view, parent_ids[0], start_node_id)]
+
+        depths: list[int] = []
+        scaffolds: list[str] = []
+        ctx_rows: list[list[int]] = []
+        extra_roots = 0
+        for idx_i, pid in enumerate(parent_ids):
+            d, sc, c_ids = self._prepare_node_context(
+                view, pid, start_node_id + idx_i, extra_root_children=extra_roots
+            )
+            if pid == 0:
+                extra_roots += 1
+            depths.append(d)
+            scaffolds.append(sc)
+            ctx_rows.append(c_ids)
+
+        pad_id = self._tok.pad_id
+        max_c = max(len(r) for r in ctx_rows)
+        ctx_ids = torch.tensor(
+            [r + [pad_id] * (max_c - len(r)) for r in ctx_rows],
+            dtype=torch.long,
             device=self.device,
-            vocab_size=int(getattr(self.coe.backbone.config, "vocab_size", 260)),
         )
-        ctx_ids = batch["context_ids"]
-        ctx_lens = batch["context_lengths"]
-        opt_ids = batch["option_ids"]
-        opt_lens = batch["option_lengths"]
-        targets = batch["targets"]
+        ctx_lens = torch.tensor(
+            [len(r) for r in ctx_rows], dtype=torch.long, device=self.device
+        )
+        opt_ids = self._opt_ids_1.expand(b_cnt, -1, -1)
+        opt_lens = self._opt_lens_1.expand(b_cnt, -1)
+        targets = self._targets_1.expand(b_cnt)
 
         use_amp = self.device.type == "cuda"
         op_kwargs: dict[str, Any] = {}
         if (
             int(getattr(self.coe.backbone.config, "num_experts", 4))
             * int(getattr(self.coe.backbone.config, "d_model", 128))
-        ) >= 65536:
+        ) >= 16384:
             op_kwargs = {
                 "recurrence_steps": 1,
                 "depth_ponder": False,
@@ -1285,20 +1414,132 @@ class MCL4DreamDiscovery:
         with torch.autocast(
             device_type=self.device.type, dtype=torch.bfloat16, enabled=use_amp
         ):
+            self._ensure_cand_encoded()
+            base_ce = self._cached_cand_encoded
+            tiled_ce = EncodedState(
+                hidden=base_ce.hidden.repeat(b_cnt, 1, 1),
+                valid=base_ce.valid.repeat(b_cnt, 1),
+                aux_loss=base_ce.aux_loss,
+                router_z_loss=base_ce.router_z_loss,
+                expert_load=base_ce.expert_load,
+                raw_hidden=(
+                    base_ce.raw_hidden.repeat(b_cnt, 1, 1)
+                    if base_ce.raw_hidden is not None
+                    else None
+                ),
+            )
             op_out = self.coe.forward_all_operators(
-                ctx_ids, ctx_lens, opt_ids, opt_lens, targets, **op_kwargs
+                ctx_ids,
+                ctx_lens,
+                opt_ids,
+                opt_lens,
+                targets,
+                candidate_encoded=tiled_ce,
+                **op_kwargs,
+            )
+            s_feats = op_out.decision.state_features.detach().float()
+            q_embs = F.normalize(
+                s_feats - s_feats.mean(dim=-1, keepdim=True), dim=-1, eps=1e-6
+            )
+
+        probs_all = op_out.decision.probabilities.float()
+        ref_utils_all = op_out.evaluation_utilities.float().view(b_cnt, -1)
+        outcomes: list[Outcome] = []
+        for idx_i, pid in enumerate(parent_ids):
+            node_id = start_node_id + idx_i
+            depth = depths[idx_i]
+            scaffold = scaffolds[idx_i]
+            probs = probs_all[idx_i]
+            q_emb = q_embs[idx_i : idx_i + 1]
+            expected_verdict = float((probs * self._h_scores).sum().item())
+            gold_prob = float(probs[self.task.gold_index].item())
+            best_rollout_idx = int(probs.argmax().item())
+            picked_verdict = float(self._h_scores[best_rollout_idx].item())
+
+            ded_entailed = float(op_out.deduction_probs[idx_i, 0].item())
+            ded_contradicted = float(op_out.deduction_probs[idx_i, 1].item())
+            meta_confidence = float(op_out.metacognition_probs[idx_i, 0].item())
+            vetoed = (ded_contradicted > 0.55) or (meta_confidence < 0.35)
+            utility = float(ref_utils_all[idx_i, best_rollout_idx].clamp(0.0, 1.0).item())
+
+            if not self._node_embeddings:
+                novelty = 1.0
+            else:
+                prev_stack = torch.cat(self._node_embeddings, dim=0)
+                sims = pearson_similarity(q_emb.expand_as(prev_stack), prev_stack)
+                novelty = float((1.0 - sims.max().clamp(-1.0, 1.0)).clamp(0.0, 2.0).item())
+            self._node_embeddings.append(q_emb.detach())
+
+            depth_bonus = min(0.08, 0.025 * depth) if not vetoed else -0.05
+            raw_score = (
+                0.65 * expected_verdict
+                + 0.25 * picked_verdict
+                + 0.10 * gold_prob
+                + depth_bonus
+            )
+            score = round(max(0.0, min(1.0, raw_score)), 5)
+            observation = {
+                "node_id": node_id,
+                "parent_id": pid,
+                "depth": depth + 1,
+                "scaffold": scaffold,
+                "best_rollout_index": best_rollout_idx,
+                "expected_verdict": round(expected_verdict, 5),
+                "gold_prob": round(gold_prob, 5),
+                "utility": round(utility, 5),
+                "novelty": round(novelty, 5),
+                "confidence": round(meta_confidence, 5),
+                "deduction_entailed": round(ded_entailed, 5),
+                "vetoed": vetoed,
+            }
+            outcomes.append(Outcome(score=score, observation=observation))
+        return outcomes
+
+    @torch.no_grad()
+    def __call__(self, view: View, parent_id: int, node_id: int) -> Outcome:
+        from .operators import pearson_similarity
+
+        depth, scaffold, c_ids = self._prepare_node_context(view, parent_id, node_id)
+        ctx_ids = torch.tensor([c_ids], dtype=torch.long, device=self.device)
+        ctx_lens = torch.tensor([len(c_ids)], dtype=torch.long, device=self.device)
+        opt_ids = self._opt_ids_1
+        opt_lens = self._opt_lens_1
+        targets = self._targets_1
+
+        use_amp = self.device.type == "cuda"
+        op_kwargs: dict[str, Any] = {}
+        if (
+            int(getattr(self.coe.backbone.config, "num_experts", 4))
+            * int(getattr(self.coe.backbone.config, "d_model", 128))
+        ) >= 16384:
+            op_kwargs = {
+                "recurrence_steps": 1,
+                "depth_ponder": False,
+                "margin_halt_threshold": None,
+            }
+        with torch.autocast(
+            device_type=self.device.type, dtype=torch.bfloat16, enabled=use_amp
+        ):
+            self._ensure_cand_encoded()
+            op_out = self.coe.forward_all_operators(
+                ctx_ids,
+                ctx_lens,
+                opt_ids,
+                opt_lens,
+                targets,
+                candidate_encoded=self._cached_cand_encoded,
+                **op_kwargs,
             )
             s_feat = op_out.decision.state_features[:1].detach().float()
-            q_emb = F.normalize(s_feat - s_feat.mean(dim=-1, keepdim=True), dim=-1, eps=1e-6)
+            q_emb = F.normalize(
+                s_feat - s_feat.mean(dim=-1, keepdim=True), dim=-1, eps=1e-6
+            )
 
-        probs = op_out.decision.probabilities[0].float()  # [4]
-        h_scores = torch.tensor(
-            self.task.harness_scores, device=self.device, dtype=torch.float32
-        )
-        expected_verdict = float((probs * h_scores).sum().item())
+        probs = op_out.decision.probabilities[0].float()
+        expected_verdict = float((probs * self._h_scores).sum().item())
         gold_prob = float(probs[self.task.gold_index].item())
         best_rollout_idx = int(probs.argmax().item())
-        picked_verdict = float(h_scores[best_rollout_idx].item())
+        picked_verdict = float(self._h_scores[best_rollout_idx].item())
 
         ded_entailed = float(op_out.deduction_probs[0, 0].item())
         ded_contradicted = float(op_out.deduction_probs[0, 1].item())
@@ -1316,9 +1557,13 @@ class MCL4DreamDiscovery:
             novelty = float((1.0 - sims.max().clamp(-1.0, 1.0)).clamp(0.0, 2.0).item())
         self._node_embeddings.append(q_emb.detach())
 
-        # Deeper refinement nodes that pass Metacognition/Deduction checks unlock higher branch fidelity
         depth_bonus = min(0.08, 0.025 * depth) if not vetoed else -0.05
-        raw_score = 0.65 * expected_verdict + 0.25 * picked_verdict + 0.10 * gold_prob + depth_bonus
+        raw_score = (
+            0.65 * expected_verdict
+            + 0.25 * picked_verdict
+            + 0.10 * gold_prob
+            + depth_bonus
+        )
         score = round(max(0.0, min(1.0, raw_score)), 5)
 
         observation = {
@@ -1506,7 +1751,7 @@ class MCL4PolicyProposer:
             dynamic_candidates.append(incumbent)
 
         if self.coe is not None and len(dynamic_candidates) >= 4:
-            from .data import DecisionExample, collate_decisions
+            from .data import get_tokenizer
 
             dev = next(self.coe.parameters()).device
             offset = (revision + self._call_count - 2) % len(dynamic_candidates)
@@ -1518,45 +1763,85 @@ class MCL4PolicyProposer:
                 f"hv={mean_hv:.4f}, penalty={mean_penalty:.4f}\n"
                 f"#Q$# Select the 6-line exploration policy that maximizes Pareto hypervolume."
             )
-            ex = DecisionExample(
-                question_id=f"dream_rev_{revision}",
-                kind="choice",
-                context=fb_prompt,
-                descriptions=tuple(c.to_text() for c in four_cands),
-                values=("p0", "p1", "p2", "p3"),
-                target=0,
-            )
-            batch = collate_decisions(
-                [ex],
-                512,
+            vocab_size = int(getattr(self.coe.backbone.config, "vocab_size", 260))
+            tok = get_tokenizer(vocab_size)
+            pad_id = tok.pad_id
+            ctx_toks = tok.encode(fb_prompt, add_bos=True, add_eos=True)[:256]
+            cand_rows = [
+                tok.encode(c.to_text(), add_bos=True, add_eos=True)[:128]
+                for c in four_cands
+            ]
+            max_o = max(len(r) for r in cand_rows)
+            ctx_ids = torch.tensor([ctx_toks], dtype=torch.long, device=dev)
+            ctx_valid = torch.ones_like(ctx_ids, dtype=torch.bool)
+            opt_ids = torch.tensor(
+                [r + [pad_id] * (max_o - len(r)) for r in cand_rows],
+                dtype=torch.long,
                 device=dev,
-                vocab_size=int(getattr(self.coe.backbone.config, "vocab_size", 260)),
             )
+            opt_valid = torch.tensor(
+                [[i < len(r) for i in range(max_o)] for r in cand_rows],
+                dtype=torch.bool,
+                device=dev,
+            )
+            owner_rows = torch.zeros(4, dtype=torch.long, device=dev)
             use_amp = dev.type == "cuda"
-            op_kwargs: dict[str, Any] = {}
-            if (
-                int(getattr(self.coe.backbone.config, "num_experts", 4))
-                * int(getattr(self.coe.backbone.config, "d_model", 128))
-            ) >= 65536:
-                op_kwargs = {
-                    "recurrence_steps": 1,
-                    "depth_ponder": False,
-                    "margin_halt_threshold": None,
-                }
             with torch.autocast(
                 device_type=dev.type, dtype=torch.bfloat16, enabled=use_amp
             ):
-                op_out = self.coe.forward_all_operators(
-                    batch["context_ids"],
-                    batch["context_lengths"],
-                    batch["option_ids"],
-                    batch["option_lengths"],
-                    batch["targets"],
-                    **op_kwargs,
+                emb_mult = float(
+                    getattr(self.coe.backbone.config, "embedding_multiplier", 1.0)
                 )
-            d_probs = op_out.decision.probabilities[0].float()
-            e_utils = op_out.evaluation_utilities.float().view(-1).clamp(0.0, 1.0)
-            m_conf = op_out.metacognition_probs[:, 0].float().view(-1).clamp(0.0, 1.0)
+                ctx_h = (
+                    self.coe.backbone.encoder_norm(
+                        self.coe.backbone.token_embedding(ctx_ids) * emb_mult
+                    )
+                    * ctx_valid.unsqueeze(-1)
+                )
+                opt_h = (
+                    self.coe.backbone.final_norm(
+                        self.coe.backbone.token_embedding(opt_ids) * emb_mult
+                    )
+                    * opt_valid.unsqueeze(-1)
+                )
+                paired_state_repr, cand_repr = (
+                    self.coe.pooler.matched_pair_representations(
+                        ctx_h,
+                        ctx_ids,
+                        ctx_valid,
+                        opt_h,
+                        opt_ids,
+                        opt_valid,
+                        owner_rows=owner_rows,
+                    )
+                )
+                from .operators import pearson_similarity
+
+                s_proj = self.coe.state_projection(paired_state_repr)
+                c_proj = self.coe.output_projection(cand_repr)
+                sims = self.coe._similarity(s_proj, c_proj)
+                scale = self.coe._scale()
+                d_probs = (sims.float() * scale).softmax(dim=-1)
+                e_utils = (
+                    (sims.float() * self.coe.assoc_alpha.float() + self.coe.assoc_beta.float())
+                    .sigmoid()
+                    .view(-1)
+                    .clamp(0.0, 1.0)
+                )
+                meta_joint = self.coe.meta_query_proj(
+                    torch.cat([paired_state_repr, cand_repr], dim=-1)
+                )
+                meta_sims = pearson_similarity(
+                    meta_joint.unsqueeze(1),
+                    self.coe.meta_prototypes.unsqueeze(0),
+                    eps=self.coe.config.eps,
+                )
+                m_conf = (
+                    (meta_sims.float() * scale + self.coe.meta_bias.float().unsqueeze(0))
+                    .sigmoid()[:, 0]
+                    .view(-1)
+                    .clamp(0.0, 1.0)
+                )
             joint_score = 0.60 * d_probs + 0.25 * e_utils + 0.15 * m_conf
             pick = int(joint_score.argmax().item())
             chosen = four_cands[pick]
@@ -1764,7 +2049,8 @@ class DreamRSIEngine:
                 "active_policy": self.state.program.to_text(),
             }
         )
-        self.save_artifacts(imp)
+        if cycle_idx <= 4 or cycle_idx % 20 == 0 or imp["accepted_revision"] > 0:
+            self.save_artifacts(imp)
 
         return DreamCycleOutput(
             cycle=cycle_idx,

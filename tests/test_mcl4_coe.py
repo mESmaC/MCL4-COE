@@ -2588,6 +2588,7 @@ def test_olmoe_graft_equivalence_and_inplace_mitosis(tmp_path) -> None:
         run_id="test_olmoe_inplace_mitosis",
         runs_root=str(runs_dir),
         shards_root=str(shards_dir),
+        corpora_root=str(tmp_path / "no_corpora"),
         vocab_size=260,
         max_seq_len=16,
         d_model=32,

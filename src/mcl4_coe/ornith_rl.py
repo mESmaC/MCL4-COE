@@ -2021,7 +2021,7 @@ class OrnithSelfImprover:
 
         num_exp = int(getattr(coe.backbone.config, "num_experts", 4))
         d_mod = int(getattr(coe.backbone.config, "d_model", 128))
-        high_expert_mode = num_exp >= 256 or (num_exp * d_mod >= 65536)
+        high_expert_mode = num_exp >= 256 or (num_exp * d_mod >= 16384)
         if high_expert_mode and batch_size > 1:
             batch_size = 1
 
@@ -2251,7 +2251,7 @@ class OrnithSelfImprover:
             assert lm_distill_out.loss is not None
             self_distill_loss = 0.85 * decision_distill_loss + 0.15 * lm_distill_out.loss
         else:
-            lm_distill_out = coe.forward_inference(inp_tensor, targets=None, **inf_kwargs)
+            lm_distill_out = None
             self_distill_loss = decision_distill_loss
 
         # LiquidAI Antidoom FTPO (supports ByteTokenizer, MorphCode-16K, and DonorHFTokenizer):
@@ -2259,77 +2259,78 @@ class OrnithSelfImprover:
         ftpo_pos_logits: list[Tensor] = []
         ftpo_rej_ids: list[int] = []
         ftpo_cho_ids: list[list[int]] = []
-        with torch.no_grad():
-            if is_hf_donor:
-                low_s, low_e = getattr(self.tokenizer, "invalid_logit_slice_low", (1, 19))
-                high_s = int(getattr(self.tokenizer, "invalid_logit_start_high", 49152))
-                masked_l = lm_distill_out.logits.detach().clone()
-                masked_l[:, :, low_s:low_e] = -torch.inf
-                if vocab_size > high_s:
-                    masked_l[:, :, high_s:] = -torch.inf
-                pred_ids = masked_l.argmax(dim=-1)
-            elif vocab_size > 1024:
-                masked_l = lm_distill_out.logits.detach().clone()
-                masked_l[:, :, :10] = -torch.inf
-                masked_l[:, :, 11:32] = -torch.inf
-                masked_l[:, :, 127:260] = -torch.inf
-                pred_ids = masked_l.argmax(dim=-1)
-            else:
-                pred_ids = lm_distill_out.logits[:, :, :256].argmax(dim=-1)
-        for b_i in range(inp_tensor.size(0)):
-            valid_pos = (lbl_tensor[b_i] != -100).nonzero(as_tuple=False).squeeze(-1)
-            if valid_pos.numel() < 4:
-                start_p = min(prompt_lens[b_i], inp_tensor.size(1) - 1)
-                end_p = len(inp_rows[b_i])
-                if end_p - start_p < 4:
-                    continue
-                valid_pos = torch.arange(start_p, end_p, dtype=torch.long, device=self.device)
-            seq_preds = pred_ids[b_i, valid_pos].tolist()
-            loop_hit = detect_doom_loop(seq_preds, min_period=3, max_period=48, min_repeats=2, min_total_repeated=6)
-            if loop_hit is not None:
-                trig_local, rej_tok, _ = loop_hit
-                pos_idx = int(valid_pos[min(trig_local, valid_pos.numel() - 1)].item())
-                gold_tok = int(inp_tensor[b_i, min(pos_idx + 1, inp_tensor.size(1) - 1)].item())
-                if lbl_tensor[b_i, pos_idx].item() != -100:
+        if lm_distill_out is not None:
+            with torch.no_grad():
+                if is_hf_donor:
+                    low_s, low_e = getattr(self.tokenizer, "invalid_logit_slice_low", (1, 19))
+                    high_s = int(getattr(self.tokenizer, "invalid_logit_start_high", 49152))
+                    masked_l = lm_distill_out.logits.detach().clone()
+                    masked_l[:, :, low_s:low_e] = -torch.inf
+                    if vocab_size > high_s:
+                        masked_l[:, :, high_s:] = -torch.inf
+                    pred_ids = masked_l.argmax(dim=-1)
+                elif vocab_size > 1024:
+                    masked_l = lm_distill_out.logits.detach().clone()
+                    masked_l[:, :, :10] = -torch.inf
+                    masked_l[:, :, 11:32] = -torch.inf
+                    masked_l[:, :, 127:260] = -torch.inf
+                    pred_ids = masked_l.argmax(dim=-1)
+                else:
+                    pred_ids = lm_distill_out.logits[:, :, :256].argmax(dim=-1)
+            for b_i in range(inp_tensor.size(0)):
+                valid_pos = (lbl_tensor[b_i] != -100).nonzero(as_tuple=False).squeeze(-1)
+                if valid_pos.numel() < 4:
+                    start_p = min(prompt_lens[b_i], inp_tensor.size(1) - 1)
+                    end_p = len(inp_rows[b_i])
+                    if end_p - start_p < 4:
+                        continue
+                    valid_pos = torch.arange(start_p, end_p, dtype=torch.long, device=self.device)
+                seq_preds = pred_ids[b_i, valid_pos].tolist()
+                loop_hit = detect_doom_loop(seq_preds, min_period=3, max_period=48, min_repeats=2, min_total_repeated=6)
+                if loop_hit is not None:
+                    trig_local, rej_tok, _ = loop_hit
+                    pos_idx = int(valid_pos[min(trig_local, valid_pos.numel() - 1)].item())
+                    gold_tok = int(inp_tensor[b_i, min(pos_idx + 1, inp_tensor.size(1) - 1)].item())
+                    if lbl_tensor[b_i, pos_idx].item() != -100:
+                        gold_tok = int(lbl_tensor[b_i, pos_idx].item())
+                elif use_compact and (lbl_tensor[b_i, valid_pos] != -100).any():
+                    mismatches = (pred_ids[b_i, valid_pos] != lbl_tensor[b_i, valid_pos]).nonzero(as_tuple=False).squeeze(-1)
+                    if mismatches.numel() == 0:
+                        continue
+                    first_err_local = int(mismatches[0].item())
+                    pos_idx = int(valid_pos[first_err_local].item())
+                    rej_tok = int(pred_ids[b_i, pos_idx].item())
                     gold_tok = int(lbl_tensor[b_i, pos_idx].item())
-            elif use_compact and (lbl_tensor[b_i, valid_pos] != -100).any():
-                mismatches = (pred_ids[b_i, valid_pos] != lbl_tensor[b_i, valid_pos]).nonzero(as_tuple=False).squeeze(-1)
-                if mismatches.numel() == 0:
+                else:
                     continue
-                first_err_local = int(mismatches[0].item())
-                pos_idx = int(valid_pos[first_err_local].item())
-                rej_tok = int(pred_ids[b_i, pos_idx].item())
-                gold_tok = int(lbl_tensor[b_i, pos_idx].item())
-            else:
-                continue
-            if rej_tok == gold_tok:
-                continue
-            if is_hf_donor:
-                low_s, low_e = getattr(self.tokenizer, "invalid_logit_slice_low", (1, 19))
-                high_s = int(getattr(self.tokenizer, "invalid_logit_start_high", 49152))
-                row_cand = lm_distill_out.logits[b_i, pos_idx].detach().clone()
-                row_cand[low_s:low_e] = -torch.inf
-                if vocab_size > high_s:
-                    row_cand[high_s:] = -torch.inf
-                row_cand[rej_tok] = -torch.inf
-                top_alts = row_cand.topk(4).indices.tolist()
-            elif vocab_size > 1024:
-                row_cand = lm_distill_out.logits[b_i, pos_idx].detach().clone()
-                row_cand[:32] = -torch.inf
-                row_cand[127:260] = -torch.inf
-                row_cand[rej_tok] = -torch.inf
-                top_alts = row_cand.topk(4).indices.tolist()
-            else:
-                row_ascii = lm_distill_out.logits[b_i, pos_idx, 32:127].detach().clone()
-                if 32 <= rej_tok < 127:
-                    row_ascii[rej_tok - 32] = -torch.inf
-                top_alts = (row_ascii.topk(4).indices + 32).tolist()
-            chosen_row = [gold_tok] + [t_id for t_id in top_alts if t_id != gold_tok][:3]
-            while len(chosen_row) < 4:
-                chosen_row.append(gold_tok)
-            ftpo_pos_logits.append(lm_distill_out.logits[b_i, pos_idx])
-            ftpo_rej_ids.append(rej_tok)
-            ftpo_cho_ids.append(chosen_row[:4])
+                if rej_tok == gold_tok:
+                    continue
+                if is_hf_donor:
+                    low_s, low_e = getattr(self.tokenizer, "invalid_logit_slice_low", (1, 19))
+                    high_s = int(getattr(self.tokenizer, "invalid_logit_start_high", 49152))
+                    row_cand = lm_distill_out.logits[b_i, pos_idx].detach().clone()
+                    row_cand[low_s:low_e] = -torch.inf
+                    if vocab_size > high_s:
+                        row_cand[high_s:] = -torch.inf
+                    row_cand[rej_tok] = -torch.inf
+                    top_alts = row_cand.topk(4).indices.tolist()
+                elif vocab_size > 1024:
+                    row_cand = lm_distill_out.logits[b_i, pos_idx].detach().clone()
+                    row_cand[:32] = -torch.inf
+                    row_cand[127:260] = -torch.inf
+                    row_cand[rej_tok] = -torch.inf
+                    top_alts = row_cand.topk(4).indices.tolist()
+                else:
+                    row_ascii = lm_distill_out.logits[b_i, pos_idx, 32:127].detach().clone()
+                    if 32 <= rej_tok < 127:
+                        row_ascii[rej_tok - 32] = -torch.inf
+                    top_alts = (row_ascii.topk(4).indices + 32).tolist()
+                chosen_row = [gold_tok] + [t_id for t_id in top_alts if t_id != gold_tok][:3]
+                while len(chosen_row) < 4:
+                    chosen_row.append(gold_tok)
+                ftpo_pos_logits.append(lm_distill_out.logits[b_i, pos_idx])
+                ftpo_rej_ids.append(rej_tok)
+                ftpo_cho_ids.append(chosen_row[:4])
 
         if ftpo_pos_logits:
             ftpo_logits_t = torch.stack(ftpo_pos_logits, dim=0)

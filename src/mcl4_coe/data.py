@@ -292,15 +292,25 @@ class DonorHFTokenizer:
         return int(self._token_byte_lens[clean[in_range]].sum())
 
 
+_TOKENIZER_INSTANCES: dict[int, Any] = {}
+
+
 def get_tokenizer(vocab_size: int = 260) -> Any:
     """Return `DonorHFTokenizer` when `vocab_size > 16384`, `MorphCodeTokenizer` when `vocab_size > 1024`, else `ByteTokenizer`."""
-    if vocab_size > 16384:
-        return DonorHFTokenizer(vocab_size=vocab_size)
-    if vocab_size > 1024:
+    key = int(vocab_size)
+    cached = _TOKENIZER_INSTANCES.get(key)
+    if cached is not None:
+        return cached
+    if key > 16384:
+        tok: Any = DonorHFTokenizer(vocab_size=key)
+    elif key > 1024:
         from .morph_tokenizer import MorphCodeTokenizer
 
-        return MorphCodeTokenizer()
-    return ByteTokenizer()
+        tok = MorphCodeTokenizer()
+    else:
+        tok = ByteTokenizer()
+    _TOKENIZER_INSTANCES[key] = tok
+    return tok
 
 
 class TokenBlockDataset(Dataset):

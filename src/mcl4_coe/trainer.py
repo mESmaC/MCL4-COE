@@ -1008,7 +1008,19 @@ class MCL4COETrainer:
                 transfer_mode="batched",
             )
         else:
-            use_fused = (self.device.type == "cuda") and (not self.config.use_nvfp4)
+            use_fused = self.device.type == "cuda"
+            if use_fused:
+                dtype_groups: list[dict[str, Any]] = []
+                for g in param_groups:
+                    by_dtype: dict[torch.dtype, list[torch.nn.Parameter]] = {}
+                    for p in g["params"]:
+                        by_dtype.setdefault(p.dtype, []).append(p)
+                    for dt_params in by_dtype.values():
+                        if dt_params:
+                            ng = dict(g)
+                            ng["params"] = dt_params
+                            dtype_groups.append(ng)
+                param_groups = dtype_groups
             self.optimizer = torch.optim.AdamW(
                 param_groups,
                 lr=self.config.lr,
@@ -1133,6 +1145,11 @@ class MCL4COETrainer:
         del state_payload
         _safe_replace(tmp_pt, pt_path)
         _atomic_json(meta_path, meta)
+        if getattr(self, "ornith_improver", None) is not None and getattr(self.ornith_improver, "dream_engine", None) is not None:
+            try:
+                self.ornith_improver.dream_engine.save_artifacts()
+            except Exception:
+                pass
         if self.config.hf_backup_repo:
             self._async_backup_to_hf(step_name, pt_path)
         if int(self.config.max_keep_checkpoints) > 0:

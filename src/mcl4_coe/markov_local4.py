@@ -1251,6 +1251,9 @@ class MarkovLocal4Router(nn.Module):
 
         for name in ("route_query", "route_state", "route_key", "start_query"):
             setattr(self, name, nn.Linear(d_model, n_heads * router_dim, bias=False))
+        self._graph_cache: dict[
+            tuple[int, torch.device, int], tuple[Tensor, Tensor, Tensor, int, Tensor]
+        ] = {}
 
     def _project(self, x: Tensor, name: str) -> Tensor:
         b, n, _ = x.shape
@@ -1258,6 +1261,20 @@ class MarkovLocal4Router(nn.Module):
         return out.float().contiguous() if out.is_cuda else out.float()
 
     def project_routes(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        if x.is_cuda:
+            b, n, _ = x.shape
+            w_cat = torch.cat(
+                (
+                    self.route_query.weight,
+                    self.route_state.weight,
+                    self.route_key.weight,
+                    self.start_query.weight,
+                ),
+                dim=0,
+            )
+            out = F.linear(x, w_cat).view(b, n, 4, self.n_heads, self.router_dim).float()
+            out = out.permute(2, 0, 3, 1, 4).contiguous()
+            return out[0], out[1], out[2], out[3]
         return (
             self._project(x, "route_query"),
             self._project(x, "route_state"),
@@ -1270,31 +1287,43 @@ class MarkovLocal4Router(nn.Module):
         """Construct bounded-degree causal token graph (7 local offsets + top-k semantic earlier)."""
         b, h, n, _ = keys.shape
         with torch.autocast(device_type=keys.device.type, enabled=False):
+            cache_key = (n, keys.device, self.graph_degree)
+            cached = getattr(self, "_graph_cache", {}).get(cache_key)
+            if cached is None:
+                position = torch.arange(n, device=keys.device)
+                earlier = (position[None, :] < position[:, None])[None, None]
+                offsets = torch.tensor(
+                    [0, -1, 1, -2, 2, -3, -4, 4, -8, -16, -32, -64], device=keys.device
+                )
+                raw = position[:, None] + offsets
+                local_clamped = raw.clamp(0, n - 1)
+                raw_in_bounds = ((raw >= 0) & (raw < n))[None, None]
+                semantic_k = min(n, self.graph_degree)
+                degree = 12 + semantic_k
+                earlier_slot = torch.ones(
+                    degree, degree, device=keys.device, dtype=torch.bool
+                ).tril(-1)
+                cached = (earlier, local_clamped, raw_in_bounds, semantic_k, earlier_slot)
+                if hasattr(self, "_graph_cache"):
+                    self._graph_cache[cache_key] = cached
+            earlier, local_clamped, raw_in_bounds, semantic_k, earlier_slot = cached
+
             sim_dtype = torch.bfloat16 if keys.is_cuda else torch.float32
             normalized = F.normalize(keys.float(), dim=-1).to(sim_dtype)
             similarity = normalized @ normalized.transpose(-1, -2)
-            position = torch.arange(n, device=keys.device)
-            earlier = position[None, :] < position[:, None]
-            eligible = earlier[None, None] & key_valid[:, None, None, :] & key_valid[:, None, :, None]
+            eligible = earlier & key_valid[:, None, None, :] & key_valid[:, None, :, None]
             similarity = similarity.masked_fill(~eligible, -torch.inf)
-            semantic_k = min(n, self.graph_degree)
             semantic = torch.topk(similarity, k=semantic_k, dim=-1).indices
             semantic_valid = eligible.expand(b, h, -1, -1).gather(-1, semantic)
 
-            offsets = torch.tensor(
-                [0, -1, 1, -2, 2, -3, -4, 4, -8, -16, -32, -64], device=keys.device
-            )
-            raw = position[:, None] + offsets
-            local = raw.clamp(0, n - 1).expand(b, h, -1, -1)
-            node_valid = key_valid[:, None, :, None].expand(b, h, -1, 1)
-            dest_valid = _gather_nodes(node_valid, local).squeeze(-1)
-            local_valid = ((raw >= 0) & (raw < n))[None, None] & dest_valid & node_valid
+            local = local_clamped[None, None].expand(b, h, -1, -1)
+            node_valid_1 = key_valid[:, None, :, None]
+            dest_valid = key_valid[:, local_clamped].unsqueeze(1)
+            local_valid = (raw_in_bounds & dest_valid & node_valid_1).expand(b, h, -1, -1).clone()
             local_valid[..., 0] = True
 
             indices = torch.cat((local, semantic), dim=-1)
             valid = torch.cat((local_valid, semantic_valid), dim=-1)
-            degree = indices.shape[-1]
-            earlier_slot = torch.ones(degree, degree, device=keys.device, dtype=torch.bool).tril(-1)
             duplicate = (
                 (indices.unsqueeze(-1) == indices.unsqueeze(-2))
                 & earlier_slot
@@ -1625,8 +1654,6 @@ class MarkovLocal4Router(nn.Module):
             q_chunk = q[:, :, start:end]
             use_dense = (
                 q.is_cuda
-                and self.training
-                and torch.is_grad_enabled()
                 and q_chunk.shape[-2] > 1
                 and n <= 2 * ids.shape[-1] * head_dim
             )

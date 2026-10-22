@@ -18,6 +18,7 @@ Adapted from oracle/src/oracle/nvfp4.py for MCL4-COE on the RTX 5070:
 
 from __future__ import annotations
 
+import random
 from collections import Counter
 from functools import lru_cache
 
@@ -1124,7 +1125,7 @@ class _NVFP4GroupedLinear(torch.autograd.Function):
             if m_total == 0:
                 grad_inputs = torch.zeros_like(inputs)
             else:
-                amax_g = grad_out_c.abs().float().amax()
+                amax_g = grad_out_c.abs().amax().float()
                 ga_bwd = (
                     torch.where(amax_g > 0, amax_g / 2688.0, entry["one_f32"])
                     .clamp_min(1.17549435e-38)
@@ -1134,7 +1135,7 @@ class _NVFP4GroupedLinear(torch.autograd.Function):
                 sg = torch.empty(
                     (m_total, n // 16), dtype=torch.float8_e4m3fn, device=inputs.device
                 )
-                seed = int(torch.empty((), dtype=torch.int64).random_().item()) & 0x7FFFFFFF
+                seed = random.getrandbits(31)
                 grid_qg = (triton.cdiv(m_total, 32), n // 128)
                 _nvfp4_quantize_1d_kernel[grid_qg](
                     grad_out_c,

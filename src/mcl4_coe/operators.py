@@ -933,6 +933,7 @@ class CognitiveOperatorEnsemble(nn.Module):
         recurrence_steps: int | None = None,
         depth_ponder: bool | None = None,
         margin_halt_threshold: float | None = None,
+        candidate_encoded: EncodedState | None = None,
     ) -> AllOperatorsOutput:
         """Train all COE operators in a single shared `encode_state` + `decode_candidates` pass.
 
@@ -992,6 +993,7 @@ class CognitiveOperatorEnsemble(nn.Module):
             owner_rows=canon_owners,
             recurrence_steps=steps,
             causal_local=True,
+            candidate_encoded=candidate_encoded,
         )
         paired_state_repr, cand_repr = self.pooler.matched_pair_representations(
             encoded_state.hidden,

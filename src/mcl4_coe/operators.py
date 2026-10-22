@@ -605,6 +605,12 @@ class CognitiveOperatorEnsemble(nn.Module):
     def _scale(self) -> Tensor:
         return self.log_scale.float().clamp(math.log(0.5), math.log(4.5)).exp()
 
+    def _get_active_ncm_bridge(self) -> Any | None:
+        ncm = getattr(self, "ncm_system", None)
+        if ncm is None or not getattr(ncm.config, "enable_coe_head_bridge", True):
+            return None
+        return getattr(ncm, "coe_bridge", None)
+
     def forward_decision(
         self,
         context_ids: Tensor,
@@ -869,6 +875,47 @@ class CognitiveOperatorEnsemble(nn.Module):
             canon_state_proj = self.state_projection(paired_state_repr)
             canon_cand_proj = self.output_projection(cand_repr)
 
+        ncm_bridge = self._get_active_ncm_bridge()
+        if ncm_bridge is not None:
+            s_ncm_mask = self.pooler._state_evidence_mask(
+                trimmed_ctx_ids,
+                ctx_valid,
+                strip_boundary=self.config.strip_boundary_tokens_in_pool,
+                bos_id=self.config.bos_id,
+                eos_id=self.config.eos_id,
+            )
+            c_ncm_mask = self.pooler._content_mask(
+                canon_opt_ids,
+                canon_valid,
+                strip_boundary=self.config.strip_boundary_tokens_in_pool,
+                bos_id=self.config.bos_id,
+                eos_id=self.config.eos_id,
+            )
+            canon_scores, canon_state_proj, canon_cand_proj, _, _ = (
+                ncm_bridge.enhance_decision_and_eval(
+                    trimmed_ctx_ids,
+                    s_ncm_mask,
+                    canon_opt_ids,
+                    c_ncm_mask,
+                    canon_owners,
+                    canon_state_proj,
+                    canon_cand_proj,
+                    canon_scores,
+                    self._similarity,
+                )
+            )
+            prior_w = float(getattr(self.ncm_system.config, "coe_decision_prior_weight", 0.0))
+            if prior_w > 0.0:
+                hier_lp, _ = self.ncm_system.compute_hierarchy_log_probs(
+                    state_for_decode,
+                    canon_opt_ids,
+                    owner_rows=canon_owners,
+                    full_length=int(canon_opt_ids.shape[1]),
+                    normalize_by_tokens=True,
+                )
+                prior_score = torch.tanh(hier_lp / 10.0).to(canon_scores.dtype)
+                canon_scores = (1.0 - prior_w) * canon_scores + prior_w * prior_score
+
         # Restore original caller option order via inv_perm
         valid_scores = canon_scores.index_select(0, inv_perm)
         state_proj = canon_state_proj.index_select(0, inv_perm)
@@ -1059,6 +1106,38 @@ class CognitiveOperatorEnsemble(nn.Module):
                 F.dropout(cand_repr, p=0.10, training=self.training)
             )
 
+        ncm_bridge = self._get_active_ncm_bridge()
+        state_ms = None
+        cand_ms = None
+        if ncm_bridge is not None:
+            s_ncm_mask = self.pooler._state_evidence_mask(
+                trimmed_ctx_ids,
+                ctx_valid,
+                strip_boundary=self.config.strip_boundary_tokens_in_pool,
+                bos_id=self.config.bos_id,
+                eos_id=self.config.eos_id,
+            )
+            c_ncm_mask = self.pooler._content_mask(
+                canon_opt_ids,
+                canon_valid,
+                strip_boundary=self.config.strip_boundary_tokens_in_pool,
+                bos_id=self.config.bos_id,
+                eos_id=self.config.eos_id,
+            )
+            canon_scores, canon_state_proj, canon_cand_proj, state_ms, cand_ms = (
+                ncm_bridge.enhance_decision_and_eval(
+                    trimmed_ctx_ids,
+                    s_ncm_mask,
+                    canon_opt_ids,
+                    c_ncm_mask,
+                    canon_owners,
+                    canon_state_proj,
+                    canon_cand_proj,
+                    canon_scores,
+                    self._similarity,
+                )
+            )
+
         valid_scores = canon_scores.index_select(0, inv_perm)
         state_proj = canon_state_proj.index_select(0, inv_perm)
         cand_proj = canon_cand_proj.index_select(0, inv_perm)
@@ -1109,6 +1188,35 @@ class CognitiveOperatorEnsemble(nn.Module):
         ded_joint = self.deduction_query_proj(joint_pair)
         meta_joint = self.meta_query_proj(joint_pair)
 
+        if ncm_bridge is not None and state_ms is not None and cand_ms is not None:
+            def _scatter_cand_feat(feat_canon: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+                f_caller = feat_canon.index_select(0, inv_perm)
+                dim_f = f_caller.shape[-1]
+                m_f = valid_options.unsqueeze(-1).expand(batch, num_opts, dim_f)
+                grid_f = f_caller.new_zeros((batch, num_opts, dim_f)).masked_scatter(m_f, f_caller)
+                f_pos = grid_f[b_rows, t_idx]
+                f_neg = grid_f[b_rows, d_idx]
+                f_neg2 = grid_f[b_rows, d_idx2]
+                f_und = torch.roll(f_pos, shifts=1, dims=0) if batch > 1 else (0.5 * (f_pos + f_neg))
+                return f_pos, f_neg, f_neg2, f_und
+
+            c_zc_4 = torch.cat(_scatter_cand_feat(cand_ms.z_coarse_pool), dim=0)
+            c_zr_4 = torch.cat(_scatter_cand_feat(cand_ms.z_res_fine_pool), dim=0)
+            c_ent_4 = torch.cat(_scatter_cand_feat(cand_ms.scale_entropy), dim=0)
+            c_cons_4 = torch.cat(_scatter_cand_feat(cand_ms.scale_consistency), dim=0)
+
+            s_zc_4 = state_ms.z_coarse_pool.repeat(4, 1)
+            s_zr_4 = state_ms.z_res_fine_pool.repeat(4, 1)
+            s_ent_4 = state_ms.scale_entropy.repeat(4, 1)
+            s_cons_4 = state_ms.scale_consistency.repeat(4, 1)
+
+            ded_joint = ncm_bridge.enhance_deduction_query(
+                ded_joint, s_zc_4, c_zc_4, s_zr_4, c_zr_4
+            )
+            meta_joint = ncm_bridge.enhance_metacognition_query(
+                meta_joint, s_zc_4, c_zc_4, c_zr_4, s_ent_4, c_ent_4, s_cons_4, c_cons_4
+            )
+
         pooled_s = self.pooler.pool_sequence(
             encoded_state.hidden,
             trimmed_ctx_ids,
@@ -1117,11 +1225,23 @@ class CognitiveOperatorEnsemble(nn.Module):
             bos_id=self.config.bos_id,
             eos_id=self.config.eos_id,
         )
-        gate_mean = torch.stack([g.sigmoid() for g in self.abstraction_gates.values()]).mean()
-        abs_state = self.abstraction_norm(pooled_s + gate_mean * self.abstraction_proj(pooled_s))
-        abs_proj = self.state_projection(abs_state)
         pos_cand_proj = self.output_projection(c_pos)
-        abs_sim = self._similarity(abs_proj, pos_cand_proj)
+        if ncm_bridge is not None:
+            abs_sims = []
+            for lvl_name in ("brief", "standard", "detailed"):
+                abs_vec_l = self.compress_abstraction(
+                    trimmed_ctx_ids,
+                    context_lengths,
+                    level=lvl_name,
+                    encoded_hidden=encoded_state.hidden,
+                )
+                abs_sims.append(self._similarity(self.state_projection(abs_vec_l), pos_cand_proj))
+            abs_sim = torch.stack(abs_sims, dim=0).mean(dim=0)
+        else:
+            gate_mean = torch.stack([g.sigmoid() for g in self.abstraction_gates.values()]).mean()
+            abs_state = self.abstraction_norm(pooled_s + gate_mean * self.abstraction_proj(pooled_s))
+            abs_proj = self.state_projection(abs_state)
+            abs_sim = self._similarity(abs_proj, pos_cand_proj)
 
         with torch.autocast(device_type=context_ids.device.type, enabled=False):
             scale = self._scale()
@@ -1243,6 +1363,16 @@ class CognitiveOperatorEnsemble(nn.Module):
         )
         normed = self.pooler.cand_norm(pooled.float()).to(pooled.dtype)
         proj = self.output_projection(normed).float()
+        ncm_bridge = self._get_active_ncm_bridge()
+        if ncm_bridge is not None:
+            c_mask = self.pooler._content_mask(
+                trimmed,
+                valid,
+                strip_boundary=self.config.strip_boundary_tokens_in_pool,
+                bos_id=self.config.bos_id,
+                eos_id=self.config.eos_id,
+            )
+            proj = ncm_bridge.enhance_item_embedding(trimmed, c_mask, proj)
         centered = proj - proj.mean(dim=-1, keepdim=True)
         return F.normalize(centered, dim=-1, eps=self.config.eps)
 
@@ -1319,6 +1449,31 @@ class CognitiveOperatorEnsemble(nn.Module):
             eos_id=self.config.eos_id,
         )
         joint = self.deduction_query_proj(torch.cat([p_repr, c_repr], dim=-1))
+        ncm_bridge = self._get_active_ncm_bridge()
+        if ncm_bridge is not None:
+            p_mask = self.pooler._state_evidence_mask(
+                p_trim,
+                p_valid,
+                strip_boundary=self.config.strip_boundary_tokens_in_pool,
+                bos_id=self.config.bos_id,
+                eos_id=self.config.eos_id,
+            )
+            c_mask = self.pooler._content_mask(
+                c_trim,
+                c_valid,
+                strip_boundary=self.config.strip_boundary_tokens_in_pool,
+                bos_id=self.config.bos_id,
+                eos_id=self.config.eos_id,
+            )
+            p_ms = ncm_bridge.extract_features(p_trim, p_mask)
+            c_ms = ncm_bridge.extract_features(c_trim, c_mask)
+            joint = ncm_bridge.enhance_deduction_query(
+                joint,
+                p_ms.z_coarse_pool,
+                c_ms.z_coarse_pool,
+                p_ms.z_res_fine_pool,
+                c_ms.z_res_fine_pool,
+            )
         sims = pearson_similarity(
             joint.unsqueeze(1), self.deduction_prototypes.unsqueeze(0), eps=self.config.eps
         )
@@ -1370,6 +1525,34 @@ class CognitiveOperatorEnsemble(nn.Module):
             eos_id=self.config.eos_id,
         )
         joint = self.meta_query_proj(torch.cat([s_repr, c_repr], dim=-1))
+        ncm_bridge = self._get_active_ncm_bridge()
+        if ncm_bridge is not None:
+            s_mask = self.pooler._state_evidence_mask(
+                s_trim,
+                s_valid,
+                strip_boundary=self.config.strip_boundary_tokens_in_pool,
+                bos_id=self.config.bos_id,
+                eos_id=self.config.eos_id,
+            )
+            c_mask = self.pooler._content_mask(
+                c_trim,
+                c_valid,
+                strip_boundary=self.config.strip_boundary_tokens_in_pool,
+                bos_id=self.config.bos_id,
+                eos_id=self.config.eos_id,
+            )
+            s_ms = ncm_bridge.extract_features(s_trim, s_mask)
+            c_ms = ncm_bridge.extract_features(c_trim, c_mask)
+            joint = ncm_bridge.enhance_metacognition_query(
+                joint,
+                s_ms.z_coarse_pool,
+                c_ms.z_coarse_pool,
+                c_ms.z_res_fine_pool,
+                s_ms.scale_entropy,
+                c_ms.scale_entropy,
+                s_ms.scale_consistency,
+                c_ms.scale_consistency,
+            )
         sims = pearson_similarity(
             joint.unsqueeze(1), self.meta_prototypes.unsqueeze(0), eps=self.config.eps
         )
@@ -1412,6 +1595,18 @@ class CognitiveOperatorEnsemble(nn.Module):
             bos_id=self.config.bos_id,
             eos_id=self.config.eos_id,
         )
+        ncm_bridge = self._get_active_ncm_bridge()
+        if ncm_bridge is not None:
+            pooled = ncm_bridge.enhance_abstraction(
+                trimmed,
+                valid,
+                pooled,
+                level=level,
+                pooler=self.pooler,
+                strip_boundary=self.config.strip_boundary_tokens_in_pool,
+                bos_id=self.config.bos_id,
+                eos_id=self.config.eos_id,
+            )
         gate = self.abstraction_gates[level].sigmoid()
         return self.abstraction_norm(pooled + gate * self.abstraction_proj(pooled))
 
@@ -1463,6 +1658,33 @@ class CognitiveOperatorEnsemble(nn.Module):
         k_proj = self.state_projection(k_repr)
         c_proj = self.output_projection(c_repr)
         sims = self._similarity(k_proj, c_proj)
+        ncm_bridge = self._get_active_ncm_bridge()
+        if ncm_bridge is not None:
+            k_mask = self.pooler._state_evidence_mask(
+                k_trim,
+                k_valid,
+                strip_boundary=self.config.strip_boundary_tokens_in_pool,
+                bos_id=self.config.bos_id,
+                eos_id=self.config.eos_id,
+            )
+            c_mask = self.pooler._content_mask(
+                c_trim,
+                c_valid,
+                strip_boundary=self.config.strip_boundary_tokens_in_pool,
+                bos_id=self.config.bos_id,
+                eos_id=self.config.eos_id,
+            )
+            sims, k_proj, c_proj, _, _ = ncm_bridge.enhance_decision_and_eval(
+                k_trim,
+                k_mask,
+                c_trim,
+                c_mask,
+                owner_rows,
+                k_proj,
+                c_proj,
+                sims,
+                self._similarity,
+            )
         with torch.autocast(device_type=criterion_ids.device.type, enabled=False):
             logits = sims.float() * self.assoc_alpha.float() + self.assoc_beta.float()
             utilities = logits.sigmoid()

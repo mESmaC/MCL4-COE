@@ -304,3 +304,93 @@ def test_ornith_ncm_self_improvement_and_inference_ui_mode() -> None:
     assert turn["config_snapshot"]["mode"] == "ncm"
     assert turn["mode_meta"]["levels_executed"] >= 1
     assert len(turn["mode_meta"]["level_decoded_texts"]) == turn["mode_meta"]["levels_executed"]
+
+
+def test_ncm_coe_head_bridge_all_operators_and_permutation_invariance() -> None:
+    torch.manual_seed(42)
+    coe = _make_tiny_coe(num_experts=8, top_k=2)
+
+    # Save legacy state_dict without coe_bridge keys to verify backward-compatible loading
+    cfg = NCMConfig(
+        target_length=16,
+        num_levels=4,
+        codebook_size=32,
+        vq_embed_dim=24,
+        enable_coe_head_bridge=True,
+        coe_decision_prior_weight=0.10,
+    )
+    ncm_sys = coe.create_ncm_system(cfg)
+    assert hasattr(ncm_sys, "coe_bridge")
+
+    legacy_sd = {
+        k: v.clone()
+        for k, v in ncm_sys.state_dict().items()
+        if not k.startswith("coe_bridge.")
+    }
+    ncm_sys.load_state_dict(legacy_sd, strict=True)
+
+    # 1. Verify 0-ULP bitwise permutation invariance in forward_decision with NCM bridge active
+    coe.eval()
+    b, m, t_ctx, t_opt = 2, 4, 14, 12
+    ctx_ids = torch.randint(32, 120, (b, t_ctx), dtype=torch.long)
+    ctx_lens = torch.tensor([14, 11], dtype=torch.long)
+    opt_ids = torch.randint(32, 120, (b, m, t_opt), dtype=torch.long)
+    opt_lens = torch.tensor([[12, 10, 9, 11], [11, 8, 12, 10]], dtype=torch.long)
+
+    dec_a = coe.forward_decision(ctx_ids, ctx_lens, opt_ids, opt_lens)
+    perm = torch.tensor([2, 0, 3, 1], dtype=torch.long)
+    inv_perm = torch.argsort(perm)
+    dec_b = coe.forward_decision(
+        ctx_ids, ctx_lens, opt_ids[:, perm, :], opt_lens[:, perm]
+    )
+    assert torch.equal(dec_a.similarities, dec_b.similarities[:, inv_perm])
+    assert torch.equal(dec_a.logits, dec_b.logits[:, inv_perm])
+
+    # 2. Verify all individual COE heads (`Deduction`, `Metacognition`, `Evaluation`, `Abstraction`, `Association`, `Induction`, `Abduction`)
+    p_ids = ctx_ids
+    p_lens = ctx_lens
+    c_ids = opt_ids[:, 0, :]
+    c_lens = opt_lens[:, 0]
+
+    ded_out = coe.forward_deduction(p_ids, p_lens, c_ids, c_lens)
+    assert ded_out.probabilities.shape == (b, 3)
+    assert torch.allclose(ded_out.probabilities.sum(dim=-1), torch.ones(b), atol=1e-5)
+
+    meta_out = coe.forward_metacognition(p_ids, p_lens, c_ids, c_lens)
+    assert meta_out.probabilities.shape == (b, 3)
+
+    eval_out = coe.forward_evaluation(p_ids, p_lens, c_ids, c_lens)
+    assert eval_out.utilities.shape == (b,)
+
+    ind_out = coe.forward_induction(ctx_ids, ctx_lens, opt_ids, opt_lens)
+    abd_out = coe.forward_abduction(ctx_ids, ctx_lens, opt_ids, opt_lens)
+    assert ind_out.probabilities.shape == (b, m)
+    assert abd_out.probabilities.shape == (b, m)
+
+    abs_brief = coe.compress_abstraction(p_ids, p_lens, level="brief")
+    abs_std = coe.compress_abstraction(p_ids, p_lens, level="standard")
+    abs_det = coe.compress_abstraction(p_ids, p_lens, level="detailed")
+    assert abs_brief.shape == (b, 64)
+    assert not torch.allclose(abs_brief, abs_det)
+    assert not torch.allclose(abs_brief, abs_std)
+
+    assoc_out = coe.forward_association_matrix(p_ids, p_lens)
+    assert assoc_out.similarities.shape == (b, b)
+
+    # 3. Verify `forward_all_operators` trains `coe_bridge` parameters end-to-end
+    coe.train()
+    coe.zero_grad(set_to_none=True)
+    ncm_sys.zero_grad(set_to_none=True)
+    targets = torch.tensor([1, 2], dtype=torch.long)
+    all_op_out = coe.forward_all_operators(ctx_ids, ctx_lens, opt_ids, opt_lens, targets)
+    all_op_out.total_loss.backward()
+
+    assert ncm_sys.coe_bridge.state_multi_proj.weight.grad is not None
+    assert float(ncm_sys.coe_bridge.state_multi_proj.weight.grad.abs().sum().item()) > 0.0
+    assert ncm_sys.coe_bridge.deduction_down.weight.grad is not None
+    assert float(ncm_sys.coe_bridge.deduction_down.weight.grad.abs().sum().item()) > 0.0
+    assert ncm_sys.coe_bridge.meta_down.weight.grad is not None
+    assert float(ncm_sys.coe_bridge.meta_down.weight.grad.abs().sum().item()) > 0.0
+    assert ncm_sys.coe_bridge.abstraction_vq_proj["brief"].weight.grad is not None
+    assert float(ncm_sys.coe_bridge.abstraction_vq_proj["brief"].weight.grad.abs().sum().item()) > 0.0
+

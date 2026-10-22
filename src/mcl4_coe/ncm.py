@@ -281,6 +281,8 @@ class NCMConfig:
     coarse_level_cutoff: int = 2
     mid_level_cutoff: int = 4
     enable_mid_hierarchy_coe: bool = True
+    enable_coe_head_bridge: bool = True
+    coe_decision_prior_weight: float = 0.0
     coarse_branch_candidates: int = 2
     deduction_veto_threshold: float = 0.60
     metacognition_halt_threshold: float = 0.88
@@ -630,6 +632,69 @@ class MultiscaleResidualQuantizer(nn.Module):
             global_utilization=global_util,
             active_cutoff_level=active_cutoff,
         )
+
+    def quantize_for_coe(
+        self, z: Tensor, valid: Tensor | None = None
+    ) -> tuple[list[Tensor], list[Tensor], Tensor]:
+        """Deterministically quantize `z` (`[N, T, d_vq]`) across all $K$ scales for COE operator heads.
+
+        - Does NOT mutate EMA cluster counters or draw random `fine_drop` cutoffs, ensuring
+          100% row-independent determinism (preserving 0-ULP bitwise permutation invariance in `Decision`).
+        - Preserves straight-through gradients into both the encoder latents `z` and the per-level
+          codebooks `embeddings[k]`.
+        - Returns `(z_hats_all, code_indices, scale_entropy)` where `scale_entropy` has shape `[N, K]`.
+        """
+        orig_dtype = z.dtype
+        z_f = z.float()
+        if valid is not None:
+            z_f = z_f.masked_fill(~valid.unsqueeze(-1), 0.0)
+        b, full_len, c = z_f.shape
+        z_rest = z_f.detach().clone()
+        z_hat = torch.zeros_like(z_f)
+
+        z_hats_all: list[Tensor] = []
+        code_indices: list[Tensor] = []
+        scale_entropies: list[Tensor] = []
+        inv_temp = 1.0 / max(1.0, math.sqrt(float(c)))
+        norm_log_v = math.log(max(2, self.codebook_size))
+
+        for i, level_len in enumerate(self.levels):
+            emb_i = self.embeddings[i]
+            eff_len = min(full_len, int(level_len)) if i < self.num_levels - 1 else full_len
+            flat_input_blc = (
+                self._down_for_quant(z_rest, i, eff_len) if i < self.num_levels - 1 else z_rest
+            )
+            flat_input = flat_input_blc.reshape(-1, c)
+            distances = self._distances(flat_input, emb_i.weight)
+            indices = torch.argmin(distances, dim=1).view(b, eff_len)
+            code_indices.append(indices)
+
+            with torch.no_grad():
+                probs_i = F.softmax(-distances.float() * inv_temp, dim=-1)
+                ent_pos = (
+                    -(probs_i * probs_i.clamp_min(1e-9).log()).sum(dim=-1) / norm_log_v
+                ).view(b, eff_len)
+                scale_entropies.append(ent_pos.mean(dim=-1))
+
+            q_raw = emb_i(indices).float()
+            # Dual straight-through estimator: passes gradients to both codebook E_i and input z
+            q_blc = q_raw + (flat_input_blc - flat_input_blc.detach())
+            quantized = (
+                self._up_to_full(q_blc, i, full_len) if i < self.num_levels - 1 else q_blc
+            )
+            quantized = self._apply_quant_resi(quantized, i)
+            if valid is not None:
+                quantized = quantized.masked_fill(~valid.unsqueeze(-1), 0.0)
+
+            z_hat = z_hat + quantized
+            z_rest = z_rest - quantized.detach()
+            z_hat_st_i = (z_f + (z_hat - z_f.detach())).to(orig_dtype)
+            if valid is not None:
+                z_hat_st_i = z_hat_st_i.masked_fill(~valid.unsqueeze(-1), 0.0)
+            z_hats_all.append(z_hat_st_i)
+
+        scale_entropy_tensor = torch.stack(scale_entropies, dim=-1)  # [N, K]
+        return z_hats_all, code_indices, scale_entropy_tensor
 
     @torch.no_grad()
     def z_to_idx(
@@ -1522,6 +1587,371 @@ class NCMGeneratorAdapter(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# 6b. NCM -> COE Multiscale Head Bridge (`NCMCOEMultiscaleFeatures`, `NCMCOEHeadBridge`)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class NCMCOEMultiscaleFeatures:
+    """Multiscale NCM concept representations extracted for the 9 COE operator heads."""
+
+    z_coarse_seq: Tensor
+    z_mid_seq: Tensor
+    z_fine_seq: Tensor
+    z_res_fine_seq: Tensor
+    z_coarse_pool: Tensor
+    z_mid_pool: Tensor
+    z_fine_pool: Tensor
+    z_res_fine_pool: Tensor
+    scale_entropy: Tensor
+    scale_consistency: Tensor
+    code_indices: list[Tensor]
+
+
+class NCMCOEHeadBridge(nn.Module):
+    """Bridges Stage-1/Stage-2 NCM multiscale concept hierarchies directly into the 9 COE heads.
+
+    Provides multiscale concept advantages to:
+    1. `Decision`, `Evaluation`, `Induction`, `Abduction`:
+       Fuses coarse global concept Pearson matching ($\\hat{z}_{\\text{coarse}}$) and multiscale
+       concept matching ($[\\hat{z}_{\\text{coarse}}, \\hat{z}_{\\text{mid}}, \\hat{z}_{\\text{fine}}, \\Delta z_{\\text{fine}}]$)
+       into the token-level matched-filter scores while preserving 0-ULP permutation invariance.
+    2. `Deduction` (`entailed`, `contradicted`, `undetermined`):
+       Explicitly decomposes premise/conclusion representations into **coarse concept alignment**
+       ($\\hat{z}_{\\text{coarse}}$) vs. **fine residual differences** ($\\Delta z_{\\text{fine}} = \\hat{z}_{\\text{fine}} - \\hat{z}_{\\text{coarse}}$),
+       isolating local negations (`"not"`, `"no"`) and numeric bound flips from topic overlap.
+    3. `Metacognition` (`correctness`, `evidence_sufficiency`, `context_benefit`):
+       Injects per-scale VQ assignment entropy $H(r_1 \\dots r_K)$, coarse-to-fine consistency
+       $\\cos(\\hat{z}_{\\text{coarse}}, \\hat{z}_{\\text{fine}})$, and coarse-vs-fine similarity gaps.
+    4. `Abstraction` (`brief`, `standard`, `detailed`):
+       Routes `brief` $\\to \\hat{z}_{\\text{coarse}}$ ($k=0$), `standard` $\\to \\hat{z}_{\\text{mid}}$ ($k=K//2$),
+       and `detailed` $\\to \\hat{z}_{\\text{fine}}$ ($k=K-1$) so each abstraction level is genuinely
+       information-bottlenecked at its corresponding NCM concept scale.
+    5. `Association` & Multiscale Novelty:
+       Enriches 32-dim centered Pearson item embeddings with coarse/mid/fine concept vectors.
+    """
+
+    def __init__(
+        self,
+        config: NCMConfig,
+        vqvae: DonorAnchoredMultiscaleVQVAE,
+        *,
+        d_model: int,
+        d_proj: int = 32,
+    ) -> None:
+        super().__init__()
+        self.config = config
+        self._vqvae_ref = (vqvae,)
+        self.d_vq = int(config.vq_embed_dim)
+        self.d_model = int(d_model)
+        self.d_proj = int(d_proj)
+        self.num_levels = len(vqvae.vq.levels)
+
+        self.vq_token_scorer = nn.Linear(self.d_vq, 1, bias=False)
+        self.vq_res_scorer = nn.Linear(self.d_vq, 1, bias=False)
+
+        # 1. Decision / Evaluation / Induction / Abduction projections
+        self.state_coarse_proj = nn.Linear(self.d_vq, self.d_proj, bias=False)
+        self.cand_coarse_proj = nn.Linear(self.d_vq, self.d_proj, bias=False)
+        self.state_multi_proj = nn.Linear(self.d_vq * 3, self.d_proj, bias=False)
+        self.cand_multi_proj = nn.Linear(self.d_vq * 4, self.d_proj, bias=False)
+        self.decision_gate = nn.Parameter(torch.tensor(-1.0))
+
+        # 2. Deduction coarse-topic vs. fine-residual SwiGLU adapter (7 * d_vq -> d_proj)
+        ded_in_dim = self.d_vq * 7
+        self.deduction_norm = RMSNorm(ded_in_dim, eps=config.rms_norm_eps)
+        self.deduction_up = nn.Linear(ded_in_dim, self.d_vq * 2, bias=False)
+        self.deduction_down = nn.Linear(self.d_vq, self.d_proj, bias=False)
+        self.deduction_gate = nn.Parameter(torch.tensor(0.35))
+
+        # 3. Metacognition hierarchical entropy & cross-scale consistency adapter
+        meta_in_dim = self.d_vq * 3 + 2 * self.num_levels + 5
+        self.meta_norm = RMSNorm(meta_in_dim, eps=config.rms_norm_eps)
+        self.meta_up = nn.Linear(meta_in_dim, self.d_vq * 2, bias=False)
+        self.meta_down = nn.Linear(self.d_vq, self.d_proj, bias=False)
+        self.meta_gate = nn.Parameter(torch.tensor(0.35))
+
+        # 4. Abstraction scale-specific VQ-to-d_model projections (`brief`, `standard`, `detailed`)
+        self.abstraction_vq_proj = nn.ModuleDict(
+            {
+                "brief": nn.Linear(self.d_vq, self.d_model, bias=False),
+                "standard": nn.Linear(self.d_vq, self.d_model, bias=False),
+                "detailed": nn.Linear(self.d_vq, self.d_model, bias=False),
+            }
+        )
+        self.abstraction_blend_gate = nn.Parameter(torch.tensor(-0.5))
+
+        # 5. Association multiscale item embedding projection
+        self.assoc_item_proj = nn.Linear(self.d_vq * 3, self.d_proj, bias=False)
+        self.assoc_gate = nn.Parameter(torch.tensor(-1.0))
+
+        std_vq = 0.25 / math.sqrt(max(1, self.d_vq))
+        nn.init.normal_(self.vq_token_scorer.weight, std=std_vq)
+        nn.init.normal_(self.vq_res_scorer.weight, std=std_vq)
+        nn.init.normal_(self.state_coarse_proj.weight, std=std_vq)
+        with torch.no_grad():
+            self.cand_coarse_proj.weight.copy_(self.state_coarse_proj.weight)
+        nn.init.normal_(self.state_multi_proj.weight, std=std_vq / math.sqrt(3.0))
+        nn.init.normal_(self.cand_multi_proj.weight, std=std_vq / math.sqrt(4.0))
+        nn.init.normal_(self.deduction_up.weight, std=std_vq / math.sqrt(7.0))
+        nn.init.normal_(self.deduction_down.weight, std=std_vq)
+        nn.init.normal_(self.meta_up.weight, std=std_vq / math.sqrt(4.0))
+        nn.init.normal_(self.meta_down.weight, std=std_vq)
+        for mod in self.abstraction_vq_proj.values():
+            nn.init.normal_(mod.weight, std=std_vq)
+        nn.init.normal_(self.assoc_item_proj.weight, std=std_vq / math.sqrt(3.0))
+
+    @property
+    def vqvae(self) -> DonorAnchoredMultiscaleVQVAE:
+        return self._vqvae_ref[0]
+
+    def _pool_vq_seq(
+        self, seq: Tensor, valid: Tensor, *, use_residual_scorer: bool = False
+    ) -> Tensor:
+        """Salience-weighted + mean pooling over valid positions `[N, T, d_vq] -> [N, d_vq]`."""
+        scorer = self.vq_res_scorer if use_residual_scorer else self.vq_token_scorer
+        safe_valid = valid.clone()
+        has_any = safe_valid.any(dim=-1)
+        if not has_any.all():
+            safe_valid[~has_any, 0] = True
+        raw_scores = scorer(seq.to(scorer.weight.dtype)).squeeze(-1)
+        with torch.autocast(device_type=seq.device.type, enabled=False):
+            scores = raw_scores.float().masked_fill(~safe_valid, -torch.inf)
+            weights = scores.softmax(dim=-1)
+            attn_pool = (seq.float() * weights.unsqueeze(-1)).sum(dim=1)
+            mask_f = safe_valid.unsqueeze(-1).float()
+            mean_pool = (seq.float() * mask_f).sum(dim=1) / mask_f.sum(dim=1).clamp_min(1.0)
+            return (0.5 * (attn_pool + mean_pool)).to(seq.dtype)
+
+    def extract_features(
+        self, token_ids: Tensor, content_mask: Tensor
+    ) -> NCMCOEMultiscaleFeatures:
+        """Extract deterministic coarse, mid, fine, and fine-residual NCM features for COE heads."""
+        safe_mask = content_mask.clone()
+        has_any = safe_mask.any(dim=-1)
+        if not has_any.all():
+            safe_mask[~has_any, 0] = True
+
+        z = self.vqvae.encode_pre_quant(token_ids, valid=safe_mask)
+        z_hats_all, code_indices, scale_entropy = self.vqvae.vq.quantize_for_coe(
+            z, valid=safe_mask
+        )
+        n_lvls = len(z_hats_all)
+        k_coarse = 0
+        k_mid = max(0, (n_lvls - 1) // 2)
+        k_fine = n_lvls - 1
+
+        z_coarse_seq = z_hats_all[k_coarse]
+        z_mid_seq = z_hats_all[k_mid]
+        z_fine_seq = z_hats_all[k_fine]
+        z_res_fine_seq = z_fine_seq - z_coarse_seq
+
+        z_coarse_pool = self._pool_vq_seq(z_coarse_seq, safe_mask, use_residual_scorer=False)
+        z_mid_pool = self._pool_vq_seq(z_mid_seq, safe_mask, use_residual_scorer=False)
+        z_fine_pool = self._pool_vq_seq(z_fine_seq, safe_mask, use_residual_scorer=False)
+        z_res_fine_pool = self._pool_vq_seq(z_res_fine_seq, safe_mask, use_residual_scorer=True)
+
+        with torch.autocast(device_type=token_ids.device.type, enabled=False):
+            scale_consistency = F.cosine_similarity(
+                z_coarse_pool.float(), z_fine_pool.float(), dim=-1, eps=1e-6
+            ).unsqueeze(-1)
+
+        return NCMCOEMultiscaleFeatures(
+            z_coarse_seq=z_coarse_seq,
+            z_mid_seq=z_mid_seq,
+            z_fine_seq=z_fine_seq,
+            z_res_fine_seq=z_res_fine_seq,
+            z_coarse_pool=z_coarse_pool,
+            z_mid_pool=z_mid_pool,
+            z_fine_pool=z_fine_pool,
+            z_res_fine_pool=z_res_fine_pool,
+            scale_entropy=scale_entropy,
+            scale_consistency=scale_consistency,
+            code_indices=code_indices,
+        )
+
+    def enhance_decision_and_eval(
+        self,
+        state_ids: Tensor,
+        state_mask: Tensor,
+        cand_ids: Tensor,
+        cand_mask: Tensor,
+        owner_rows: Tensor,
+        base_state_proj: Tensor,
+        base_cand_proj: Tensor,
+        base_scores: Tensor,
+        similarity_fn: Any,
+    ) -> tuple[Tensor, Tensor, Tensor, NCMCOEMultiscaleFeatures, NCMCOEMultiscaleFeatures]:
+        """Fuse coarse + multiscale NCM concept similarity into `Decision` / `Evaluation` / `Induction` / `Abduction`."""
+        state_ms = self.extract_features(state_ids, state_mask)
+        cand_ms = self.extract_features(cand_ids, cand_mask)
+
+        w_dt = self.state_coarse_proj.weight.dtype
+        s_coarse_all = self.state_coarse_proj(state_ms.z_coarse_pool.to(w_dt))
+        s_coarse = s_coarse_all.index_select(0, owner_rows)
+        c_coarse = self.cand_coarse_proj(cand_ms.z_coarse_pool.to(w_dt))
+
+        s_multi_in = torch.cat(
+            [state_ms.z_coarse_pool, state_ms.z_mid_pool, state_ms.z_fine_pool], dim=-1
+        ).to(w_dt)
+        c_multi_in = torch.cat(
+            [
+                cand_ms.z_coarse_pool,
+                cand_ms.z_mid_pool,
+                cand_ms.z_fine_pool,
+                cand_ms.z_res_fine_pool,
+            ],
+            dim=-1,
+        ).to(w_dt)
+        s_multi = self.state_multi_proj(s_multi_in).index_select(0, owner_rows)
+        c_multi = self.cand_multi_proj(c_multi_in)
+
+        sim_coarse = similarity_fn(s_coarse, c_coarse)
+        sim_multi = similarity_fn(s_multi, c_multi)
+        ncm_sim = 0.45 * sim_coarse + 0.55 * sim_multi
+
+        w_dec = 0.30 * torch.sigmoid(self.decision_gate.float()).to(base_scores.dtype)
+        enhanced_scores = (1.0 - w_dec) * base_scores + w_dec * ncm_sim.to(base_scores.dtype)
+        enhanced_state_proj = base_state_proj + w_dec.to(base_state_proj.dtype) * s_multi.to(
+            base_state_proj.dtype
+        )
+        enhanced_cand_proj = base_cand_proj + w_dec.to(base_cand_proj.dtype) * c_multi.to(
+            base_cand_proj.dtype
+        )
+        return enhanced_scores, enhanced_state_proj, enhanced_cand_proj, state_ms, cand_ms
+
+    def enhance_deduction_query(
+        self,
+        base_ded_joint: Tensor,
+        z_coarse_s: Tensor,
+        z_coarse_c: Tensor,
+        z_res_fine_s: Tensor,
+        z_res_fine_c: Tensor,
+    ) -> Tensor:
+        """Inject coarse-concept alignment vs. fine-residual contradiction features into `Deduction`."""
+        w_dt = self.deduction_up.weight.dtype
+        zc_s = z_coarse_s.to(w_dt)
+        zc_c = z_coarse_c.to(w_dt)
+        zr_s = z_res_fine_s.to(w_dt)
+        zr_c = z_res_fine_c.to(w_dt)
+
+        ded_in = torch.cat(
+            [
+                zc_s,
+                zc_c,
+                zc_s * zc_c,
+                zr_s,
+                zr_c,
+                (zr_s - zr_c).abs(),
+                zr_s * zr_c,
+            ],
+            dim=-1,
+        )
+        gate, val = self.deduction_up(self.deduction_norm(ded_in)).chunk(2, dim=-1)
+        delta = self.deduction_down(F.silu(gate) * val)
+        scale_g = 0.35 * torch.tanh(self.deduction_gate.float()).to(base_ded_joint.dtype)
+        return base_ded_joint + scale_g * delta.to(base_ded_joint.dtype)
+
+    def enhance_metacognition_query(
+        self,
+        base_meta_joint: Tensor,
+        z_coarse_s: Tensor,
+        z_coarse_c: Tensor,
+        z_res_fine_c: Tensor,
+        s_entropy: Tensor,
+        c_entropy: Tensor,
+        s_consistency: Tensor,
+        c_consistency: Tensor,
+    ) -> Tensor:
+        """Inject per-scale VQ entropy and coarse-to-fine consistency into `Metacognition`."""
+        w_dt = self.meta_up.weight.dtype
+        with torch.autocast(device_type=base_meta_joint.device.type, enabled=False):
+            coarse_sim = F.cosine_similarity(
+                z_coarse_s.float(), z_coarse_c.float(), dim=-1, eps=1e-6
+            ).unsqueeze(-1)
+            fine_res_norm = (
+                z_res_fine_c.float().norm(dim=-1, keepdim=True)
+                / math.sqrt(max(1.0, float(self.d_vq)))
+            ).clamp(0.0, 5.0)
+            sim_gap = coarse_sim - 0.5 * (s_consistency.float() + c_consistency.float())
+
+        meta_in = torch.cat(
+            [
+                z_coarse_s.to(w_dt),
+                z_coarse_c.to(w_dt),
+                z_res_fine_c.to(w_dt),
+                s_entropy.to(w_dt),
+                c_entropy.to(w_dt),
+                s_consistency.to(w_dt),
+                c_consistency.to(w_dt),
+                coarse_sim.to(w_dt),
+                fine_res_norm.to(w_dt),
+                sim_gap.to(w_dt),
+            ],
+            dim=-1,
+        )
+        gate, val = self.meta_up(self.meta_norm(meta_in)).chunk(2, dim=-1)
+        delta = self.meta_down(F.silu(gate) * val)
+        scale_g = 0.35 * torch.tanh(self.meta_gate.float()).to(base_meta_joint.dtype)
+        return base_meta_joint + scale_g * delta.to(base_meta_joint.dtype)
+
+    def enhance_abstraction(
+        self,
+        item_ids: Tensor,
+        valid: Tensor,
+        base_pooled: Tensor,
+        *,
+        level: str,
+        pooler: Any,
+        strip_boundary: bool,
+        bos_id: int,
+        eos_id: int,
+    ) -> Tensor:
+        """Route `Abstraction` (`brief`, `standard`, `detailed`) through its matching NCM concept scale."""
+        safe_valid = valid.clone()
+        has_any = safe_valid.any(dim=-1)
+        if not has_any.all():
+            safe_valid[~has_any, 0] = True
+
+        ms = self.extract_features(item_ids, safe_valid)
+        if level == "brief":
+            z_seq, z_pool = ms.z_coarse_seq, ms.z_coarse_pool
+        elif level == "standard":
+            z_seq, z_pool = ms.z_mid_seq, ms.z_mid_pool
+        else:
+            z_seq, z_pool = ms.z_fine_seq, ms.z_fine_pool
+
+        h_scale = self.vqvae.decode_hidden_from_z_hat(z_seq, valid=safe_valid)
+        pooled_dec = pooler.pool_sequence(
+            h_scale,
+            item_ids,
+            safe_valid,
+            strip_boundary=strip_boundary,
+            bos_id=bos_id,
+            eos_id=eos_id,
+        )
+        vq_proj_mod = self.abstraction_vq_proj[level]
+        vq_vec = vq_proj_mod(z_pool.to(vq_proj_mod.weight.dtype))
+        ncm_abs = 0.5 * (pooled_dec.to(base_pooled.dtype) + vq_vec.to(base_pooled.dtype))
+        w_abs = 0.35 * torch.sigmoid(self.abstraction_blend_gate.float()).to(base_pooled.dtype)
+        return (1.0 - w_abs) * base_pooled + w_abs * ncm_abs
+
+    def enhance_item_embedding(
+        self,
+        item_ids: Tensor,
+        content_mask: Tensor,
+        base_proj: Tensor,
+    ) -> Tensor:
+        """Enrich `Association` item embeddings (`embed_items`) with multiscale NCM concept vectors."""
+        ms = self.extract_features(item_ids, content_mask)
+        w_dt = self.assoc_item_proj.weight.dtype
+        multi_in = torch.cat([ms.z_coarse_pool, ms.z_mid_pool, ms.z_fine_pool], dim=-1).to(w_dt)
+        ncm_proj = self.assoc_item_proj(multi_in).to(base_proj.dtype)
+        w_assoc = 0.25 * torch.sigmoid(self.assoc_gate.float()).to(base_proj.dtype)
+        return (1.0 - w_assoc) * base_proj + w_assoc * ncm_proj
+
+
+# ---------------------------------------------------------------------------
 # 7. Unified `NCMSystem`: End-to-End Training, Generation, COE Verification & RL
 # ---------------------------------------------------------------------------
 
@@ -1572,6 +2002,45 @@ class NCMSystem(nn.Module):
             self.config,
             self.vqvae,
             backbone,
+        )
+        coe_proj_dim = (
+            int(coe.config.projection_dim)
+            if (coe is not None and hasattr(coe, "config") and hasattr(coe.config, "projection_dim"))
+            else 32
+        )
+        self.coe_bridge = NCMCOEHeadBridge(
+            self.config,
+            self.vqvae,
+            d_model=int(backbone.config.d_model),
+            d_proj=coe_proj_dim,
+        )
+
+    def _load_from_state_dict(
+        self,
+        state_dict: dict,
+        prefix: str,
+        local_metadata: dict,
+        strict: bool,
+        missing_keys: list[str],
+        unexpected_keys: list[str],
+        error_msgs: list[str],
+    ) -> None:
+        for name, param in self.coe_bridge.named_parameters():
+            full_key = f"{prefix}coe_bridge.{name}"
+            if full_key not in state_dict:
+                state_dict[full_key] = param.detach().clone()
+        for name, buf in self.coe_bridge.named_buffers():
+            full_key = f"{prefix}coe_bridge.{name}"
+            if full_key not in state_dict:
+                state_dict[full_key] = buf.detach().clone()
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs,
         )
 
     @property
@@ -1709,16 +2178,27 @@ class NCMSystem(nn.Module):
             h_std_seq = self.vqvae.decode_hidden_from_z_hat(cum_z_hats[k_std], valid=target_valid)
             h_det_seq = self.vqvae.decode_hidden_from_z_hat(cum_z_hats[k_det], valid=target_valid)
 
-            def _abs_vec(h_seq: Tensor, lvl_name: str) -> Tensor:
+            def _abs_vec(h_seq: Tensor, z_seq: Tensor, lvl_name: str) -> Tensor:
                 pooled = coe.pooler.pool_sequence(
                     h_seq, target_ids, target_valid, strip_boundary=False
                 )
+                if self.config.enable_coe_head_bridge and hasattr(self, "coe_bridge"):
+                    z_pool = self.coe_bridge._pool_vq_seq(z_seq, target_valid)
+                    vq_proj = self.coe_bridge.abstraction_vq_proj[lvl_name]
+                    vq_vec = vq_proj(z_pool.to(vq_proj.weight.dtype)).to(pooled.dtype)
+                    w_abs = (
+                        0.35
+                        * torch.sigmoid(self.coe_bridge.abstraction_blend_gate.float()).to(
+                            pooled.dtype
+                        )
+                    )
+                    pooled = (1.0 - w_abs) * pooled + w_abs * vq_vec
                 gate = coe.abstraction_gates[lvl_name].sigmoid()
                 return coe.abstraction_norm(pooled + gate * coe.abstraction_proj(pooled))
 
-            v_brief = _abs_vec(h_brief_seq, "brief")
-            v_std = _abs_vec(h_std_seq, "standard")
-            v_det = _abs_vec(h_det_seq, "detailed")
+            v_brief = _abs_vec(h_brief_seq, cum_z_hats[k_brief], "brief")
+            v_std = _abs_vec(h_std_seq, cum_z_hats[k_std], "standard")
+            v_det = _abs_vec(h_det_seq, cum_z_hats[k_det], "detailed")
             sim_bs = F.cosine_similarity(v_brief.float(), v_det.detach().float(), dim=-1)
             sim_sd = F.cosine_similarity(v_std.float(), v_det.detach().float(), dim=-1)
             abs_loss = 0.5 * ((1.0 - sim_bs).mean() + (1.0 - sim_sd).mean())

@@ -1,0 +1,88 @@
+{
+  "checkpoint": "colab_mcl4_coe_v7_granite_e32_pure_rl/step_05000",
+  "precision": "NVFP4 (Blackwell sm_120)",
+  "architecture": "MCL4-COE 1.45B (E=32, top_k=8, 12 Encoder + 12 CED Decoder + 9 COE Operators)",
+  "dream_rsi": {
+    "cycles": 4945,
+    "accepted_revisions": 86,
+    "replays_dreamed": 4681800,
+    "active_policy": "WIDTH 2\nROOT 1\nRANK SCORE GAIN UTILITY\nSTOP 0.84\nPATIENCE 2\nROUNDS 3"
+  },
+  "benchmarks": {
+    "ARC-Challenge (N=300, 0-shot)": {
+      "ibm_published_base": 39.42,
+      "ibm_published_instruct": 42.66,
+      "raw_hf_granite_instruct_bf16_0shot": {
+        "acc": 29.67,
+        "acc_norm": 34.67
+      },
+      "mcl4_coe_step_00000_graft_nvfp4": {
+        "acc": 25.67,
+        "acc_norm": 30.67,
+        "hybrid_acc": 30.33
+      },
+      "mcl4_coe_step_04900_rl_nvfp4": {
+        "acc": 30.67,
+        "acc_norm": 35.0,
+        "hybrid_acc": 36.67
+      },
+      "mcl4_coe_step_05000_rl_nvfp4": {
+        "acc": 31.33,
+        "acc_norm": 36.0,
+        "hybrid_acc": 36.67
+      }
+    },
+    "MMLU (N=342 stratified across all 57 subjects, 0-shot)": {
+      "ibm_published_base": 26.53,
+      "ibm_published_instruct": 26.13,
+      "raw_hf_granite_instruct_bf16_0shot": {
+        "acc": 34.21,
+        "acc_norm": 35.67
+      },
+      "mcl4_coe_step_00000_graft_nvfp4": {
+        "acc": 24.85,
+        "acc_norm": 22.51,
+        "hybrid_acc": 23.68
+      },
+      "mcl4_coe_step_04900_rl_nvfp4": {
+        "acc": 33.04,
+        "acc_norm": 33.92,
+        "hybrid_acc": 32.46
+      },
+      "mcl4_coe_step_05000_rl_nvfp4": {
+        "acc": 32.75,
+        "acc_norm": 33.92,
+        "hybrid_acc": 33.04
+      }
+    },
+    "HellaSwag (N=300, 0-shot)": {
+      "ibm_published_base": 66.13,
+      "ibm_published_instruct": 65.97,
+      "raw_hf_granite_instruct_bf16_0shot": {
+        "acc": 46.33,
+        "acc_norm": 53.33
+      },
+      "mcl4_coe_step_00000_graft_nvfp4": {
+        "acc": 27.0,
+        "acc_norm": 24.0,
+        "hybrid_acc": 26.0
+      },
+      "mcl4_coe_step_04900_rl_nvfp4": {
+        "acc": 42.67,
+        "acc_norm": 54.33,
+        "hybrid_acc": 54.0
+      },
+      "mcl4_coe_step_05000_rl_nvfp4": {
+        "acc": 46.0,
+        "acc_norm": 54.33,
+        "hybrid_acc": 54.67
+      }
+    },
+    "TypedDecision_MCQA (N=128, COE Operators)": {
+      "mcl4_coe_step_00000_graft_nvfp4": 19.53,
+      "mcl4_coe_step_04900_rl_nvfp4": 37.5,
+      "mcl4_coe_step_04939_peak_rl_nvfp4": 45.31,
+      "mcl4_coe_step_05000_rl_nvfp4": 36.72
+    }
+  }
+}

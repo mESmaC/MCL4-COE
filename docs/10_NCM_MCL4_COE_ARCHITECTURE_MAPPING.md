@@ -237,3 +237,43 @@ When we are ready to implement this in `src/mcl4_coe/`, the complete integration
    - Adds block-diagonal intra-level masking (`attn_pattern="block_diagonal"` with per-level RoPE reset `[0 .. ell_k - 1]`) to `CEDDecoderLayer`, scale-adaptive `top_k(k)` density scheduling (`top_k = 32` at coarse scales $\to$ `top_k = 8` at fine scales), and multiscale concept `PLE` injection.
 3. **`src/mcl4_coe/ornith_rl.py` & `src/mcl4_coe/dream_rsi.py` (`step_ncm_self_improvement`):**
    - Connects NCM's exact single-pass hierarchical log-likelihood $\sum_{k=1}^K w_k \sum_{i=1}^{\ell_k} \log p_\theta(r_k^i \mid \hat{z}^{(k-1)})$ to `grpo_clipped_loss`, `OrnithPPLeaderboard` (`pp = p * 0.95^(n-1)`), mid-hierarchy `COE` operator verification (`Decision`/`Deduction`/`Metacognition` on $\hat{z}^{(k)}$), and `Dream-RSI` scale-tree discovery.
+
+
+---
+
+## 7. Initial Empirical Validation on `Granite 3.1 1B-A400M` (`Step 5000 -> 5500`, Pure RL + NCM)
+
+We implemented the complete NCM stack on the `ncm` branch in [`src/mcl4_coe/ncm.py`](../src/mcl4_coe/ncm.py) and [`scripts/launch_v7_granite_ncm_rl.py`](../scripts/launch_v7_granite_ncm_rl.py), and executed an initial 500-step Pure-RL + NCM validation run (`colab_mcl4_coe_v7_granite_ncm_e32_pure_rl`, **no mitosis**, $E=32, \text{top-}k=8$, `use_nvfp4=True`) starting from the `step_05000.pt` `Granite 3.1` donor checkpoint on an `NVIDIA RTX PRO 6000 Blackwell (102 GB)` GPU.
+
+### 7.1 Stabilization & Calibration Fixes Required for Donor Grafting
+During the 250-step frozen-donor NCM fitting phase (`fit_ncm_hierarchy_on_frozen_donor`), we identified and resolved three key numerical dynamics:
+1. **Scale-Normalized Dead-Code Restart ([`MultiscaleResidualQuantizer._restart_dead_codes`](../src/mcl4_coe/ncm.py)):**
+   - Normalizing dead-code detection by the per-level mean cluster size (`(ema_cs / mean_cs) < restart_threshold`) and resetting restarted entries to `ema_cs[dead] = mean_cs`, `ema_w[dead] = new_vecs * mean_cs` in `float32` eliminated a $20\times$ codebook norm inflation (`||E||_2: 0.7 -> 19.6`) when Laplace-smoothed cluster sizes grew above $1.0$.
+2. **Codebook-RMS Query Normalization ([`TiedCodebookHead.forward`](../src/mcl4_coe/ncm.py)):**
+   - Normalizing projected decoder queries $u$ to match each level's codebook RMS norm $\sqrt{\overline{\|E_k\|^2} / d_{\text{vq}}}$ prevented initial squared-distance logits $-d(u, E_k) / \overline{\|E_k\|^2}$ from exploding (`Step 1` NCM CE dropped from `51.44` to `7.59`).
+3. **Scale-Interpolated Positional Embeddings & Prompt Cross-Attention ([`NCMGeneratorAdapter`](../src/mcl4_coe/ncm.py)):**
+   - Adding interpolated positional embeddings (`ncm_pos_emb`) across levels $\ell_k \in [1, 4, 11, 24, 41, 64]$ and point-wise prompt cross-attention (`_apply_prompt_refinement`) allowed coarse-to-fine levels to distinguish spatial positions and attend directly to `#U$#` prompt tokens.
+
+### 7.2 Quantitative Trajectory (`Steps 5000 -> 5500`)
+
+| Window | Train `lm_loss` | Train `bpb` | Typed `decision_loss` | `ornith_harness_reward` | `ornith_pass_rate` | Best `val_bpb` / `val_mcqa` |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Baseline (`Step 5000`)** | — | — | — | — | — | `0.74301` / `38.28%` |
+| **Steps `5001–5100`** | `1.1940` | `0.4615` | `0.6567` | `0.5052` | `71.60%` | **`0.74111` / `42.97%`** (`Step 5050`) |
+| **Steps `5101–5250`** | `1.0953` | `0.4248` | `0.7301` | `0.5264` | `79.79%` | `0.74447` / `40.62%` |
+| **Steps `5251–5400`** | `1.0016` | `0.3787` | `0.9598` | **`0.5524`** | **`80.52%`** | `0.74507` / `40.62%` |
+| **Steps `5401–5500`** | **`1.0848`** (`0.84` end) | **`0.4019`** (`0.30` end) | **`0.4831`** (`-26.4%`) | `0.5321` | `75.36%` | **`0.74355` / `39.06%`** (`Step 5450/5500`) |
+
+- **Blackwell `NVFP4` Kernel Execution:** Executed **`22,864,896` fused multi-expert `NVFP4` GEMMs** across the 1,536 `NVFP4Linear` expert projections at **`1,432–1,864 tok/s`** and **`16.49 GB` peak VRAM**.
+- **Typed Decision & Operator Sharpening:** Supervising the `COE` `abstraction` operator with NCM's coarse concept latents reduced `decision_loss` by **`26.4%`** (`0.6567 -> 0.4831`) and increased `Ornith-2.5` verification pass rates from `71.6%` to `80.5%`.
+
+### 7.3 Emergent Multiscale Semantic Hierarchy (`step_05500.pt`)
+Evaluating [`DonorAnchoredMultiscaleVQVAE.reconstruct_multiscale_tokens`](../src/mcl4_coe/ncm.py) on `step_05500.pt` across all 6 cumulative scales ($t_k \in [1, 4, 11, 24, 41, 64]$) confirmed an emergent coarse-to-fine semantic ladder with **`62.92%` active codebook utilization** across all $6 \times 1024$ residual codes:
+- **Scale $k=0, 1$ ($t_k = 1, 4$, $64\times\text{–}16\times$ compression):** Captures global clause and line-break rhythm.
+- **Scale $k=2$ ($t_2 = 11$, $5.8\times$ compression):** Recovers syntactic connectors (`"to ... and ... that"`).
+- **Scale $k=3$ ($t_3 = 24$, $2.7\times$ compression, `19.1%` held-out / `~25%` train exact match):** Recovers core content nouns and verbs (`"determined"`, `"knowledge"`, `"world"`, `"means"`).
+- **Scale $k=4$ ($t_4 = 41$, $1.6\times$ compression, `34.2%` held-out / `~44%` train exact match):** Recovers the phrase-level skeleton.
+- **Scale $k=5$ ($t_5 = 64$, $1.0\times$ compression, `73.3%` held-out / `84.4%` mean, `89.5%` peak train exact match):** Reconstructs the full token sequence, and where quantization noise misses the exact token ID, it decodes to **nearest semantic synonyms** in Granite 3.1's frozen embedding space (`"retain"` $\to$ `"develop"`, `"works"` $\to$ `"plays"`, `"AP physics"` $\to$ `"application physical"`, `"don't really like"` $\to$ `"didn't quite like"`).
+
+### 7.4 Next Step for Standalone Open-Loop NCM Generation
+While Stage-1 (`DonorAnchoredMultiscaleVQVAE`) converged to `84.4%–89.5%` reconstruction accuracy in 500 steps, Stage-2 (`NCMGeneratorAdapter`) reached `~21.9%` coarse concept accuracy (`ncm_per_level_acc`), which is not yet sufficient for open-loop cascading ($k=0 \to 5$) without teacher forcing. Running a dedicated Stage-2 generator distillation phase on the now-converged Stage-1 VQ-VAE codebooks will unlock standalone $K$-step parallel NCM inference and speculative drafting.

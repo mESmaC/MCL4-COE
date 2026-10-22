@@ -154,7 +154,7 @@ def build_v7_granite_ncm_pure_rl_config(
 def fit_ncm_hierarchy_on_frozen_donor(
     trainer: MCL4COETrainer,
     *,
-    fit_steps: int = 200,
+    fit_steps: int = 250,
     fit_lr: float = 1.5e-3,
     batch_size: int = 16,
 ) -> dict[str, Any]:
@@ -327,8 +327,13 @@ def main() -> None:
         else r"X:\MCL4-COE\runs\colab_mcl4_coe_v7_granite_e32_pure_rl\checkpoints\step_05000.meta.json",
     )
     parser.add_argument("--total-steps", type=int, default=5500)
-    parser.add_argument("--fit-steps", type=int, default=200)
+    parser.add_argument("--fit-steps", type=int, default=250)
     parser.add_argument("--fit-lr", type=float, default=1.5e-3)
+    parser.add_argument(
+        "--force-fit",
+        action="store_true",
+        help="Run NCM fitting even when resuming from an existing NCM run checkpoint",
+    )
     parser.add_argument("--num-experts", type=int, default=32)
     parser.add_argument("--top-k", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=8)
@@ -340,11 +345,26 @@ def main() -> None:
     parser.add_argument("--hf-backup-repo", type=str, default="YYCore/mcl4-coe-runs")
     args = parser.parse_args()
 
+    # Automatically resume from latest checkpoint in <runs_root>/<run_id>/checkpoints if present
+    target_ckpt_dir = Path(args.runs_root).resolve() / args.run_id / "checkpoints"
+    existing_ckpts = sorted(target_ckpt_dir.glob("step_*.meta.json")) if target_ckpt_dir.is_dir() else []
+    resume_ckpt = args.resume
+    fit_steps = int(args.fit_steps)
+    if existing_ckpts and not args.force_fit:
+        resume_ckpt = str(existing_ckpts[-1])
+        fit_steps = 0
+        if not args.dry_run:
+            print(
+                f"[Auto-Resume] Detected existing NCM checkpoint {resume_ckpt}; "
+                f"resuming with fit_steps={fit_steps}.",
+                flush=True,
+            )
+
     cfg = build_v7_granite_ncm_pure_rl_config(
         run_id=args.run_id,
         runs_root=args.runs_root,
         shards_root=args.shards_root,
-        resume_checkpoint=args.resume,
+        resume_checkpoint=resume_ckpt,
         total_steps=args.total_steps,
         num_experts=args.num_experts,
         top_k=args.top_k,
@@ -361,7 +381,7 @@ def main() -> None:
         return
 
     # Copy existing dream_state.json from step_05000 run if present so Dream-RSI continues seamlessly
-    res_path = Path(args.resume).resolve()
+    res_path = Path(resume_ckpt).resolve()
     donor_dream = res_path.parent.parent / "dream" / "dream_state.json"
     target_dream = Path(args.runs_root).resolve() / args.run_id / "dream" / "dream_state.json"
     if donor_dream.is_file() and not target_dream.is_file():
@@ -401,10 +421,10 @@ def main() -> None:
             )
 
     trainer = MCL4COETrainer(cfg, on_step_callback=_on_step)
-    if args.fit_steps > 0:
+    if fit_steps > 0:
         fit_ncm_hierarchy_on_frozen_donor(
             trainer,
-            fit_steps=args.fit_steps,
+            fit_steps=fit_steps,
             fit_lr=args.fit_lr,
         )
     trainer.train()

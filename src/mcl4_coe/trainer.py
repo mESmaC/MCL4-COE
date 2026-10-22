@@ -2646,13 +2646,18 @@ class MCL4COETrainer:
                                 add_eos=False,
                             )
                             p_ids_t = torch.tensor([p_toks], dtype=torch.long, device=self.device)
-                            ncm_gen = self.ncm_system.generate(
-                                p_ids_t,
-                                temperature=0.0,
-                                enable_coe_guidance=True,
-                                enable_early_exit=False,
-                                tokenizer=tok,
-                            )
+                            with torch.autocast(
+                                device_type=self.device.type,
+                                dtype=torch.bfloat16,
+                                enabled=use_amp,
+                            ):
+                                ncm_gen = self.ncm_system.generate(
+                                    p_ids_t,
+                                    temperature=0.0,
+                                    enable_mid_hierarchy_coe=True,
+                                    enable_early_exit=False,
+                                    tokenizer=tok,
+                                )
                             sample_entry["ncm_trace"] = ncm_gen.text
                             sample_entry["ncm_levels_executed"] = ncm_gen.levels_executed
                         except Exception:

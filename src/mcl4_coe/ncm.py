@@ -1104,10 +1104,12 @@ class TiedCodebookHead(nn.Module):
         return self._codebook_ref[0].weight
 
     def forward(self, hidden: Tensor) -> Tensor:
-        u = self.proj(hidden).float()
+        u_raw = self.proj(hidden).float()
         e_w = self.codebook_weight.detach().float()
         e_sq = e_w.square().sum(dim=-1)
         d_scale = e_sq.mean().clamp_min(1e-8)
+        u_rms = torch.rsqrt(u_raw.square().mean(dim=-1, keepdim=True) + 1e-6)
+        u = u_raw * u_rms * (d_scale / float(self.d_vq)).sqrt()
         neg_d2 = (2.0 * torch.matmul(u, e_w.t()) - e_sq) / d_scale
         inv_t = (
             self.log_inv_T.clamp(math.log(0.1), math.log(100.0)).exp()
@@ -1208,6 +1210,21 @@ class NCMGeneratorAdapter(nn.Module):
         self.ncm_in_norm = RMSNorm(self.d_model, eps=backbone.config.rms_norm_eps)
         self.level_embedding = nn.Embedding(self.num_levels, self.d_model)
         nn.init.normal_(self.level_embedding.weight, mean=0.0, std=1.0 / math.sqrt(self.d_model))
+        self.ncm_pos_emb = nn.Embedding(max(512, int(config.target_length) * 2), self.d_model)
+        nn.init.normal_(self.ncm_pos_emb.weight, mean=0.0, std=0.02)
+
+        # Dedicated NCM prompt cross-attention + post-decoder refinement block (trainable even when donor is frozen)
+        self.n_attn_heads = max(1, min(self.d_model, int(backbone.config.n_heads)))
+        while self.d_model % self.n_attn_heads != 0 and self.n_attn_heads > 1:
+            self.n_attn_heads -= 1
+        self.attn_head_dim = self.d_model // self.n_attn_heads
+        self.prompt_q_norm = RMSNorm(self.d_model, eps=backbone.config.rms_norm_eps)
+        self.prompt_q = nn.Linear(self.d_model, self.d_model, bias=False)
+        self.prompt_kv = nn.Linear(self.d_model, 2 * self.d_model, bias=False)
+        self.prompt_out = nn.Linear(self.d_model, self.d_model, bias=False)
+        self.post_norm = RMSNorm(self.d_model, eps=backbone.config.rms_norm_eps)
+        self.post_ffn_up = nn.Linear(self.d_model, 2 * self.d_model, bias=False)
+        self.post_ffn_down = nn.Linear(self.d_model, self.d_model, bias=False)
 
         # Distance-tied codebook output heads (one per scale k = 0 .. K-1)
         if config.tie_heads_to_codebook:
@@ -1292,17 +1309,73 @@ class NCMGeneratorAdapter(nn.Module):
     def _embed_level_input(
         self, raw_vq_input: Tensor, level_idx: int
     ) -> Tensor:
-        """Apply post-upsample residual conv, linear projection, norm, and scale embedding for level `level_idx`."""
+        """Apply post-upsample residual conv, linear projection, norm, scale embedding, and fractional position embedding."""
         x = raw_vq_input.to(self.ncm_in_proj.weight.dtype)
+        eff_len = x.shape[1]
         if self.use_post_upsample_conv and level_idx < len(self.post_upsample_convs):
             delta = self.post_upsample_convs[level_idx](x.transpose(-1, -2)).transpose(-1, -2)
             x = x + delta
         # Inject learned l0_queries at level 0 when raw_vq_input is zero-initialized
-        if level_idx == 0 and x.shape[1] == self.l0_queries.shape[1]:
+        if level_idx == 0 and eff_len == self.l0_queries.shape[1]:
             x = x + self.l0_queries.to(x.dtype)
         h = self.ncm_in_norm(self.ncm_in_proj(x))
         lvl_emb = self.level_embedding.weight[level_idx].view(1, 1, -1).to(h.dtype)
-        return h + lvl_emb
+        base_pos = self.ncm_pos_emb.weight[: max(1, int(self.config.target_length))].float()
+        if eff_len == base_pos.shape[0]:
+            pos_emb = base_pos.unsqueeze(0).to(h.dtype)
+        elif eff_len == 1:
+            pos_emb = base_pos.mean(dim=0, keepdim=True).unsqueeze(0).to(h.dtype)
+        else:
+            pos_emb = (
+                F.interpolate(
+                    base_pos.t().unsqueeze(0),
+                    size=(eff_len,),
+                    mode="linear",
+                    align_corners=False,
+                )
+                .transpose(-1, -2)
+                .contiguous()
+                .to(h.dtype)
+            )
+        return h + lvl_emb + pos_emb
+
+    def _apply_prompt_refinement(
+        self,
+        h: Tensor,
+        prompt_hidden: Tensor | None,
+        state_valid: Tensor,
+        valid: Tensor,
+        *,
+        owner_rows: Tensor | None = None,
+    ) -> Tensor:
+        """Point-wise prompt cross-attention + SwiGLU FFN refinement (trainable even when donor is frozen)."""
+        if prompt_hidden is not None:
+            r, t_cand, width = h.shape
+            q = (
+                self.prompt_q(self.prompt_q_norm(h))
+                .view(r, t_cand, self.n_attn_heads, self.attn_head_dim)
+                .transpose(1, 2)
+            )
+            p_src = prompt_hidden.detach().to(self.prompt_kv.weight.dtype)
+            kv = self.prompt_kv(p_src).view(
+                p_src.shape[0], p_src.shape[1], 2, self.n_attn_heads, self.attn_head_dim
+            )
+            k, v = (part.transpose(1, 2).contiguous() for part in kv.unbind(dim=2))
+            if owner_rows is not None:
+                k = k.index_select(0, owner_rows)
+                v = v.index_select(0, owner_rows)
+                s_valid = state_valid.index_select(0, owner_rows)
+            else:
+                s_valid = state_valid
+            allowed = s_valid[:, None, None, :].expand(r, 1, t_cand, k.shape[2])
+            fallback = torch.zeros_like(allowed)
+            fallback[..., 0] = True
+            allowed = allowed | (~allowed.any(-1, keepdim=True) & fallback)
+            ctx = F.scaled_dot_product_attention(q, k, v, attn_mask=allowed)
+            h = h + self.prompt_out(ctx.transpose(1, 2).contiguous().view(r, t_cand, width))
+        gate, val = self.post_ffn_up(self.post_norm(h)).chunk(2, dim=-1)
+        h = h + self.post_ffn_down(F.silu(gate) * val)
+        return h.masked_fill(~valid.unsqueeze(-1), 0.0)
 
     def _run_decoder_stack(
         self,
@@ -1312,6 +1385,7 @@ class NCMGeneratorAdapter(nn.Module):
         global_kv_cache: list[tuple[Tensor, Tensor]],
         state_valid: Tensor,
         *,
+        prompt_hidden: Tensor | None = None,
         owner_rows: Tensor | None = None,
         local_attn_mask: Tensor | None = None,
         rope_positions: Tensor | None = None,
@@ -1366,7 +1440,19 @@ class NCMGeneratorAdapter(nn.Module):
                     loads.append(load)
                 state = x
 
-            normed = backbone.final_norm(state).masked_fill(~valid.unsqueeze(-1), 0.0)
+            fn = backbone.final_norm
+            s_f = state.float()
+            rms = torch.rsqrt(s_f.pow(2).mean(dim=-1, keepdim=True) + fn.eps)
+            normed = ((s_f * rms).to(state.dtype) * fn.weight.detach().to(state.dtype)).masked_fill(
+                ~valid.unsqueeze(-1), 0.0
+            )
+            normed = self._apply_prompt_refinement(
+                normed,
+                prompt_hidden,
+                state_valid,
+                valid,
+                owner_rows=owner_rows,
+            )
             mean_load = torch.stack(loads).mean(dim=0)
             if (
                 level_idx_for_density is not None
@@ -1418,6 +1504,7 @@ class NCMGeneratorAdapter(nn.Module):
             valid_concat,
             global_kv_cache,
             encoded_state.valid,
+            prompt_hidden=encoded_state.hidden,
             owner_rows=owner_rows,
             local_attn_mask=block_mask,
             rope_positions=rope_pos,
@@ -1947,6 +2034,7 @@ class NCMSystem(nn.Module):
                 valid_k,
                 global_kv_cache,
                 encoded_prompt.valid,
+                prompt_hidden=encoded_prompt.hidden,
                 local_attn_mask=None,
                 rope_positions=rope_pos,
                 level_idx_for_density=k,
@@ -1962,6 +2050,7 @@ class NCMSystem(nn.Module):
                     valid_k,
                     null_kv_cache,
                     null_valid,
+                    prompt_hidden=null_enc.hidden,
                     local_attn_mask=None,
                     rope_positions=rope_pos,
                     level_idx_for_density=k,
@@ -2031,6 +2120,7 @@ class NCMSystem(nn.Module):
                         valid_k,
                         global_kv_cache,
                         encoded_prompt.valid,
+                        prompt_hidden=encoded_prompt.hidden,
                         local_attn_mask=None,
                         rope_positions=rope_pos,
                         level_idx_for_density=k,

@@ -1381,17 +1381,23 @@ class OrnithEnvArchitect:
         *,
         pp_leaderboard: OrnithPPLeaderboard | None = None,
     ) -> int:
-        """Select task family `0..35`, routing toward under-trained PP skills and recursive frontiers as skills saturate."""
-        base_slot = idx % self.TOTAL_FAMILIES
+        """Select task family `0..39`, routing toward Sherlockian reasoning, under-trained PP skills, and recursive frontiers."""
+        if idx < self.TOTAL_FAMILIES:
+            return idx % self.TOTAL_FAMILIES
+        # Parity-unlocked stride so alternating external steps cannot lock selection to only even family indices
+        base_slot = (idx + (idx // 2)) % self.TOTAL_FAMILIES
+        # Dedicate every 3rd online step to the 4 Sherlockian deductive/abductive/timeline/cipher modes (36..39)
+        if idx % 3 == 0:
+            return 36 + ((idx // 3) % self.NUM_SHERLOCK_FAMILIES)
         mean_prim_pass = sum(self.family_pass_ema[: self.NUM_PRIMITIVE_FAMILIES]) / float(
             self.NUM_PRIMITIVE_FAMILIES
         )
-        # When a PP leaderboard is active and idx >= TOTAL_FAMILIES, prioritize lowest-PP or high-frontier skills
-        if pp_leaderboard is not None and idx >= self.TOTAL_FAMILIES and (idx % 4 == 3):
+        # When a PP leaderboard is active and idx >= TOTAL_FAMILIES, prioritize lowest-PP or unvisited skills
+        if pp_leaderboard is not None and (idx % 4 in (2, 3)):
             low_skills = pp_leaderboard.lowest_pp_skill_indices(self.TOTAL_FAMILIES)
             if low_skills:
-                return int(low_skills[(idx // 4 + seed) % min(8, len(low_skills))])
-        # Route saturated primitive slots toward compositional, specialized, or infinite-recursive families (20..35)
+                return int(low_skills[(idx // 2 + seed) % min(8, len(low_skills))])
+        # Route saturated primitive slots toward compositional, specialized, recursive, or Sherlockian families (20..39)
         if mean_prim_pass > 0.70 and (idx % 3 == 2) and base_slot < self.NUM_PRIMITIVE_FAMILIES:
             advanced_span = self.TOTAL_FAMILIES - self.NUM_PRIMITIVE_FAMILIES
             return self.NUM_PRIMITIVE_FAMILIES + ((idx + seed) % advanced_span)
@@ -1528,6 +1534,45 @@ class OrnithSelfImprover:
                         ]
                 except Exception:
                     self.external_tasks = []
+
+    def restore_from_metrics_jsonl(self, metrics_path: Any, *, max_step: int | None = None) -> int:
+        """Replay historical `ornith_active_skill` and `ornith_raw_pp` plays from `metrics.jsonl` on resume."""
+        import json
+        from pathlib import Path
+
+        m_path = Path(metrics_path)
+        if not m_path.is_file():
+            return 0
+        skill_to_kind = {skill: idx for idx, (skill, _dom) in enumerate(SKILL_TAXONOMY)}
+        replayed = 0
+        try:
+            for line in m_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                if not line.strip():
+                    continue
+                rec = json.loads(line)
+                step_val = int(rec.get("step", 0))
+                if max_step is not None and step_val > max_step:
+                    continue
+                if "ornith_raw_pp" not in rec or "ornith_active_skill" not in rec:
+                    continue
+                skill = str(rec.get("ornith_active_skill", ""))
+                raw_pp = float(rec.get("ornith_raw_pp", 0.0))
+                pass_rate = float(rec.get("ornith_pass_rate", 0.75))
+                if not skill or raw_pp <= 0.0:
+                    continue
+                sub = self.pp_leaderboard.submit_play(skill, raw_pp)
+                replayed += 1
+                self._step_counter = max(self._step_counter, replayed)
+                if skill in skill_to_kind:
+                    self.env_architect.record_outcome(
+                        skill_to_kind[skill],
+                        pass_rate,
+                        1.0,
+                        pp_weight=sub.skill_weight,
+                    )
+        except Exception:
+            pass
+        return replayed
 
     def _synthesize_infinite_recursive_task(
         self,

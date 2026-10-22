@@ -1980,6 +1980,14 @@ class MCL4COETrainer:
             with self.metrics_path.open("w", encoding="utf-8", newline="\n") as fh:
                 fh.write(json.dumps(anchor, sort_keys=True) + "\n")
 
+        if self.ornith_improver is not None and self.metrics_path.is_file():
+            try:
+                self.ornith_improver.restore_from_metrics_jsonl(
+                    self.metrics_path, max_step=self.current_step
+                )
+            except Exception:
+                pass
+
     def _compute_lr(self, step: int) -> float:
         base_step = getattr(self, "initial_step", 0)
         stage_steps = max(1, self.config.total_steps - base_step)

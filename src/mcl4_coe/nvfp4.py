@@ -36,6 +36,14 @@ def get_gemm_counts() -> dict[str, int]:
     return dict(_GEMM_COUNTS)
 
 
+_NVFP4_OPT_STEP: int = 0
+
+
+def bump_nvfp4_optimizer_step() -> None:
+    global _NVFP4_OPT_STEP
+    _NVFP4_OPT_STEP += 1
+
+
 def reset_gemm_counts() -> None:
     """Zero all NVFP4 GEMM phase counters."""
     for phase in _GEMM_COUNTS:
@@ -975,7 +983,8 @@ def _get_or_build_grouped_nvfp4_cache(experts: nn.ModuleList, proj_name: str) ->
     sr_ste_decay = layers[0].sr_ste_decay
 
     cur_versions = [
-        (w._version, w.data_ptr(), layer.sparsity_mode) for w, layer in zip(weights, layers)
+        (w._version, _NVFP4_OPT_STEP if w.requires_grad else 0, w.data_ptr(), layer.sparsity_mode)
+        for w, layer in zip(weights, layers)
     ]
     cache_dict = getattr(experts, "_nvfp4_grouped_cache", None)
     if cache_dict is None:

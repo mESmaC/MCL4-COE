@@ -30,7 +30,7 @@ import torch.nn.functional as F
 from .backbone import MCL4CEDBackbone, MCL4CEDConfig
 from .data import ByteTokenizer, get_tokenizer
 from .ensemble import CognitiveSchedule, MultiPassController, compute_joint_coe_loss
-from .nvfp4 import convert_linear_to_nvfp4, get_gemm_counts, reset_gemm_counts
+from .nvfp4 import bump_nvfp4_optimizer_step, convert_linear_to_nvfp4, get_gemm_counts, reset_gemm_counts
 from .operators import COEConfig, CognitiveOperatorEnsemble
 from .optim import CPUOffloadAdamW, model_state_cpu, prepare_model
 from .ornith_rl import OrnithSelfImprover, parameter_count
@@ -2489,6 +2489,8 @@ class MCL4COETrainer:
 
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
                 self.optimizer.step()
+                if self.config.use_nvfp4:
+                    bump_nvfp4_optimizer_step()
 
                 # Single GPU-to-CPU sync point per step after optimizer.step()
                 step_unmasked_tokens = int(step_tokens_gpu.item())

@@ -3333,6 +3333,7 @@ class OrnithSelfImprover:
         ncm_distill_out = ncm_system.forward_training_step(
             prompt_tensor,
             gold_cont_tensor,
+            train_vqvae_jointly=False,
             include_coe_abstraction_loss=True,
         )
 
@@ -3373,8 +3374,8 @@ class OrnithSelfImprover:
 
         combined_loss = (
             base_out.loss
-            + 0.50 * ncm_distill_out.total_loss
-            + 0.25 * ncm_grpo_loss
+            + 0.15 * ncm_distill_out.total_loss
+            + 0.15 * ncm_grpo_loss
         )
         return replace(
             base_out,

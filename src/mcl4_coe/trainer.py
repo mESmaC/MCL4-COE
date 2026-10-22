@@ -996,11 +996,15 @@ class MCL4COETrainer:
                     ".k_norm.",
                 )
             )
+            ncm_decay, ncm_nodecay = [], []
             adapter_decay, adapter_nodecay = [], []
             donor_decay, donor_nodecay = [], []
             embed_params = []
             for name, p in self.model.named_parameters():
                 if not p.requires_grad:
+                    continue
+                if name.startswith("ncm_system."):
+                    (ncm_decay if p.ndim >= 2 else ncm_nodecay).append(p)
                     continue
                 is_new_adapter = (not name.startswith("backbone.")) or any(
                     m in name for m in new_adapter_markers
@@ -1012,8 +1016,11 @@ class MCL4COETrainer:
                 else:
                     (donor_decay if p.ndim >= 2 else donor_nodecay).append(p)
             d_scale = float(self.config.donor_backbone_lr_scale)
+            ncm_scale = 5.0 if d_scale < 0.1 else 1.0
             emb_scale = d_scale / max(1.0, float(self.config.embedding_multiplier) * 0.5)
             param_groups = [
+                {"params": ncm_decay, "weight_decay": self.config.weight_decay, "lr_scale": ncm_scale},
+                {"params": ncm_nodecay, "weight_decay": 0.0, "lr_scale": ncm_scale},
                 {"params": adapter_decay, "weight_decay": self.config.weight_decay, "lr_scale": 1.0},
                 {"params": adapter_nodecay, "weight_decay": 0.0, "lr_scale": 1.0},
                 {"params": donor_decay, "weight_decay": self.config.weight_decay, "lr_scale": d_scale},
@@ -2632,7 +2639,7 @@ class MCL4COETrainer:
                     }
                     if self.config.enable_ncm and self.ncm_system is not None:
                         try:
-                            tok = self.controller.tokenizer
+                            tok = self.tokenizer
                             p_toks = tok.encode(
                                 f"#U$# {self.config.sample_prompt}\n#T$# ",
                                 add_bos=True,

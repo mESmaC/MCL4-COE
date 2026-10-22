@@ -446,15 +446,16 @@ class MultiscaleResidualQuantizer(nn.Module):
     ) -> None:
         if self.restart_threshold <= 0.0 or flat_input.shape[0] == 0:
             return
-        dead = ema_cs < self.restart_threshold
+        mean_cs = ema_cs.mean().clamp_min(1e-6)
+        dead = (ema_cs / mean_cs) < self.restart_threshold
         n_dead = int(dead.sum().item())
         if n_dead == 0:
             return
         src = torch.randint(0, flat_input.shape[0], (n_dead,), device=flat_input.device)
         new_vecs = flat_input[src].to(emb_i.weight.dtype)
         emb_i.weight.data[dead] = new_vecs
-        ema_w[dead] = new_vecs.to(ema_w.dtype)
-        ema_cs[dead] = 1.0
+        ema_cs[dead] = mean_cs
+        ema_w[dead] = (new_vecs.float() * mean_cs).to(ema_w.dtype)
 
     @torch.no_grad()
     def kmeans_init_level(self, level_idx: int, samples: Tensor, n_iters: int = 15) -> None:
@@ -1583,6 +1584,10 @@ class NCMSystem(nn.Module):
         w_k = compute_ncm_level_weights(
             level_lengths, alpha=self.config.loss_alpha, device=target_ids.device
         )
+        eff_weighted_tokens = sum(
+            float(w_k[k].item()) * float(max(1, tgt_k.shape[1]))
+            for k, tgt_k in enumerate(code_targets)
+        )
         ncm_ce_loss = torch.zeros((), device=target_ids.device, dtype=torch.float32)
         per_level_ce: list[float] = []
         per_level_acc: list[float] = []
@@ -1599,6 +1604,7 @@ class NCMSystem(nn.Module):
             with torch.no_grad():
                 acc_k = float((logits_k.argmax(dim=-1) == tgt_k).float().mean().item())
                 per_level_acc.append(round(acc_k, 4))
+        ncm_ce_loss = ncm_ce_loss / max(1.0, eff_weighted_tokens)
 
         # 6. Multiscale COE `Abstraction` Alignment (`brief` <-> coarse, `standard` <-> mid, `detailed` <-> fine)
         abs_loss = torch.zeros((), device=target_ids.device, dtype=torch.float32)

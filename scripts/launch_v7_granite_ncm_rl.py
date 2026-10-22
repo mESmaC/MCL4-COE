@@ -45,7 +45,7 @@ def build_v7_granite_ncm_pure_rl_config(
     lr: float = 2.0e-5,
     donor_backbone_lr_scale: float = 0.002,
     ornith_weight: float = 0.30,
-    ncm_weight: float = 0.25,
+    ncm_weight: float = 0.12,
     ncm_target_length: int = 64,
     ncm_num_levels: int = 6,
     ncm_codebook_size: int = 1024,
@@ -336,7 +336,7 @@ def main() -> None:
     parser.add_argument("--lr", type=float, default=2.0e-5)
     parser.add_argument("--donor-lr-scale", type=float, default=0.002)
     parser.add_argument("--ornith-weight", type=float, default=0.30)
-    parser.add_argument("--ncm-weight", type=float, default=0.25)
+    parser.add_argument("--ncm-weight", type=float, default=0.12)
     parser.add_argument("--hf-backup-repo", type=str, default="YYCore/mcl4-coe-runs")
     args = parser.parse_args()
 

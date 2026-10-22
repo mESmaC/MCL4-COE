@@ -176,19 +176,15 @@ def fit_ncm_hierarchy_on_frozen_donor(
     pad_id = int(trainer.config.pad_id)
     use_amp = device.type == "cuda"
 
-    # Collect token windows from uta_trace and pretrain_lm shards
-    uta_ds = trainer.dataset.tracks.get("uta_trace") or next(iter(trainer.dataset.tracks.values()))
-    pt_ds = trainer.dataset.tracks.get("pretrain_lm") or uta_ds
-    n_uta = len(uta_ds)
-    n_pt = len(pt_ds)
+    # Collect token windows directly from MultiTrackMixtureDataset
+    n_ds = len(trainer.dataset)
 
     def _sample_ncm_pair(step_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         p_list: list[torch.Tensor] = []
         t_list: list[torch.Tensor] = []
         for b in range(batch_size):
-            ds = uta_ds if (b % 3 != 0) else pt_ds
-            idx = (step_idx * batch_size + b * 97) % len(ds)
-            item = ds[idx]
+            idx = (step_idx * batch_size + b * 97) % max(1, n_ds)
+            item = trainer.dataset[idx]
             inp = item["input_ids"]
             valid_mask = inp != pad_id
             valid_toks = inp[valid_mask]

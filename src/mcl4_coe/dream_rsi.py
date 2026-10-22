@@ -594,6 +594,8 @@ RANK_FEATURES = (
     "UTILITY",
     "NOVELTY",
     "CONFIDENCE",
+    "PP",
+    "RECURSION",
 )
 
 GRAMMAR = (
@@ -602,7 +604,7 @@ GRAMMAR = (
     "WIDTH and ROUNDS are positive integers. ROOT and PATIENCE are nonnegative integers; "
     "all integers are at most 1000000. ROOT 0 opens only the initial branch; ROOT n>0 "
     "opens a fresh branch every nth round. RANK is a nonempty ordered list of unique "
-    "SCORE, GAIN, DEEP, SHALLOW, RECENT, OLD, UTILITY, NOVELTY, CONFIDENCE features "
+    "SCORE, GAIN, DEEP, SHALLOW, RECENT, OLD, UTILITY, NOVELTY, CONFIDENCE, PP, RECURSION features "
     "(first feature has priority). STOP is NEVER or a score in [0,1]; stop when an "
     "observed result reaches it. PATIENCE 0 disables patience, otherwise stop after n "
     "observed evaluations without a strict improvement in best score. WIDTH caps the "
@@ -795,6 +797,10 @@ class Program:
                 "UTILITY": -_obs_float(node, "utility", node.score),
                 "NOVELTY": -_obs_float(node, "novelty", 0.0),
                 "CONFIDENCE": -_obs_float(node, "confidence", node.score),
+                "PP": -_obs_float(node, "pp_weighted", node.score * 100.0),
+                "RECURSION": -_obs_float(
+                    node, "recursion_progress", float(depths[node_id]) * node.score
+                ),
             }
             return tuple(features[feature] for feature in self.rank) + (order[node_id],)
 
@@ -1162,6 +1168,8 @@ def synthesize_operator_scaffold(
     utility: float = 0.5,
     confidence: float = 0.7,
     node_id: int = 1,
+    star_difficulty: float = 1.0,
+    recursion_depth: int = 1,
 ) -> str:
     """Dynamically synthesize or mutate a `#S$#` cognitive operator scaffold from live node telemetry."""
     ops = [op.strip() for op in prev_scaffold.split("->") if op.strip() in _COGNITIVE_PRIMITIVES]
@@ -1172,6 +1180,9 @@ def synthesize_operator_scaffold(
     if parent_vetoed or ded_entailed < 0.58:
         # High contradiction / veto -> inject abstraction + deduction + evaluation verification loop
         lead = ["abstraction", "deduction", "evaluation"]
+    elif recursion_depth >= 3 or star_difficulty >= 3.0 or "recursion" in dom:
+        # Multi-hop / infinite-horizon recursive tasks -> abstraction + abduction + induction + deduction
+        lead = ["abstraction", "abduction", "induction", "deduction"]
     elif novelty < 0.35:
         # Low branch novelty -> inject abduction + association + induction hypothesis expansion
         lead = ["abduction", "association", "induction"]
@@ -1180,7 +1191,11 @@ def synthesize_operator_scaffold(
         lead = ["association", "synthesis", "deduction"]
     elif "code" in dom or "python" in dom:
         lead = ["abstraction", "synthesis", "deduction"]
-    elif "math" in dom or "physics" in dom or "science" in dom:
+    elif "commonsense" in dom or "hellaswag" in dom:
+        lead = ["association", "abduction", "synthesis"]
+    elif "mmlu" in dom or "logic" in dom or "economics" in dom:
+        lead = ["abstraction", "deduction", "evaluation"]
+    elif "math" in dom or "physics" in dom or "science" in dom or "arc" in dom:
         lead = ["abduction", "induction", "deduction"]
     else:
         lead = ops[:2]
@@ -1190,10 +1205,11 @@ def synthesize_operator_scaffold(
         op for op in ops if op not in lead
     ] + ["deduction", "decision", "evaluation", "metacognition"]
     merged: list[str] = []
+    max_ops = 6 if (recursion_depth >= 3 or star_difficulty >= 2.5) else (5 + (node_id % 2))
     for op in lead + tail_candidates:
         if op in _COGNITIVE_PRIMITIVES and op not in merged:
             merged.append(op)
-        if len(merged) >= 5 + (node_id % 2):
+        if len(merged) >= max_ops:
             break
     if "metacognition" not in merged:
         merged.append("metacognition")
@@ -1289,6 +1305,9 @@ class MCL4DreamDiscovery:
         root_children_count = (
             sum(1 for n in view.nodes[1:] if n.parent == 0) + extra_root_children
         )
+        task_stars = float(getattr(self.task, "star_difficulty", 1.0))
+        task_rec_depth = max(1, int(getattr(self.task, "recursion_depth", 1)))
+        task_skill = str(getattr(self.task, "skill", "general.reasoning"))
 
         if parent_id == 0:
             scaffold_idx = root_children_count % len(_SCAFFOLD_BRANCHES)
@@ -1308,6 +1327,8 @@ class MCL4DreamDiscovery:
                     utility=float(parent_obs.get("utility", 0.5)),
                     confidence=float(parent_obs.get("confidence", 0.7)),
                     node_id=node_id,
+                    star_difficulty=task_stars,
+                    recursion_depth=task_rec_depth,
                 )
             else:
                 base_idx = (
@@ -1327,9 +1348,14 @@ class MCL4DreamDiscovery:
                 f"[d={anc.observation.get('depth', 1)} s={anc.score:.3f} "
                 f"c={anc.observation.get('confidence', 0.5):.2f} {sc_head}]"
             )
+        subgoal_tag = (
+            f"\n#SUBGOAL$# Hop {min(depth + 1, task_rec_depth)}/{task_rec_depth} [{task_skill} ★{task_stars:.2f}]"
+            if (task_rec_depth >= 2 or task_stars >= 1.5)
+            else ""
+        )
         history_block = (
             "\n#H_ANC$# " + " | ".join(ancestor_trace) if ancestor_trace else ""
-        )
+        ) + subgoal_tag
         max_tok_len = self._max_tok_len
         suffix = f"\n#S$# {scaffold}"
         prefix = f"{self.task.prompt_q}{history_block}"
@@ -1478,6 +1504,13 @@ class MCL4DreamDiscovery:
                 + depth_bonus
             )
             score = round(max(0.0, min(1.0, raw_score)), 5)
+            task_stars = max(0.5, float(getattr(self.task, "star_difficulty", 1.0)))
+            task_rec = max(1, int(getattr(self.task, "recursion_depth", 1)))
+            raw_pp_val = round(100.0 * (task_stars ** 1.15) * score, 4)
+            higher_in_view = sum(1 for n in view.nodes[1:] if n.score > score + 1e-7)
+            pp_rank = higher_in_view + 1 + idx_i
+            pp_weighted_val = round(raw_pp_val * (0.95 ** (pp_rank - 1)), 4)
+            rec_prog = round(min(1.0, float(depth + 1) / float(task_rec)) * expected_verdict, 5)
             observation = {
                 "node_id": node_id,
                 "parent_id": pid,
@@ -1491,6 +1524,11 @@ class MCL4DreamDiscovery:
                 "confidence": round(meta_confidence, 5),
                 "deduction_entailed": round(ded_entailed, 5),
                 "vetoed": vetoed,
+                "star_difficulty": round(task_stars, 4),
+                "recursion_depth": task_rec,
+                "raw_pp": raw_pp_val,
+                "pp_weighted": pp_weighted_val,
+                "recursion_progress": rec_prog,
             }
             outcomes.append(Outcome(score=score, observation=observation))
         return outcomes
@@ -1565,6 +1603,13 @@ class MCL4DreamDiscovery:
             + depth_bonus
         )
         score = round(max(0.0, min(1.0, raw_score)), 5)
+        task_stars = max(0.5, float(getattr(self.task, "star_difficulty", 1.0)))
+        task_rec = max(1, int(getattr(self.task, "recursion_depth", 1)))
+        raw_pp_val = round(100.0 * (task_stars ** 1.15) * score, 4)
+        higher_in_view = sum(1 for n in view.nodes[1:] if n.score > score + 1e-7)
+        pp_rank = higher_in_view + 1
+        pp_weighted_val = round(raw_pp_val * (0.95 ** (pp_rank - 1)), 4)
+        rec_prog = round(min(1.0, float(depth + 1) / float(task_rec)) * expected_verdict, 5)
 
         observation = {
             "node_id": node_id,
@@ -1579,6 +1624,11 @@ class MCL4DreamDiscovery:
             "confidence": round(meta_confidence, 5),
             "deduction_entailed": round(ded_entailed, 5),
             "vetoed": vetoed,
+            "star_difficulty": round(task_stars, 4),
+            "recursion_depth": task_rec,
+            "raw_pp": raw_pp_val,
+            "pp_weighted": pp_weighted_val,
+            "recursion_progress": rec_prog,
         }
         return Outcome(score=score, observation=observation)
 
@@ -1588,6 +1638,8 @@ class MCL4DreamDiscovery:
 _CANDIDATE_POLICY_TEMPLATES: tuple[Program, ...] = (
     Program(width=1, root_every=2, rank=("SCORE", "GAIN", "UTILITY"), stop=0.90, patience=3, rounds=4),
     Program(width=2, root_every=2, rank=("SCORE", "GAIN", "UTILITY"), stop=0.88, patience=3, rounds=4),
+    Program(width=2, root_every=2, rank=("PP", "UTILITY", "SCORE", "GAIN"), stop=0.87, patience=2, rounds=3),
+    Program(width=2, root_every=2, rank=("RECURSION", "PP", "UTILITY", "SCORE"), stop=0.86, patience=2, rounds=4),
     Program(width=2, root_every=2, rank=("UTILITY", "SCORE", "GAIN"), stop=0.85, patience=2, rounds=3),
     Program(width=2, root_every=1, rank=("SCORE", "GAIN", "UTILITY"), stop=0.84, patience=2, rounds=3),
     Program(width=2, root_every=2, rank=("UTILITY", "CONFIDENCE", "SCORE", "GAIN"), stop=0.82, patience=2, rounds=3),
@@ -1602,6 +1654,8 @@ _CANDIDATE_POLICY_TEMPLATES: tuple[Program, ...] = (
 
 _MUTATION_RANK_ORDERS: tuple[tuple[str, ...], ...] = (
     ("SCORE", "UTILITY", "CONFIDENCE", "GAIN"),
+    ("PP", "UTILITY", "SCORE", "GAIN"),
+    ("RECURSION", "PP", "UTILITY", "CONFIDENCE"),
     ("UTILITY", "CONFIDENCE", "SCORE", "NOVELTY"),
     ("CONFIDENCE", "UTILITY", "GAIN", "SCORE"),
     ("GAIN", "SCORE", "UTILITY", "DEEP"),
@@ -1985,12 +2039,27 @@ class DreamRSIEngine:
             patience=0,
             rounds=max(self.max_rounds, self.state.program.rounds),
         )
+        task_skill = str(getattr(task, "skill", "general.reasoning"))
+        task_stars = float(getattr(task, "star_difficulty", 1.0))
+        task_rec_depth = int(getattr(task, "recursion_depth", 1))
         online_res = online_rollout(
             online_explorer,
             discovery,
             world_id=world_id,
-            root_observation={"task_id": task.task_id, "domain": task.domain},
-            metadata={"cycle": cycle_idx, "domain": task.domain},
+            root_observation={
+                "task_id": task.task_id,
+                "domain": task.domain,
+                "skill": task_skill,
+                "star_difficulty": round(task_stars, 4),
+                "recursion_depth": task_rec_depth,
+            },
+            metadata={
+                "cycle": cycle_idx,
+                "domain": task.domain,
+                "skill": task_skill,
+                "star_difficulty": round(task_stars, 4),
+                "recursion_depth": task_rec_depth,
+            },
             max_rounds=self.max_rounds,
             workers=self.workers,
             max_calls=self.max_calls,

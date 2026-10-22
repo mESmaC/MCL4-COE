@@ -600,7 +600,7 @@ def prune_experts(
 
 @dataclass(frozen=True)
 class OrnithTask:
-    """A verifiable Ornith-1.5 frontier task with harness specification and rollout candidates."""
+    """A verifiable Ornith-1.5/2.5 frontier task with harness specification, granular skill, and Star Difficulty."""
 
     task_id: str
     domain: str
@@ -612,11 +612,15 @@ class OrnithTask:
     gold_index: int
     gold_thought: str
     gold_answer: str
+    skill: str = "general.reasoning"
+    star_difficulty: float = 1.0
+    recursion_depth: int = 1
+    difficulty_mods: tuple[str, ...] = ("NM",)
 
 
 @dataclass
 class OrnithStepOutput:
-    """Telemetry and differentiable loss from a live Ornith-1.0 / 1.5 + Dream-RSI step."""
+    """Telemetry and differentiable loss from a live Ornith-1.0 / 2.5 + PP-Weighted + Dream-RSI step."""
 
     loss: Tensor
     grpo_loss: Tensor
@@ -639,10 +643,270 @@ class OrnithStepOutput:
     dream_active_policy: str = ""
     antidoom_loss: float = 0.0
     antidoom_chosen_win: float = 0.0
+    raw_pp: float = 0.0
+    weighted_pp: float = 0.0
+    total_pp: float = 0.0
+    pp_weight: float = 1.0
+    star_difficulty: float = 1.0
+    recursion_depth: int = 1
+    active_skill: str = ""
 
     @property
     def mean_rollout_reward(self) -> float:
         return self.rollout_reward
+
+
+# ---------------------------------------------------------------------------
+# osu!-Style Performance Point (`pp`) Weighting & Best Performance Leaderboard
+# ---------------------------------------------------------------------------
+
+PP_DECAY_BASE: float = 0.95
+
+MOD_MULTIPLIERS: dict[str, float] = {
+    "NM": 1.00,  # NoMod baseline
+    "HR": 1.12,  # HardRock: tighter near-miss algebraic/boundary distractors
+    "HD": 1.10,  # Hidden: intermediate multi-hop state hints masked
+    "DT": 1.18,  # DoubleTime: compounded secondary verification constraint
+    "FL": 1.15,  # Flashlight: partial observability / latent variable abduction
+    "INF": 1.25,  # Infinite-Horizon Recursive Chain
+}
+
+SKILL_TAXONOMY: tuple[tuple[str, str], ...] = (
+    # 0..19: Primitive Procedural & Formal Skills
+    ("algebra.linear_diophantine", "symbolic_algebra"),
+    ("code.list_filter_transform", "algorithmic_code"),
+    ("math.matrix_determinant_2x2", "linear_algebra"),
+    ("physics.kinematics_displacement", "physics_kinematics"),
+    ("algorithms.project_dag_critical_path", "project_management"),
+    ("number_theory.modular_ring_inverse", "modular_number_theory"),
+    ("dp.linear_recurrence_unroll", "dynamic_programming"),
+    ("code.prefix_accumulator_loop", "algorithmic_code"),
+    ("bitwise.xor_involution_mask", "bitwise_systems"),
+    ("systems.fenwick_tree_stride", "data_structures"),
+    ("number_theory.gcd_euclidean_step", "modular_number_theory"),
+    ("systems.service_graph_throughput", "distributed_systems"),
+    ("code.horner_polynomial_eval", "algorithmic_code"),
+    ("algorithms.binary_search_midpoint", "search_algorithms"),
+    ("relational.inner_join_cardinality", "sql_relational"),
+    ("concurrency.lock_cycle_deadlock", "systems_concurrency"),
+    ("physics.calorimetry_heat_transfer", "physics_kinematics"),
+    ("ifeval.lexical_case_punctuation", "invariant_verification"),
+    ("code.arithmetic_progression_gen", "algorithmic_code"),
+    ("logic.horn_clause_forward_chain", "multi_hop_deduction"),
+    # 20..23: Cross-Template Compositional Pipelines
+    ("composition.algebra_to_code_pipeline", "compositional_code_math"),
+    ("composition.kinematics_to_modring_pipeline", "compositional_physics_math"),
+    ("composition.dag_to_slack_code_pipeline", "compositional_code_pm"),
+    ("composition.deduction_to_ifeval_pipeline", "compositional_deduction_ifeval"),
+    # 24..33: Targeted Benchmark & Domain Specializations (ARC, HellaSwag, MMLU, Code)
+    ("science.experimental_control_abduction", "arc_science"),
+    ("science.thermodynamics_energy_conservation", "arc_physics"),
+    ("science.stoichiometry_limiting_reagent", "arc_chemistry"),
+    ("science.genetics_hardy_weinberg", "arc_biology"),
+    ("commonsense.physical_precondition_consequence", "hellaswag_commonsense"),
+    ("mmlu.microeconomics_marginal_equilibrium", "mmlu_economics"),
+    ("mmlu.formal_logic_quantifier_contrapositive", "mmlu_logic"),
+    ("mmlu.bayesian_posterior_frequency", "mmlu_probability"),
+    ("mmlu.computer_arch_cache_amat", "mmlu_cs_systems"),
+    ("code.recursive_state_transducer", "recursive_code"),
+    # 34..35: Infinite-Horizon Recursive RL Loops
+    ("recursion.unbounded_multihop_chain", "infinite_recursion"),
+    ("recursion.self_referential_fixed_point", "infinite_recursion"),
+)
+
+
+def compute_mod_multiplier(
+    mods: tuple[str, ...] | list[str] = ("NM",),
+    recursion_depth: int = 1,
+) -> float:
+    """Compute multiplicative difficulty bonus from active osu!-style modifiers and recursion depth."""
+    mult = 1.0
+    seen: set[str] = set()
+    for m in mods:
+        key = str(m).upper().strip()
+        if key and key not in seen:
+            seen.add(key)
+            mult *= MOD_MULTIPLIERS.get(key, 1.0)
+    extra_hops = max(0, int(recursion_depth) - 1)
+    if "INF" in seen or extra_hops >= 2:
+        mult *= 1.0 + 0.06 * extra_hops
+    return round(float(mult), 6)
+
+
+def compute_star_difficulty(
+    tier: int,
+    recursion_depth: int = 1,
+    mods: tuple[str, ...] | list[str] = ("NM",),
+) -> float:
+    """Compute continuous Star Difficulty $d^\\star \\in [1.0, \\infty)$ scaling unboundedly with tier & recursion."""
+    t_val = max(1, int(tier))
+    r_val = max(1, int(recursion_depth))
+    mod_mult = compute_mod_multiplier(mods, recursion_depth=r_val)
+    base_stars = 1.0 + 0.55 * (t_val - 1) + 0.35 * (r_val - 1)
+    return round(float(base_stars * math.sqrt(mod_mult)), 4)
+
+
+def compute_raw_pp(
+    star_difficulty: float,
+    verified_reward: float,
+    alignment: float = 1.0,
+    *,
+    mods: tuple[str, ...] | list[str] = ("NM",),
+    recursion_depth: int = 1,
+) -> float:
+    """Compute full pre-weighted performance points $p$ of a single play before $0.95^{n-1}$ ranking decay."""
+    stars = max(0.5, float(star_difficulty))
+    acc = max(0.0, min(1.0, float(verified_reward)))
+    align = max(0.1, min(1.0, float(alignment)))
+    mod_mult = compute_mod_multiplier(mods, recursion_depth=recursion_depth)
+    raw = 100.0 * (stars ** 1.15) * mod_mult * (acc ** 1.25) * math.sqrt(align)
+    return round(float(raw), 4)
+
+
+def compute_weighted_pp_series(
+    scores: list[float] | tuple[float, ...] | Tensor,
+    *,
+    decay: float = PP_DECAY_BASE,
+) -> list[float]:
+    """Rank raw performance point scores $p_1 \\ge p_2 \\ge \\dots \\ge p_N$ and weight the $n$-th play by:
+
+    $$\\text{Weighted } pp_n = p_n \\cdot 0.95^{n-1}$$
+
+    For example, top-5 plays `[110, 100, 100, 90, 80]` with `decay=0.95` produce
+    `[110.0, 95.0, 90.25, 77.1638, 65.1605]` ($\\approx 110, 95, 90, 77, 65\\text{pp}$).
+    """
+    if not (0.0 < float(decay) <= 1.0):
+        raise ValueError("decay must be in (0, 1]")
+    vals = (
+        scores.detach().cpu().float().tolist()
+        if isinstance(scores, Tensor)
+        else [float(x) for x in scores]
+    )
+    ranked = sorted((max(0.0, v) for v in vals), reverse=True)
+    return [float(p * (decay ** idx)) for idx, p in enumerate(ranked)]
+
+
+def compute_total_pp(
+    scores: list[float] | tuple[float, ...] | Tensor,
+    *,
+    decay: float = PP_DECAY_BASE,
+) -> float:
+    """Compute total weighted Performance Points $\\text{Total } PP = \\sum_{n=1}^{N} p_n \\cdot 0.95^{n-1}$."""
+    return round(float(sum(compute_weighted_pp_series(scores, decay=decay))), 4)
+
+
+@dataclass(frozen=True)
+class PPSubmissionResult:
+    """Receipt from submitting a play $p$ to `OrnithPPLeaderboard`."""
+
+    skill: str
+    raw_pp: float
+    skill_rank: int
+    global_rank: int
+    skill_weight: float
+    global_weight: float
+    weighted_pp: float
+    delta_skill_pp: float
+    delta_total_pp: float
+    skill_total_pp: float
+    global_total_pp: float
+    grad_scale: float
+
+
+class OrnithPPLeaderboard:
+    """osu!-style Best Performance Leaderboard tracking per-skill and global top plays with $p \\cdot 0.95^{n-1}$ decay.
+
+    Automatically attenuates RL gradient weight when the agent farms already-mastered difficulty tiers
+    (which place at deep rank $n \\gg 1$ where $0.95^{n-1} \\to 0$), while amplifying policy updates when
+    the agent solves higher-difficulty tasks or under-trained skills that place near $n = 1$ ($0.95^0 = 1.0$).
+    """
+
+    def __init__(
+        self,
+        *,
+        decay: float = PP_DECAY_BASE,
+        max_per_skill: int = 64,
+        max_global: int = 256,
+    ) -> None:
+        if not (0.0 < float(decay) <= 1.0):
+            raise ValueError("decay must be in (0, 1]")
+        self.decay = float(decay)
+        self.max_per_skill = max(1, int(max_per_skill))
+        self.max_global = max(1, int(max_global))
+        self.skill_scores: dict[str, list[float]] = {}
+        self.global_scores: list[float] = []
+        self.play_counts: dict[str, int] = {}
+
+    @staticmethod
+    def _placement_rank(sorted_scores: list[float], score: float) -> int:
+        """Return 1-indexed placement rank $n \\ge 1$ of `score` in descending `sorted_scores`."""
+        higher_count = sum(1 for s in sorted_scores if s > score + 1e-7)
+        return higher_count + 1
+
+    def skill_pp(self, skill: str) -> float:
+        return compute_total_pp(self.skill_scores.get(skill, ()), decay=self.decay)
+
+    def total_pp(self) -> float:
+        return compute_total_pp(self.global_scores, decay=self.decay)
+
+    def submit_play(self, skill: str, raw_pp: float) -> PPSubmissionResult:
+        """Record a play worth `raw_pp` in `skill`, returning its $n$-th place $0.95^{n-1}$ weight and $\\Delta PP$."""
+        p = max(0.0, float(raw_pp))
+        cur_skill = self.skill_scores.setdefault(skill, [])
+        self.play_counts[skill] = self.play_counts.get(skill, 0) + 1
+
+        old_skill_pp = compute_total_pp(cur_skill, decay=self.decay)
+        old_global_pp = compute_total_pp(self.global_scores, decay=self.decay)
+
+        n_skill = self._placement_rank(cur_skill, p)
+        n_global = self._placement_rank(self.global_scores, p)
+
+        w_skill = float(self.decay ** (n_skill - 1))
+        w_global = float(self.decay ** (n_global - 1))
+        weighted_p = float(p * w_skill)
+
+        cur_skill.append(p)
+        cur_skill.sort(reverse=True)
+        if len(cur_skill) > self.max_per_skill:
+            del cur_skill[self.max_per_skill :]
+
+        self.global_scores.append(p)
+        self.global_scores.sort(reverse=True)
+        if len(self.global_scores) > self.max_global:
+            del self.global_scores[self.max_global :]
+
+        new_skill_pp = compute_total_pp(cur_skill, decay=self.decay)
+        new_global_pp = compute_total_pp(self.global_scores, decay=self.decay)
+
+        delta_s = max(0.0, new_skill_pp - old_skill_pp)
+        delta_g = max(0.0, new_global_pp - old_global_pp)
+        rel_gain = delta_s / max(1.0, p)
+
+        # High gradient scale when placing near #1 on the leaderboard; decays to 0.25 floor on deep farmed ranks
+        grad_scale = max(0.25, min(2.00, 0.25 + 0.95 * w_skill + 0.45 * rel_gain))
+
+        return PPSubmissionResult(
+            skill=skill,
+            raw_pp=round(p, 4),
+            skill_rank=n_skill,
+            global_rank=n_global,
+            skill_weight=round(w_skill, 5),
+            global_weight=round(w_global, 5),
+            weighted_pp=round(weighted_p, 4),
+            delta_skill_pp=round(delta_s, 4),
+            delta_total_pp=round(delta_g, 4),
+            skill_total_pp=round(new_skill_pp, 4),
+            global_total_pp=round(new_global_pp, 4),
+            grad_scale=round(grad_scale, 4),
+        )
+
+    def lowest_pp_skill_indices(self, total_families: int = len(SKILL_TAXONOMY)) -> list[int]:
+        """Return family indices `0..total_families-1` ordered from lowest to highest current `skill_pp`."""
+        n_f = min(int(total_families), len(SKILL_TAXONOMY))
+        return sorted(
+            range(n_f),
+            key=lambda k: (self.skill_pp(SKILL_TAXONOMY[k][0]), self.play_counts.get(SKILL_TAXONOMY[k][0], 0), k),
+        )
 
 
 _SCAFFOLD_CANDIDATES: tuple[str, ...] = (
@@ -1026,48 +1290,125 @@ class defaultdict_int(dict):
 
 
 class OrnithEnvArchitect:
-    """Self-scaffolding curriculum & cross-template compositional environment architect for Ornith-2.0.
+    """Self-scaffolding curriculum, granular skill router, & infinite-horizon environment architect for Ornith-2.5.
 
-    Monitors empirical pass rate $\\hat{p}_k$, deduction alignment $C_k$, and frontier difficulty
-    $D(\\hat{p}_k; p^*=0.25)$ across all 24 procedural/compositional families (`0..19` primitive,
-    `20..23` cross-template compositional) and dynamically promotes `difficulty_tier` ($1 \\dots 4$)
-    and cross-template composition probability whenever a family's pass rate exceeds `0.78`.
+    Monitors empirical pass rate $\\hat{p}_k$, deduction alignment $C_k$, and osu!-style Performance Point
+    (`pp`) placement weight $w_{\\text{pp}} = 0.95^{n-1}$ across all 36 procedural, compositional,
+    benchmark-specialized, and infinite-horizon recursive families (`0..19` primitive, `20..23`
+    compositional, `24..33` specialized ARC/HellaSwag/MMLU/Code, `34..35` unbounded recursive loops).
+    Dynamically promotes `difficulty_tier` ($1 \\dots \\infty$), recursion depth $L$, and difficulty
+    modifiers (`NM`, `HR`, `HD`, `DT`, `FL`, `INF`) whenever a skill's pass rate saturates or its
+    leaderboard placement decays.
     """
 
     NUM_PRIMITIVE_FAMILIES: int = 20
     NUM_COMPOSITIONAL_FAMILIES: int = 4
-    TOTAL_FAMILIES: int = 24
+    NUM_SPECIALIZED_FAMILIES: int = 10
+    NUM_RECURSIVE_FAMILIES: int = 2
+    TOTAL_FAMILIES: int = 36
 
-    def __init__(self, target_pass_rate: float = 0.25, ema_beta: float = 0.70) -> None:
+    def __init__(
+        self,
+        target_pass_rate: float = 0.25,
+        ema_beta: float = 0.70,
+        *,
+        max_tier: int | None = None,
+    ) -> None:
         self.target_pass_rate = float(target_pass_rate)
         self.ema_beta = float(ema_beta)
+        self.max_tier = max_tier  # None = unbounded infinite-horizon tiers (1..inf)
         self.family_pass_ema: list[float] = [0.50 for _ in range(self.TOTAL_FAMILIES)]
+        self.family_pp_weight_ema: list[float] = [1.00 for _ in range(self.TOTAL_FAMILIES)]
         self.family_tiers: list[int] = [1 for _ in range(self.TOTAL_FAMILIES)]
         self.family_counts: list[int] = [0 for _ in range(self.TOTAL_FAMILIES)]
-        self.compositional_boost: float = 0.20
+        self.compositional_boost: float = 0.25
 
     def difficulty_tier(self, kind: int) -> int:
         return int(self.family_tiers[kind % self.TOTAL_FAMILIES])
 
-    def select_family(self, idx: int, seed: int = 42) -> int:
-        """Select task family `0..23`, boosting compositional families (`20..23`) as primitive families saturate."""
+    def skill_and_domain(self, kind: int) -> tuple[str, str]:
+        return SKILL_TAXONOMY[kind % len(SKILL_TAXONOMY)]
+
+    def recursion_depth(self, kind: int) -> int:
+        k = kind % self.TOTAL_FAMILIES
+        tier = self.difficulty_tier(k)
+        if k >= 34:
+            # Unbounded linear hop growth (L = 3, 4, 5, 6, ... -> inf)
+            return 3 + (tier - 1)
+        if k >= 20:
+            return 2 + (tier - 1) // 2
+        return 1 + (tier - 1) // 2
+
+    def difficulty_mods(self, kind: int) -> tuple[str, ...]:
+        k = kind % self.TOTAL_FAMILIES
+        tier = self.difficulty_tier(k)
+        if k >= 34 and tier >= 3:
+            return ("INF", "HD", "HR") if tier < 6 else ("INF", "FL", "DT", "HD", "HR")
+        if tier <= 1:
+            return ("INF",) if k >= 34 else ("NM",)
+        if tier <= 3:
+            return ("HR",)
+        if tier <= 5:
+            return ("HD", "HR")
+        if tier <= 8:
+            return ("DT", "HD", "HR")
+        return ("INF", "FL", "DT", "HD", "HR")
+
+    def star_difficulty(self, kind: int) -> float:
+        k = kind % self.TOTAL_FAMILIES
+        return compute_star_difficulty(
+            self.difficulty_tier(k),
+            recursion_depth=self.recursion_depth(k),
+            mods=self.difficulty_mods(k),
+        )
+
+    def select_family(
+        self,
+        idx: int,
+        seed: int = 42,
+        *,
+        pp_leaderboard: OrnithPPLeaderboard | None = None,
+    ) -> int:
+        """Select task family `0..35`, routing toward under-trained PP skills and recursive frontiers as skills saturate."""
         base_slot = idx % self.TOTAL_FAMILIES
-        # Every 3rd step if primitive pass rates are high, route to a cross-template compositional family (20..23)
-        mean_prim_pass = sum(self.family_pass_ema[: self.NUM_PRIMITIVE_FAMILIES]) / float(self.NUM_PRIMITIVE_FAMILIES)
-        if mean_prim_pass > 0.72 and (idx % 3 == 2) and base_slot < self.NUM_PRIMITIVE_FAMILIES:
-            return self.NUM_PRIMITIVE_FAMILIES + ((idx + seed) % self.NUM_COMPOSITIONAL_FAMILIES)
+        mean_prim_pass = sum(self.family_pass_ema[: self.NUM_PRIMITIVE_FAMILIES]) / float(
+            self.NUM_PRIMITIVE_FAMILIES
+        )
+        # When a PP leaderboard is active and idx >= TOTAL_FAMILIES, prioritize lowest-PP or high-frontier skills
+        if pp_leaderboard is not None and idx >= self.TOTAL_FAMILIES and (idx % 4 == 3):
+            low_skills = pp_leaderboard.lowest_pp_skill_indices(self.TOTAL_FAMILIES)
+            if low_skills:
+                return int(low_skills[(idx // 4 + seed) % min(8, len(low_skills))])
+        # Route saturated primitive slots toward compositional, specialized, or infinite-recursive families (20..35)
+        if mean_prim_pass > 0.70 and (idx % 3 == 2) and base_slot < self.NUM_PRIMITIVE_FAMILIES:
+            advanced_span = self.TOTAL_FAMILIES - self.NUM_PRIMITIVE_FAMILIES
+            return self.NUM_PRIMITIVE_FAMILIES + ((idx + seed) % advanced_span)
         return base_slot
 
-    def record_outcome(self, kind: int, pass_prob: float, alignment: float = 1.0) -> None:
-        """Update EMA pass rate for `kind` and promote `difficulty_tier` (`1 -> 8`) when saturated."""
+    def record_outcome(
+        self,
+        kind: int,
+        pass_prob: float,
+        alignment: float = 1.0,
+        *,
+        pp_weight: float = 1.0,
+    ) -> None:
+        """Update EMA pass rate & PP placement weight for `kind` and promote `difficulty_tier` ($1 \\to \\infty$)."""
         k = kind % self.TOTAL_FAMILIES
         self.family_counts[k] += 1
         ema = self.ema_beta * self.family_pass_ema[k] + (1.0 - self.ema_beta) * float(pass_prob)
         self.family_pass_ema[k] = ema
-        if ema > 0.78 and self.family_tiers[k] < 8 and self.family_counts[k] >= 2:
+        w_ema = 0.75 * self.family_pp_weight_ema[k] + 0.25 * float(pp_weight)
+        self.family_pp_weight_ema[k] = w_ema
+
+        can_promote = self.max_tier is None or self.family_tiers[k] < self.max_tier
+        # Promote tier when pass rate exceeds 0.78 OR when PP placement weight decays (<0.38) while pass rate is healthy (>0.58)
+        if can_promote and self.family_counts[k] >= 2 and (
+            ema > 0.78 or (w_ema < 0.38 and ema > 0.58)
+        ):
             self.family_tiers[k] += 1
-            # Soft-reset EMA toward frontier when tier increases
             self.family_pass_ema[k] = 0.55
+            self.family_pp_weight_ema[k] = 0.85
         elif ema < 0.18 and self.family_tiers[k] > 1 and self.family_counts[k] >= 4:
             self.family_tiers[k] -= 1
             self.family_pass_ema[k] = 0.45
@@ -1150,6 +1491,7 @@ class OrnithSelfImprover:
         )
         self.scaffold_cache = ScaffoldCache()
         self.env_architect = OrnithEnvArchitect()
+        self.pp_leaderboard = OrnithPPLeaderboard()
         self._step_counter = 0
         self._rng_seed = seed
         self.enable_dream_rsi = enable_dream_rsi or (dream_engine is not None)
@@ -1174,6 +1516,176 @@ class OrnithSelfImprover:
                         ]
                 except Exception:
                     self.external_tasks = []
+
+    def _synthesize_infinite_recursive_task(
+        self,
+        idx: int,
+        *,
+        tier: int = 1,
+        mode: str = "chain",
+    ) -> OrnithTask:
+        """Synthesize an unbounded $L$-hop recursive reasoning loop where $L = 3 + (\\text{tier} - 1) \\to \\infty$.
+
+        Supports two complementary infinite-horizon modes:
+        - `mode="chain"` (`kind=34`, `recursion.unbounded_multihop_chain`): Unrolls $L$ sequential state
+          transformations $s_0 \\xrightarrow{T_1} s_1 \\dots \\xrightarrow{T_L} s_L$ with optional `HD`
+          intermediate state masking and hop-truncation / early-corruption distractors.
+        - `mode="code_recursion"` (`kind=35`, `recursion.self_referential_fixed_point`): Synthesizes an
+          executable Python state recurrence `def solve(x, steps):` verified at $L$ recursive steps.
+        """
+        t_val = max(1, int(tier))
+        hops = min(64, 3 + (t_val - 1))
+        kind_slot = 34 if mode == "chain" else 35
+        mods = self.env_architect.difficulty_mods(kind_slot)
+        stars = compute_star_difficulty(t_val, recursion_depth=hops, mods=mods)
+        skill_name, domain_name = self.env_architect.skill_and_domain(kind_slot)
+
+        s0 = 4 + ((idx * 7 + self._rng_seed) % (11 + 3 * t_val))
+        b_step = 3 + ((idx * 5 + t_val) % (7 + 2 * t_val))
+        c_step = 2 + ((idx * 3 + self._rng_seed) % (5 + t_val))
+
+        if mode == "code_recursion":
+            p_mod = 97 + 2 * (idx % 25)
+            mult_m = 2 + (idx % 4)
+            # Compute exact trajectory x_0 -> x_1 -> ... -> x_hops
+            x_cur = s0
+            x_one = (s0 * mult_m + b_step) % p_mod
+            trace_notes: list[str] = []
+            for h_i in range(1, hops + 1):
+                x_next = (x_cur * mult_m + b_step) % p_mod
+                if h_i <= 3 or h_i == hops:
+                    trace_notes.append(f"hop {h_i} maps {x_cur} to ({x_cur} * {mult_m} + {b_step}) mod {p_mod} = {x_next}")
+                x_cur = x_next
+            final_x = x_cur
+            task_id = f"inf_rec_code_t{t_val}_L{hops}_{s0}_{mult_m}_{b_step}_{p_mod}"
+            prompt_q = (
+                f"#U$# [Infinite-Horizon Recursive Dynamical Map | ★{stars:.2f} | Depth L={hops} | Mods={'+'.join(mods)}] "
+                f"Define the discrete state transition `f(x) = (x * {mult_m} + {b_step}) % {p_mod}`. "
+                f"Implement `solve(x, steps)` in Python that applies `f` recursively/iteratively `steps` times starting from `x`.\n"
+                f"#Q$# [infinite_recursion] Trace the recurrence in `#T$#` and implement `solve(x, steps)` passing `steps={hops}`."
+            )
+            harness_h = (
+                f"assert solve({s0}, {hops}) == {final_x} "
+                f"and solve({s0}, 1) == {x_one} "
+                f"and solve({s0}, 0) == {s0}"
+            )
+            gold_t = (
+                f"To evaluate the {hops}-hop dynamical recurrence starting at x0 = {s0}, we iterate "
+                f"x = (x * {mult_m} + {b_step}) mod {p_mod} across `steps` transitions: "
+                + "; ".join(trace_notes)
+                + f", reaching the terminal fixed-horizon state {final_x}."
+            )
+            gold_a = (
+                f"def solve(x, steps):\n"
+                f"    for _ in range(steps):\n"
+                f"        x = (x * {mult_m} + {b_step}) % {p_mod}\n"
+                f"    return x"
+            )
+            d1_t = (
+                f"To evaluate the {hops}-hop recurrence, we apply only steps - 1 transitions "
+                f"and stop one hop early before the final modular reduction."
+            )
+            d1_a = (
+                f"def solve(x, steps):\n"
+                f"    for _ in range(max(0, steps - 1)):\n"
+                f"        x = (x * {mult_m} + {b_step}) % {p_mod}\n"
+                f"    return x"
+            )
+            d2_t = (
+                f"To evaluate the {hops}-hop recurrence, we subtract {b_step} instead of adding "
+                f"inside the modular transition loop."
+            )
+            d2_a = (
+                f"def solve(x, steps):\n"
+                f"    for _ in range(steps):\n"
+                f"        x = (x * {mult_m} - {b_step}) % {p_mod}\n"
+                f"    return x"
+            )
+            hack_a = "def solve(x, steps):\n    return 0"
+        else:
+            # Unbounded L-hop deterministic state chain
+            cur = s0
+            err_early = s0
+            err_hop1 = s0 + c_step
+            hop_prompts: list[str] = []
+            hop_thoughts: list[str] = []
+            for h_i in range(1, hops + 1):
+                op_kind = (idx + h_i) % 3
+                delta_h = b_step + h_i if op_kind == 0 else (2 * c_step if op_kind == 1 else h_i + c_step)
+                nxt = cur + delta_h
+                err_hop1 = err_hop1 + delta_h
+                if h_i == hops - 1:
+                    err_early = nxt
+                if "HD" in mods and 1 < h_i < hops:
+                    hop_prompts.append(f"Hop {h_i}: add `{delta_h}` to the hidden state `s_{h_i-1}` to obtain `s_{h_i}`.")
+                else:
+                    hop_prompts.append(f"Hop {h_i}: compute `s_{h_i} = s_{h_i-1} + {delta_h}`.")
+                hop_thoughts.append(f"at hop {h_i} we compute {cur} + {delta_h} = {nxt}")
+                cur = nxt
+            final_s = cur
+            if err_early == final_s:
+                err_early = final_s - b_step
+            if err_hop1 == final_s:
+                err_hop1 = final_s + c_step
+            task_id = f"inf_rec_chain_t{t_val}_L{hops}_{s0}_{b_step}_{c_step}_{idx}"
+            prompt_q = (
+                f"#U$# [Infinite-Horizon Recursive Chain | ★{stars:.2f} | Depth L={hops} | Mods={'+'.join(mods)}] "
+                f"Initial state `s_0 = {s0}`. Execute all {hops} recursive state hops in order: "
+                + " ".join(hop_prompts)
+                + "\n#Q$# [infinite_recursion] Unroll every hop in `#T$#` and state the terminal value `s_"
+                + f"{hops}` in lowercase with no commas, at least 6 words, including the keyword `recursive`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:recursive;exact_int:{final_s}"
+            gold_t = (
+                f"Starting from initial state s_0 = {s0}, we unroll the {hops}-stage recursive chain sequentially: "
+                + "; ".join(hop_thoughts)
+                + f". Therefore the verified terminal state after {hops} recursive hops is {final_s}."
+            )
+            gold_a = f"the verified recursive chain terminal state is {final_s} units"
+            d1_t = (
+                f"Starting from initial state s_0 = {s0}, we unroll only {hops - 1} stages and halt prematurely at {err_early}."
+            )
+            d1_a = f"the verified recursive chain terminal state is {err_early} units"
+            d2_t = (
+                f"Starting from shifted state {s0 + c_step}, we propagate the initial offset error to obtain {err_hop1}."
+            )
+            d2_a = f"The Recursive, Chain Terminal State Is {err_hop1} units"
+            hack_a = "0"
+
+        base_cands = (
+            f"#T$# {gold_t}\n#A$# {gold_a}",
+            f"#T$# {d1_t}\n#A$# {d1_a}",
+            f"#T$# {d2_t}\n#A$# {d2_a}",
+            f"#T$# Default fallback.\n#A$# {hack_a}",
+        )
+        base_scores = (1.0, 0.20, 0.10, 0.0)
+        order = [0, 1, 2, 3]
+        shift = idx % 4
+        order[0], order[shift] = order[shift], order[0]
+        p_cands = tuple(base_cands[i] for i in order)
+        p_scores = tuple(base_scores[i] for i in order)
+        g_idx = order.index(0)
+        self._last_task_kinds[task_id] = kind_slot
+        cached_s = self.scaffold_cache.get(
+            task_id,
+            default=_SCAFFOLD_CANDIDATES[idx % len(_SCAFFOLD_CANDIDATES)],
+        )
+        return OrnithTask(
+            task_id=task_id,
+            domain=domain_name,
+            prompt_q=prompt_q,
+            harness_h=harness_h,
+            scaffold_s=cached_s,
+            candidate_rollouts=p_cands,
+            harness_scores=p_scores,
+            gold_index=g_idx,
+            gold_thought=gold_t,
+            gold_answer=gold_a,
+            skill=skill_name,
+            star_difficulty=stars,
+            recursion_depth=hops,
+            difficulty_mods=mods,
+        )
 
     def _synthesize_combinatorial_pipeline_task(self, idx: int, *, tier: int = 1) -> OrnithTask:
         """Synthesize a randomized 3-stage cross-template pipeline ($8 \\times 6 \\times 4 = 192$ combinations)
@@ -1387,6 +1899,10 @@ class OrnithSelfImprover:
         fam_slot = 20 + (term_id % 4)
         self._last_task_kinds[task_id] = fam_slot
         cached_s = self.scaffold_cache.get(task_id, default=_SCAFFOLD_CANDIDATES[idx % len(_SCAFFOLD_CANDIDATES)])
+        skill_name, _ = self.env_architect.skill_and_domain(fam_slot)
+        rec_depth = max(3, self.env_architect.recursion_depth(fam_slot))
+        mods = self.env_architect.difficulty_mods(fam_slot)
+        stars = compute_star_difficulty(scale, recursion_depth=rec_depth, mods=mods)
         return OrnithTask(
             task_id=task_id,
             domain=domain,
@@ -1398,10 +1914,14 @@ class OrnithSelfImprover:
             gold_index=g_idx,
             gold_thought=gold_t,
             gold_answer=gold_a,
+            skill=skill_name,
+            star_difficulty=stars,
+            recursion_depth=rec_depth,
+            difficulty_mods=mods,
         )
 
     def _generate_task(self, idx: int, *, compact: bool = False) -> OrnithTask:
-        """Synthesize a verifiable coding, math, physics, logic, IFEval, or cross-template compositional task (#Q$#)."""
+        """Synthesize a verifiable coding, math, physics, logic, IFEval, specialized benchmark, or infinite-recursive task (#Q$#)."""
         # Mix curated external HF RLVR tasks (when loaded and non-compact) with live procedural + compositional tasks
         if not compact and self.external_tasks and (idx % 2 == 1):
             ext_idx = ((idx // 2) * 131 + self._rng_seed) % len(self.external_tasks)
@@ -1412,12 +1932,22 @@ class OrnithSelfImprover:
             )
             return replace(ext_task, scaffold_s=cached_s)
 
-        kind = self.env_architect.select_family(idx, seed=self._rng_seed)
+        kind = self.env_architect.select_family(
+            idx, seed=self._rng_seed, pp_leaderboard=self.pp_leaderboard
+        )
         tier = self.env_architect.difficulty_tier(kind)
-        # For online training steps beyond the initial 24-family sweep, dynamically invoke the 192-pipeline
-        # combinatorial cross-template synthesizer on every 3rd procedural slot or when kind >= 20 and idx >= 24.
-        if not compact and idx >= 24 and (kind >= 20 or idx % 3 == 0):
-            return self._synthesize_combinatorial_pipeline_task(idx, tier=tier)
+        if not compact and kind == 34:
+            return self._synthesize_infinite_recursive_task(idx, tier=tier, mode="chain")
+        if not compact and kind == 35:
+            return self._synthesize_infinite_recursive_task(idx, tier=tier, mode="code_recursion")
+        # For online training steps beyond the initial 36-family sweep, dynamically invoke the 192-pipeline
+        # combinatorial synthesizer on compositional slots (20..23) or every 6th step, and infinite-recursion on every 8th step.
+        if not compact and idx >= self.env_architect.TOTAL_FAMILIES:
+            if idx % 8 == 7:
+                rec_mode = "code_recursion" if (idx // 8) % 2 == 1 else "chain"
+                return self._synthesize_infinite_recursive_task(idx, tier=max(tier, 2), mode=rec_mode)
+            if 20 <= kind < 24 or idx % 6 == 5:
+                return self._synthesize_combinatorial_pipeline_task(idx, tier=tier)
 
         scale = tier  # Scales operand magnitudes and multi-step depth across tiers 1..8
         a = (3 * scale) + ((idx * 7 + self._rng_seed) % (19 * scale))
@@ -1960,7 +2490,7 @@ class OrnithSelfImprover:
             )
             base_scores = (1.0, 0.25, 0.15, 0.0)
             domain = "compositional_code_pm"
-        else:
+        elif kind == 23:
             # COMPOSED TEMPLATE 4 (Multi-Hop Deduction o IFEval Lexical Constraints):
             prod_ab = a * b
             final_v = prod_ab + c
@@ -1981,10 +2511,314 @@ class OrnithSelfImprover:
             )
             base_scores = (1.0, 0.25, 0.15, 0.0)
             domain = "compositional_deduction_ifeval"
+        elif kind == 24:
+            # ARC-Challenge Specialization 1: Experimental Control & Causal Abduction
+            base_rate = 12 + a
+            catalyst_boost = 5 + b
+            thermal_drift = 2 + (c % 6)
+            control_obs = base_rate + thermal_drift
+            treatment_obs = base_rate + catalyst_boost + thermal_drift
+            isolated_effect = treatment_obs - control_obs
+            task_id = f"arc_exp_control_{base_rate}_{catalyst_boost}_{thermal_drift}"
+            prompt_q = (
+                f"#U$# [ARC Experimental Control] In a controlled enzyme assay, the untreated Control vessel "
+                f"starts at baseline `{base_rate} uM/s` and experiences ambient thermal drift `+{thermal_drift} uM/s` "
+                f"(reaching `{control_obs} uM/s`). The Catalyst-treated vessel under identical ambient drift reaches `{treatment_obs} uM/s`.\n"
+                f"#Q$# [arc_science] Isolate the net causal effect of the catalyst by subtracting the control vessel rate, "
+                f"and reply in lowercase with no commas including the keyword `control` and the exact integer."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:control;exact_int:{isolated_effect}"
+            gold_t = (
+                f"To isolate the independent variable in this controlled experiment, we first verify the untreated control "
+                f"rate {base_rate} + {thermal_drift} = {control_obs} and then subtract it from the treatment observation "
+                f"{treatment_obs} - {control_obs} = {isolated_effect} to eliminate confounding thermal drift."
+            )
+            gold_a = f"after subtracting the control vessel baseline the net catalyst effect is {isolated_effect} units"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                f"#T$# Confound thermal drift with treatment by computing {treatment_obs} - {base_rate} = {catalyst_boost + thermal_drift}.\n#A$# after subtracting the control vessel baseline the net catalyst effect is {catalyst_boost + thermal_drift} units",
+                f"#T$# Report raw treatment rate without subtracting control {treatment_obs}.\n#A$# After Subtracting, The Control Vessel Rate Is {treatment_obs} units",
+                "#T$# Default fallback.\n#A$# 0",
+            )
+            base_scores = (1.0, 0.20, 0.10, 0.0)
+            domain = "arc_science"
+        elif kind == 25:
+            # ARC-Physics Specialization: Mechanical-to-Thermal Energy Conservation
+            mass_kg = 2 + (a % 9)
+            g_acc = 10
+            height_m = 4 + (b % 11)
+            pe_initial = mass_kg * g_acc * height_m
+            friction_loss = 5 + (c % 15)
+            net_ke = pe_initial - friction_loss
+            task_id = f"arc_phys_energy_{mass_kg}_{height_m}_{friction_loss}"
+            prompt_q = (
+                f"#U$# [ARC Physics Conservation] A block of mass `m = {mass_kg} kg` descends a ramp of vertical height "
+                f"`h = {height_m} m` under gravity `g = 10 m/s^2`, losing `{friction_loss} J` to surface friction.\n"
+                f"#Q$# [arc_physics] Compute the final kinetic energy in Joules and state it in lowercase with no commas, "
+                f"including the keyword `joules`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:joules;exact_int:{net_ke}"
+            gold_t = (
+                f"By conservation of mechanical and thermal energy, gravitational potential energy converts into kinetic energy "
+                f"minus frictional heat: first compute {mass_kg} * {g_acc} = {mass_kg * g_acc}, multiply by height "
+                f"{mass_kg * g_acc} * {height_m} = {pe_initial}, and subtract friction {pe_initial} - {friction_loss} = {net_ke}."
+            )
+            gold_a = f"conservation of energy yields {net_ke} joules of terminal kinetic energy"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                f"#T$# Add friction instead of subtracting: {pe_initial} + {friction_loss} = {pe_initial + friction_loss}.\n#A$# conservation of energy yields {pe_initial + friction_loss} joules of terminal kinetic energy",
+                f"#T$# Ignore frictional dissipation and report potential energy {pe_initial}.\n#A$# Conservation, Of Energy Yields {pe_initial} Joules",
+                "#T$# Zero delta.\n#A$# 0",
+            )
+            base_scores = (1.0, 0.20, 0.10, 0.0)
+            domain = "arc_physics"
+        elif kind == 26:
+            # ARC-Chemistry Specialization: Stoichiometry & Limiting Reagent Yield
+            moles_b = 3 + (b % 12)
+            moles_a = 2 * moles_b + 2 + (a % 7)  # A is in excess for 2A + B -> 2C
+            theoretical_c = 2 * moles_b
+            loss_moles = 1 + (c % max(2, moles_b))
+            actual_c = theoretical_c - loss_moles
+            task_id = f"arc_chem_stoich_{moles_a}_{moles_b}_{loss_moles}"
+            prompt_q = (
+                f"#U$# [ARC Chemistry Stoichiometry] Reaction `2 A + 1 B -> 2 C` is run with `{moles_a} mol` of reactant A "
+                f"and `{moles_b} mol` of reactant B, with `{loss_moles} mol` of product C lost during filtration.\n"
+                f"#Q$# [arc_chemistry] Identify the limiting reagent and report the isolated moles of C in lowercase "
+                f"with no commas, including the keyword `limiting`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:limiting;exact_int:{actual_c}"
+            gold_t = (
+                f"Comparing stoichiometric ratios for 2A + B -> 2C, {moles_b} moles of B require 2 * {moles_b} = {2 * moles_b} "
+                f"moles of A, which is less than the available {moles_a} moles of A. Thus B is the limiting reagent producing "
+                f"{theoretical_c} theoretical moles of C, and subtracting filtration loss {theoretical_c} - {loss_moles} = {actual_c}."
+            )
+            gold_a = f"reactant b is the limiting reagent yielding {actual_c} moles of product"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                f"#T$# Use excess reactant A directly: {moles_a} - {loss_moles} = {moles_a - loss_moles}.\n#A$# reactant a is the limiting reagent yielding {moles_a - loss_moles} moles of product",
+                f"#T$# Omit 2x stoichiometric coefficient on product C: {moles_b} - {loss_moles} = {moles_b - loss_moles}.\n#A$# Reactant B, Is Limiting With {moles_b - loss_moles} moles",
+                "#T$# Default fallback.\n#A$# 0",
+            )
+            base_scores = (1.0, 0.20, 0.10, 0.0)
+            domain = "arc_chemistry"
+        elif kind == 27:
+            # ARC-Biology Specialization: Mendelian & Population Genetics Carrier Count
+            p_num = 3 + (a % 4)  # out of 10
+            q_num = 10 - p_num
+            pop_scale = 2 + (b % 8)
+            # N = 100 * pop_scale so 2 * p * q * N = 2 * p_num * q_num * pop_scale is exact integer
+            carriers = 2 * p_num * q_num * pop_scale
+            hom_dom = p_num * p_num * pop_scale
+            task_id = f"arc_bio_genetics_{p_num}_{q_num}_{pop_scale}"
+            prompt_q = (
+                f"#U$# [ARC Biology Genetics] A population of `{100 * pop_scale}` diploid organisms is in Hardy-Weinberg "
+                f"equilibrium with dominant allele frequency `p = 0.{p_num}` and recessive allele frequency `q = 0.{q_num}`.\n"
+                f"#Q$# [arc_biology] Compute the expected number of `2pq * N` heterozygous carriers and reply in lowercase "
+                f"with no commas, including the keyword `heterozygous`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:heterozygous;exact_int:{carriers}"
+            gold_t = (
+                f"Under Hardy-Weinberg equilibrium p^2 + 2pq + q^2 = 1, the heterozygous carrier count in a population of "
+                f"{100 * pop_scale} is 2 * {p_num} * {q_num} * {pop_scale}: first compute {2 * p_num} * {q_num} = {2 * p_num * q_num}, "
+                f"then multiply {2 * p_num * q_num} * {pop_scale} = {carriers} heterozygous individuals."
+            )
+            gold_a = f"the hardy weinberg population contains {carriers} heterozygous carrier organisms"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                f"#T$# Omit factor of 2 in heterozygote frequency: {p_num * q_num} * {pop_scale} = {p_num * q_num * pop_scale}.\n#A$# the hardy weinberg population contains {p_num * q_num * pop_scale} heterozygous carrier organisms",
+                f"#T$# Compute homozygous dominant p^2 * N = {hom_dom} instead of 2pq * N.\n#A$# The Population, Contains {hom_dom} Heterozygous Organisms",
+                "#T$# Default fallback.\n#A$# 0",
+            )
+            base_scores = (1.0, 0.20, 0.10, 0.0)
+            domain = "arc_biology"
+        elif kind == 28:
+            # HellaSwag / PIQA Commonsense Specialization: Physical Precondition-Action-Consequence Invariant
+            init_vol = 20 + a
+            inflow_rate = 4 + (b % 9)
+            duration_min = 3 + (c % 5)
+            added_vol = inflow_rate * duration_min
+            relief_drain = 6 + (a % 7)
+            # Valve relief opens only after inflow completes
+            final_vol = init_vol + added_vol - relief_drain
+            task_id = f"commonsense_phys_{init_vol}_{inflow_rate}_{duration_min}_{relief_drain}"
+            prompt_q = (
+                f"#U$# [Physical Commonsense & Event Completion] A rigid tank holds `{init_vol} L` of water while the drain "
+                f"valve is sealed. A pump adds `{inflow_rate} L/min` for `{duration_min} minutes`, after which a pressure-relief "
+                f"latch vents `{relief_drain} L` before resealing.\n"
+                f"#Q$# [hellaswag_commonsense] Track the physical preconditions across stages and state the final volume in "
+                f"lowercase with no commas, including the keyword `equilibrium`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:equilibrium;exact_int:{final_vol}"
+            gold_t = (
+                f"Because the drain valve is initially sealed, the pump first adds {inflow_rate} * {duration_min} = {added_vol} "
+                f"liters to the initial {init_vol} liters so {init_vol} + {added_vol} = {init_vol + added_vol}, and venting "
+                f"the relief latch leaves {init_vol + added_vol} - {relief_drain} = {final_vol} liters at equilibrium."
+            )
+            gold_a = f"the physical tank reaches equilibrium at {final_vol} liters of water"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                f"#T$# Subtract relief drain every minute instead of once: {init_vol + added_vol} - {relief_drain * duration_min} = {init_vol + added_vol - relief_drain * duration_min}.\n#A$# the physical tank reaches equilibrium at {init_vol + added_vol - relief_drain * duration_min} liters of water",
+                f"#T$# Ignore inflow duration and add {init_vol} + {inflow_rate} = {init_vol + inflow_rate}.\n#A$# The Physical Tank, Reaches Equilibrium At {init_vol + inflow_rate} liters",
+                "#T$# Zero delta.\n#A$# 0",
+            )
+            base_scores = (1.0, 0.20, 0.10, 0.0)
+            domain = "hellaswag_commonsense"
+        elif kind == 29:
+            # MMLU Microeconomics Specialization: Monopoly MR = MC Market Equilibrium
+            slope_b = 2 + (b % 4)
+            q_opt = 3 + (a % 9)
+            mc_val = 4 + (c % 10)
+            # For inverse demand P(Q) = A_int - slope_b * Q, MR(Q) = A_int - 2 * slope_b * Q = mc_val
+            a_int = mc_val + 2 * slope_b * q_opt
+            p_opt = a_int - slope_b * q_opt
+            task_id = f"mmlu_econ_{a_int}_{slope_b}_{mc_val}"
+            prompt_q = (
+                f"#U$# [MMLU Microeconomics] A firm faces linear inverse demand `P(Q) = {a_int} - {slope_b} * Q` (so marginal "
+                f"revenue is `MR(Q) = {a_int} - {2 * slope_b} * Q`) and constant marginal cost `MC = {mc_val}`.\n"
+                f"#Q$# [mmlu_economics] Solve `MR(Q) = MC` for the profit-maximizing quantity `Q*` and report the resulting "
+                f"market price `P(Q*)` in lowercase with no commas, including the keyword `equilibrium`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:equilibrium;exact_int:{p_opt}"
+            gold_t = (
+                f"Setting marginal revenue equal to marginal cost gives {a_int} - {mc_val} = {2 * slope_b * q_opt}, which "
+                f"divides by {2 * slope_b} to yield optimal output Q* = {q_opt}. Substituting Q* into inverse demand "
+                f"computes {slope_b} * {q_opt} = {slope_b * q_opt} and {a_int} - {slope_b * q_opt} = {p_opt}."
+            )
+            gold_a = f"the profit maximizing market equilibrium price is {p_opt} dollars per unit"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                f"#T$# Report quantity Q* = {q_opt} instead of market price P(Q*).\n#A$# the profit maximizing market equilibrium price is {q_opt} dollars per unit",
+                f"#T$# Equate P(Q) = MC instead of MR(Q) = MC, yielding price {mc_val}.\n#A$# The Equilibrium, Price Is {mc_val} Dollars",
+                "#T$# Default fallback.\n#A$# 0",
+            )
+            base_scores = (1.0, 0.20, 0.10, 0.0)
+            domain = "mmlu_economics"
+        elif kind == 30:
+            # MMLU Formal Logic Specialization: First-Order Quantifier & Contrapositive Set Deduction
+            n_univ = 60 + a + b
+            not_q = 12 + (b % 15)
+            p_set = 15 + (a % 18)
+            # Sinceforall x (P(x) -> Q(x)), by contrapositive ~Q(x) -> ~P(x), so P and ~Q are disjoint!
+            neither_p_nor_notq = n_univ - p_set - not_q
+            task_id = f"mmlu_logic_{n_univ}_{p_set}_{not_q}"
+            prompt_q = (
+                f"#U$# [MMLU Formal Logic] Over a finite domain of `{n_univ}` elements, universal axiom `forall x (P(x) -> Q(x))` "
+                f"holds. Exactly `{p_set}` elements satisfy `P(x)` and `{not_q}` elements satisfy `~Q(x)`.\n"
+                f"#Q$# [mmlu_logic] Apply contrapositive entailment `~Q(x) -> ~P(x)` to compute how many elements satisfy "
+                f"`Q(x) and ~P(x)`, replying in lowercase with no commas and the keyword `contrapositive`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:contrapositive;exact_int:{neither_p_nor_notq}"
+            gold_t = (
+                f"By the contrapositive equivalence ~Q(x) -> ~P(x), the {not_q} elements in ~Q are strictly disjoint from "
+                f"the {p_set} elements in P. Total elements in Q equal {n_univ} - {not_q} = {n_univ - not_q}, and subtracting "
+                f"the subset P leaves {n_univ - not_q} - {p_set} = {neither_p_nor_notq} elements in Q and ~P."
+            )
+            gold_a = f"by contrapositive entailment exactly {neither_p_nor_notq} elements satisfy q without p"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                f"#T$# Subtract only ~Q from universe: {n_univ} - {not_q} = {n_univ - not_q}.\n#A$# by contrapositive entailment exactly {n_univ - not_q} elements satisfy q without p",
+                f"#T$# Add P and ~Q: {p_set} + {not_q} = {p_set + not_q}.\n#A$# By Contrapositive, Entailment {p_set + not_q} Elements Match",
+                "#T$# Default fallback.\n#A$# 0",
+            )
+            base_scores = (1.0, 0.20, 0.10, 0.0)
+            domain = "mmlu_logic"
+        elif kind == 31:
+            # MMLU Probability & Bayesian Diagnostic Frequency Update
+            sick = 10 + (a % 15)
+            sens_pct = 80 + (b % 15)  # we use natural counts directly to stay exact integer
+            tp_count = sick - (1 + (c % 3))
+            fp_count = 6 + (b % 11)
+            total_flagged = tp_count + fp_count
+            task_id = f"mmlu_bayes_{sick}_{tp_count}_{fp_count}"
+            prompt_q = (
+                f"#U$# [MMLU Bayesian Inference] In a screening cohort, `{sick}` patients carry condition C. The assay "
+                f"correctly flags `{tp_count}` true positives among carriers, but also triggers `{fp_count}` false positives "
+                f"among non-carriers.\n"
+                f"#Q$# [mmlu_probability] Compute the total positive test denominator `TP + FP` for Bayes' rule and state "
+                f"it in lowercase with no commas, including the keyword `posterior`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:posterior;exact_int:{total_flagged}"
+            gold_t = (
+                f"To form the Bayesian posterior predictive denominator P(Test+), we sum the verified true positive count "
+                f"and false positive count across cohorts: {tp_count} + {fp_count} = {total_flagged} total positive flags."
+            )
+            gold_a = f"the bayesian posterior denominator contains {total_flagged} total positive test results"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                f"#T$# Sum total sick carriers and false positives: {sick} + {fp_count} = {sick + fp_count}.\n#A$# the bayesian posterior denominator contains {sick + fp_count} total positive test results",
+                f"#T$# Subtract false positives from true positives: {tp_count} - {fp_count} = {tp_count - fp_count}.\n#A$# The Bayesian, Posterior Denominator Is {tp_count - fp_count}",
+                "#T$# Default fallback.\n#A$# 0",
+            )
+            base_scores = (1.0, 0.20, 0.10, 0.0)
+            domain = "mmlu_probability"
+        elif kind == 32:
+            # MMLU Computer Architecture Specialization: Two-Level Cache AMAT & Stall Cycles
+            l1_hit = 2 + (a % 3)
+            l1_misses = 4 + (b % 7)
+            miss_penalty = 15 + (c % 12)
+            base_insts = 20 + a
+            base_cycles = base_insts * l1_hit
+            stall_cycles = l1_misses * miss_penalty
+            total_cycles = base_cycles + stall_cycles
+            task_id = f"mmlu_arch_cache_{base_insts}_{l1_hit}_{l1_misses}_{miss_penalty}"
+            prompt_q = (
+                f"#U$# [MMLU Computer Systems] A processor executes `{base_insts}` memory accesses with L1 hit latency "
+                f"`{l1_hit} cycles` per access, incurring `{l1_misses}` L1 cache misses each costing a `{miss_penalty}-cycle` "
+                f"L2/DRAM stall penalty.\n"
+                f"#Q$# [mmlu_cs_systems] Compute the total execution cycles (`base_accesses * hit_latency + misses * penalty`) "
+                f"in lowercase with no commas, including the keyword `cycles`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:cycles;exact_int:{total_cycles}"
+            gold_t = (
+                f"Total memory hierarchy execution time combines baseline L1 hit cycles {base_insts} * {l1_hit} = {base_cycles} "
+                f"with L1 miss stall penalties {l1_misses} * {miss_penalty} = {stall_cycles}, yielding {base_cycles} + {stall_cycles} = {total_cycles} cycles."
+            )
+            gold_a = f"the memory hierarchy requires {total_cycles} total processor execution cycles"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                f"#T$# Report only stall penalty cycles {l1_misses} * {miss_penalty} = {stall_cycles}.\n#A$# the memory hierarchy requires {stall_cycles} total processor execution cycles",
+                f"#T$# Add miss count without multiplying by penalty: {base_cycles} + {l1_misses} = {base_cycles + l1_misses}.\n#A$# The Memory, Hierarchy Requires {base_cycles + l1_misses} Cycles",
+                "#T$# Zero delta.\n#A$# 0",
+            )
+            base_scores = (1.0, 0.20, 0.10, 0.0)
+            domain = "mmlu_cs_systems"
+        else:
+            # Family 33: Recursive/Iterative Code State Transducer Synthesis
+            mod_m = 3 + (b % 5)
+            bias_d = 2 + (c % 6)
+            sample_arr = [a, a + 1, a + 2, a + 3, a + 4]
+            expected_sum = sum((x * 2 + bias_d) for x in sample_arr if x % mod_m != 0)
+            task_id = f"code_transducer_{a}_{mod_m}_{bias_d}"
+            prompt_q = (
+                f"#U$# [Recursive State Transducer] Write `solve(xs, m, d)` in Python returning the sum of `(x * 2 + d)` "
+                f"for all elements `x` in `xs` where `x % m != 0`.\n"
+                f"#Q$# [recursive_code] Derive the filtered transducer sum in `#T$#` and implement `solve(xs, m, d)` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({sample_arr}, {mod_m}, {bias_d}) == {expected_sum} "
+                f"and solve([], {mod_m}, {bias_d}) == 0"
+            )
+            gold_t = (
+                f"To synthesize the state transducer over xs, we filter out multiples of m = {mod_m} using x % m != 0, "
+                f"apply the affine map x * 2 + {bias_d} to each surviving element, and accumulate the sum {expected_sum}."
+            )
+            gold_a = "def solve(xs, m, d):\n    return sum((x * 2 + d) for x in xs if x % m != 0)"
+            base_cands = (
+                f"#T$# {gold_t}\n#A$# {gold_a}",
+                "#T$# Invert the modular filter condition to x % m == 0.\n#A$# def solve(xs, m, d):\n    return sum((x * 2 + d) for x in xs if x % m == 0)",
+                "#T$# Omit factor of 2 in the affine state transducer.\n#A$# def solve(xs, m, d):\n    return sum((x + d) for x in xs if x % m != 0)",
+                "#T$# Constant stub.\n#A$# def solve(xs, m, d):\n    return 0",
+            )
+            base_scores = (1.0, 0.25, 0.15, 0.0)
+            domain = "recursive_code"
 
         p_cands, p_scores, g_idx = _permute(base_cands, base_scores)
         cached_s = self.scaffold_cache.get(task_id, default=_SCAFFOLD_CANDIDATES[idx % len(_SCAFFOLD_CANDIDATES)])
         self._last_task_kinds[task_id] = kind
+        skill_name, _ = self.env_architect.skill_and_domain(kind)
+        rec_depth = self.env_architect.recursion_depth(kind)
+        mods = self.env_architect.difficulty_mods(kind)
+        stars = compute_star_difficulty(tier, recursion_depth=rec_depth, mods=mods)
         return OrnithTask(
             task_id=task_id,
             domain=domain,
@@ -1996,6 +2830,10 @@ class OrnithSelfImprover:
             gold_index=g_idx,
             gold_thought=gold_t,
             gold_answer=gold_a,
+            skill=skill_name,
+            star_difficulty=stars,
+            recursion_depth=rec_depth,
+            difficulty_mods=mods,
         )
 
     def step_self_improvement(
@@ -2154,11 +2992,17 @@ class OrnithSelfImprover:
 
         # Empirical pass rate p (probability mass assigned to the permuted gold_index rollout)
         pass_rates = probs.gather(1, targets.unsqueeze(1)).squeeze(1).detach()
+        expected_rollout_vec = (probs.detach() * h_scores).sum(dim=-1)
         d_frontier = frontier_difficulty(pass_rates, target_p=0.20)
         validity = (r_harness_vec > 0.05).float()
-        r_task_vec = compute_task_reward(validity, pass_rates, novelties, target_p=0.20)
+        r_task_base = compute_task_reward(validity, pass_rates, novelties, target_p=0.20)
 
-        # Update Ornith-2.0 ScaffoldCache & OrnithEnvArchitect capability frontier for each task
+        # Submit plays to osu!-style Performance Point (`pp = p * 0.95^(n-1)`) Leaderboard,
+        # update ScaffoldCache, and advance OrnithEnvArchitect difficulty frontier
+        pp_raw_list: list[float] = []
+        pp_weighted_list: list[float] = []
+        pp_weight_list: list[float] = []
+        pp_grad_scales: list[float] = []
         for b_idx, t in enumerate(tasks):
             cand_scaffolds = [
                 _SCAFFOLD_CANDIDATES[(b_idx + k) % len(_SCAFFOLD_CANDIDATES)]
@@ -2171,15 +3015,39 @@ class OrnithSelfImprover:
                 weighted_r,
                 step=self._step_counter,
             )
+            verified_play_acc = float(
+                0.70 * expected_rollout_vec[b_idx].item() + 0.30 * pass_rates[b_idx].item()
+            )
+            play_raw_pp = compute_raw_pp(
+                t.star_difficulty,
+                verified_play_acc,
+                alignment=float(task_alignment[b_idx].item()),
+                mods=t.difficulty_mods,
+                recursion_depth=t.recursion_depth,
+            )
+            pp_sub = self.pp_leaderboard.submit_play(t.skill, play_raw_pp)
+            pp_raw_list.append(pp_sub.raw_pp)
+            pp_weighted_list.append(pp_sub.weighted_pp)
+            pp_weight_list.append(pp_sub.skill_weight)
+            pp_grad_scales.append(pp_sub.grad_scale)
             if t.task_id in self._last_task_kinds:
                 self.env_architect.record_outcome(
                     self._last_task_kinds[t.task_id],
                     float(pass_rates[b_idx].item()),
                     float(task_alignment[b_idx].item()),
+                    pp_weight=pp_sub.skill_weight,
                 )
 
-        # Group-normalized advantages A_i across the G=4 rollouts + staleness-weighted GRPO loss
-        advantages = group_normalized_advantages(h_scores)
+        pp_weights_t = torch.tensor(pp_weight_list, device=self.device, dtype=torch.float32)
+        pp_grad_t = torch.tensor(pp_grad_scales, device=self.device, dtype=torch.float32)
+        # Blend classical frontier task reward with PP-weighted star-progression reward (bounded in [0, 2])
+        r_task_vec = (
+            0.50 * r_task_base
+            + 0.50 * validity * pp_weights_t * novelties.clamp(0.0, 2.0) * expected_rollout_vec.clamp(0.0, 1.0)
+        ).clamp(0.0, 2.0)
+
+        # Group-normalized advantages A_i across the G=4 rollouts scaled by osu! PP placement weight
+        advantages = group_normalized_advantages(h_scores) * pp_grad_t.unsqueeze(-1)
         grpo_loss = grpo_clipped_loss(
             log_probs,
             beh_log_probs,
@@ -2190,7 +3058,8 @@ class OrnithSelfImprover:
         # Guard the autoregressive token decoder (forward_inference) against synthetic 1-line RL placeholder
         # thoughts ("Analyze science constraints...") and bare scalar answers ("9") so RL sharpens the
         # 9-operator COE heads without overwriting natural multi-sentence #T$# -> #A$# generation.
-        decision_distill_loss = F.nll_loss(log_probs, targets)
+        per_row_nll = F.nll_loss(log_probs, targets, reduction="none")
+        decision_distill_loss = (per_row_nll * pp_grad_t).mean()
         max_lm_len = min(eff_seq_len, int(getattr(coe.backbone.config, "max_seq_len", 256)))
         inp_rows: list[list[int]] = []
         lbl_rows: list[list[int]] = []
@@ -2355,6 +3224,12 @@ class OrnithSelfImprover:
         mean_rollout_r = float((probs.detach() * h_scores).sum(dim=-1).mean().item())
         d_out = self._last_dream_out
 
+        mean_raw_pp = sum(pp_raw_list) / max(1, len(pp_raw_list))
+        mean_weighted_pp = sum(pp_weighted_list) / max(1, len(pp_weighted_list))
+        mean_pp_weight = sum(pp_weight_list) / max(1, len(pp_weight_list))
+        mean_stars = sum(t.star_difficulty for t in tasks) / max(1, len(tasks))
+        max_rec_depth = max((t.recursion_depth for t in tasks), default=1)
+
         return OrnithStepOutput(
             loss=total_ornith_loss,
             grpo_loss=grpo_loss.detach(),
@@ -2377,6 +3252,13 @@ class OrnithSelfImprover:
             dream_active_policy="" if d_out is None else str(d_out.active_policy_text),
             antidoom_loss=round(float(antidoom_loss_t.detach().item()), 4),
             antidoom_chosen_win=round(float(antidoom_win), 4),
+            raw_pp=round(float(mean_raw_pp), 4),
+            weighted_pp=round(float(mean_weighted_pp), 4),
+            total_pp=round(float(self.pp_leaderboard.total_pp()), 4),
+            pp_weight=round(float(mean_pp_weight), 5),
+            star_difficulty=round(float(mean_stars), 4),
+            recursion_depth=int(max_rec_depth),
+            active_skill=str(tasks[0].skill) if tasks else "",
         )
 
 

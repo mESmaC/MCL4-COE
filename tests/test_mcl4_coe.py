@@ -2626,3 +2626,124 @@ def test_olmoe_graft_equivalence_and_inplace_mitosis(tmp_path) -> None:
         1 for e in trainer.model.backbone.encoder_layers[0].moe.experts if e.up_proj.weight.requires_grad
     )
     assert plastic_count == 4  # 2 added twin pairs = 4 active twin experts >= cap(2)
+
+
+def test_ornith_pp_weighting_granular_skills_and_infinite_recursion() -> None:
+    """Verify osu!-style Performance Point weighting (`p * 0.95^(n-1)`), 36 granular skills,
+    unbounded recursive RL chains (`L -> inf`), and Dream-RSI `PP` / `RECURSION` rank features.
+    """
+    from mcl4_coe import (
+        DreamProgram,
+        DreamRSIEngine,
+        OrnithEnvArchitect,
+        OrnithPPLeaderboard,
+        OrnithSelfImprover,
+        SKILL_TAXONOMY,
+        compute_total_pp,
+        compute_weighted_pp_series,
+        verify_python_rollout,
+    )
+
+    # 1. Verify exact osu! pp weighting formula: Total pp = sum p_n * 0.95^(n-1)
+    # Top 5 scores [110, 100, 100, 90, 80] -> approx [110, 95, 90, 77, 65]
+    top_five = [110.0, 100.0, 100.0, 90.0, 80.0]
+    weighted = compute_weighted_pp_series(top_five, decay=0.95)
+    assert [round(w) for w in weighted] == [110, 95, 90, 77, 65]
+    assert compute_total_pp(top_five, decay=0.95) == pytest.approx(sum(weighted), abs=1e-3)
+
+    # 2. Verify OrnithPPLeaderboard diminishing returns when farming easy scores vs top-1 play
+    lb = OrnithPPLeaderboard(decay=0.95)
+    first_sub = lb.submit_play("science.experimental_control_abduction", 120.0)
+    assert first_sub.skill_rank == 1
+    assert first_sub.skill_weight == pytest.approx(1.0)
+    assert first_sub.weighted_pp == pytest.approx(120.0)
+
+    # Repeated lower-score farming drops to deeper ranks n > 1 with exponentially decaying 0.95^(n-1) weight
+    for _ in range(15):
+        lb.submit_play("science.experimental_control_abduction", 100.0)
+    farm_sub = lb.submit_play("science.experimental_control_abduction", 80.0)
+    assert farm_sub.skill_rank == 17
+    assert farm_sub.skill_weight == pytest.approx(0.95 ** 16, abs=1e-4)
+    assert farm_sub.grad_scale < first_sub.grad_scale
+
+    # Breakthrough higher-difficulty play (160pp) takes rank #1 and restores full weight 1.0
+    breakthrough = lb.submit_play("science.experimental_control_abduction", 160.0)
+    assert breakthrough.skill_rank == 1
+    assert breakthrough.skill_weight == pytest.approx(1.0)
+    assert breakthrough.delta_skill_pp > 40.0
+
+    # 3. Verify all 36 granular skills & specialized benchmark families (0..35) verify gold == 1.0 and hack == 0.0
+    assert len(SKILL_TAXONOMY) == 36
+    improver = OrnithSelfImprover(projection_dim=16, max_seq_len=384)
+    seen_skills: set[str] = set()
+    seen_domains: set[str] = set()
+    for k in range(36):
+        t = improver._generate_task(k, compact=False)
+        seen_skills.add(t.skill)
+        seen_domains.add(t.domain)
+        gold_cand = t.candidate_rollouts[t.gold_index]
+        assert verify_python_rollout(gold_cand, t.harness_h, t.gold_answer) == 1.0, (
+            f"Family {k} ({t.skill} / {t.task_id}) gold failed verification"
+        )
+        assert min(verify_python_rollout(c, t.harness_h, t.gold_answer) for c in t.candidate_rollouts) == 0.0
+
+    assert len(seen_skills) == 36
+    for req_dom in (
+        "arc_science",
+        "arc_physics",
+        "arc_chemistry",
+        "arc_biology",
+        "hellaswag_commonsense",
+        "mmlu_economics",
+        "mmlu_logic",
+        "mmlu_probability",
+        "mmlu_cs_systems",
+        "recursive_code",
+        "infinite_recursion",
+    ):
+        assert req_dom in seen_domains
+
+    # 4. Verify unbounded tier promotion (beyond old Tier-8 cap) and deep L-hop infinite recursion
+    arch = OrnithEnvArchitect()
+    for _ in range(40):
+        arch.record_outcome(34, pass_prob=0.95, pp_weight=0.20)
+    assert arch.difficulty_tier(34) > 10
+    assert arch.recursion_depth(34) > 12
+    assert "INF" in arch.difficulty_mods(34)
+
+    deep_chain = improver._synthesize_infinite_recursive_task(7, tier=12, mode="chain")
+    assert deep_chain.recursion_depth == 14
+    assert deep_chain.star_difficulty > 5.0
+    assert verify_python_rollout(
+        deep_chain.candidate_rollouts[deep_chain.gold_index],
+        deep_chain.harness_h,
+        deep_chain.gold_answer,
+    ) == 1.0
+
+    deep_code = improver._synthesize_infinite_recursive_task(8, tier=12, mode="code_recursion")
+    assert deep_code.recursion_depth == 14
+    assert verify_python_rollout(
+        deep_code.candidate_rollouts[deep_code.gold_index],
+        deep_code.harness_h,
+        deep_code.gold_answer,
+    ) == 1.0
+
+    # 5. Verify Dream-RSI supports PP & RECURSION rank features and populates PP telemetry on OrnithStepOutput
+    prog = DreamProgram.from_text(
+        "WIDTH 2\nROOT 2\nRANK PP RECURSION UTILITY SCORE\nSTOP 0.88\nPATIENCE 2\nROUNDS 3"
+    )
+    assert prog.rank == ("PP", "RECURSION", "UTILITY", "SCORE")
+    model = _tiny_model().train()
+    imp_dream = OrnithSelfImprover(
+        projection_dim=model.config.projection_dim,
+        max_seq_len=128,
+        enable_dream_rsi=True,
+        dream_engine=DreamRSIEngine(initial_program=prog, max_rounds=2, workers=2, max_calls=4, revisions_per_cycle=2),
+    )
+    step_out = imp_dream.step_self_improvement(model, batch_size=2)
+    assert step_out.raw_pp > 0.0
+    assert step_out.weighted_pp > 0.0
+    assert step_out.total_pp >= step_out.weighted_pp
+    assert step_out.star_difficulty >= 1.0
+    assert step_out.active_skill != ""
+

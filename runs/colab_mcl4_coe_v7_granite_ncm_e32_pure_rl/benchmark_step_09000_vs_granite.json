@@ -340,5 +340,165 @@
         "hybrid_acc": 35.2
       }
     }
+  },
+  "pseudo_dense_per_token_active_sweep_step_09000_e40": {
+    "25_percent_active_topk_10_of_40_plus_coe_ncm": {
+      "ARC-Challenge (N=300, 4-way)": {
+        "acc": 32.33,
+        "acc_norm": 37.33,
+        "coe_decision_acc": 21.0,
+        "hybrid_acc": 35.0,
+        "hybrid_ncm_coe_acc": 34.33
+      },
+      "MMLU_57Subj (N=342, 4-way)": {
+        "acc": 33.63,
+        "acc_norm": 31.87,
+        "coe_decision_acc": 30.12,
+        "hybrid_acc": 33.92,
+        "hybrid_ncm_coe_acc": 33.92
+      },
+      "HellaSwag (N=300, 4-way)": {
+        "acc": 44.33,
+        "acc_norm": 53.0,
+        "coe_decision_acc": 25.67,
+        "hybrid_acc": 51.67
+      },
+      "TypedDecision_MCQA (N=128)": 39.06,
+      "MuSR_Murder_Mysteries (N=250, 2-way)": {
+        "acc": 53.6,
+        "acc_norm": 52.0,
+        "coe_decision_acc": 50.8,
+        "hybrid_acc": 52.0
+      },
+      "MuSR_Object_Placements (N=256, 5-way)": {
+        "acc": 36.72,
+        "acc_norm": 25.78,
+        "coe_decision_acc": 27.34,
+        "hybrid_acc": 26.56
+      },
+      "MuSR_Team_Allocation (N=250, 3-way)": {
+        "acc": 38.8,
+        "acc_norm": 38.8,
+        "coe_decision_acc": 41.2,
+        "hybrid_acc": 37.6
+      },
+      "MuSR_3Task_Macro_Average": {
+        "raw_lm_avg": 43.04,
+        "raw_with_coe_avg": 43.84,
+        "leaderboard_norm_lm": 12.11,
+        "leaderboard_norm_with_coe": 13.3
+      },
+      "BBH_Logical_Deduction_3Obj (N=250, 3-way)": {
+        "acc": 36.4,
+        "acc_norm": 37.6,
+        "coe_decision_acc": 35.2,
+        "hybrid_acc": 38.4
+      },
+      "BBH_Logical_Deduction_5Obj (N=250, 5-way)": {
+        "acc": 23.6,
+        "acc_norm": 23.6,
+        "coe_decision_acc": 20.8,
+        "hybrid_acc": 23.2
+      },
+      "BBH_Tracking_Shuffled_Objects (N=250, 3-way)": {
+        "acc": 36.8,
+        "acc_norm": 34.4,
+        "coe_decision_acc": 32.0,
+        "hybrid_acc": 34.0
+      },
+      "BBH_Web_of_Lies (N=250, 2-way)": {
+        "acc": 48.8,
+        "acc_norm": 48.8,
+        "coe_decision_acc": 52.0,
+        "hybrid_acc": 48.8
+      },
+      "BBH_Formal_Fallacies (N=250, 2-way)": {
+        "acc": 46.4,
+        "acc_norm": 46.8,
+        "coe_decision_acc": 53.6,
+        "hybrid_acc": 46.8
+      },
+      "OpenBookQA_MultiHop_Science (N=500, 4-way)": {
+        "acc": 24.0,
+        "acc_norm": 34.6,
+        "coe_decision_acc": 30.8,
+        "hybrid_acc": 35.4
+      }
+    },
+    "50_percent_active_topk_20_of_40_scale_preserved_plus_coe_ncm": {
+      "ARC-Challenge (N=300, 4-way)": {
+        "acc": 29.33,
+        "acc_norm": 31.67,
+        "coe_decision_acc": 24.0,
+        "hybrid_acc": 32.33
+      },
+      "MMLU_57Subj (N=342, 4-way)": {
+        "acc": 29.53,
+        "acc_norm": 29.53,
+        "coe_decision_acc": 27.49,
+        "hybrid_acc": 28.36
+      },
+      "HellaSwag (N=300, 4-way)": {
+        "acc": 40.33,
+        "acc_norm": 49.0,
+        "coe_decision_acc": 22.0,
+        "hybrid_acc": 49.33
+      },
+      "TypedDecision_MCQA (N=128)": 35.94,
+      "MuSR_Murder_Mysteries (N=250, 2-way)": {
+        "acc": 53.6,
+        "acc_norm": 53.2,
+        "coe_decision_acc": 51.2,
+        "hybrid_acc": 53.2
+      },
+      "MuSR_Object_Placements (N=256, 5-way)": {
+        "acc": 38.28,
+        "acc_norm": 24.61,
+        "coe_decision_acc": 25.0,
+        "hybrid_acc": 24.22
+      },
+      "MuSR_Team_Allocation (N=250, 3-way)": {
+        "acc": 37.2,
+        "acc_norm": 37.2,
+        "coe_decision_acc": 39.2,
+        "hybrid_acc": 37.6
+      },
+      "BBH_Logical_Deduction_3Obj (N=250, 3-way)": {
+        "acc": 36.8,
+        "acc_norm": 39.2,
+        "coe_decision_acc": 37.2,
+        "hybrid_acc": 39.6
+      },
+      "BBH_Logical_Deduction_5Obj (N=250, 5-way)": {
+        "acc": 22.0,
+        "acc_norm": 22.4,
+        "coe_decision_acc": 19.6,
+        "hybrid_acc": 22.0
+      },
+      "BBH_Tracking_Shuffled_Objects (N=250, 3-way)": {
+        "acc": 30.4,
+        "acc_norm": 29.6,
+        "coe_decision_acc": 32.0,
+        "hybrid_acc": 31.6
+      },
+      "BBH_Web_of_Lies (N=250, 2-way)": {
+        "acc": 48.8,
+        "acc_norm": 48.8,
+        "coe_decision_acc": 50.8,
+        "hybrid_acc": 48.8
+      },
+      "BBH_Formal_Fallacies (N=250, 2-way)": {
+        "acc": 46.4,
+        "acc_norm": 46.8,
+        "coe_decision_acc": 52.8,
+        "hybrid_acc": 46.8
+      },
+      "OpenBookQA_MultiHop_Science (N=500, 4-way)": {
+        "acc": 22.0,
+        "acc_norm": 33.0,
+        "coe_decision_acc": 28.8,
+        "hybrid_acc": 33.0
+      }
+    }
   }
 }

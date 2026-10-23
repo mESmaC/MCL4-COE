@@ -132,13 +132,20 @@ class DonorHFTokenizer:
         unk_id: int | None = None,
     ) -> None:
         if model_id is None:
-            if int(vocab_size) == 50304:
+            if int(vocab_size) == 128256:
+                model_id = "unsloth/Llama-3.2-1B-Instruct"
+            elif int(vocab_size) == 50304:
                 model_id = "allenai/OLMoE-1B-7B-0125"
             else:
                 model_id = "ibm-granite/granite-3.1-1b-a400m-instruct"
         self.model_id = model_id
         self.vocab_size = int(vocab_size)
-        if int(vocab_size) == 50304:
+        if int(vocab_size) == 128256:
+            self.pad_id = int(128004 if pad_id is None else pad_id)
+            self.bos_id = int(128000 if bos_id is None else bos_id)
+            self.eos_id = int(128009 if eos_id is None else eos_id)
+            self.unk_id = int(128004 if unk_id is None else unk_id)
+        elif int(vocab_size) == 50304:
             self.pad_id = int(1 if pad_id is None else pad_id)
             self.bos_id = int(50279 if bos_id is None else bos_id)
             self.eos_id = int(50279 if eos_id is None else eos_id)
@@ -194,7 +201,10 @@ class DonorHFTokenizer:
             for c, d in (("U", 54), ("T", 53), ("Q", 50), ("S", 52), ("H", 41))
         )
         self.a_char_id = _first_id("A", 34 if self.vocab_size == 50304 else 51)
-        if self.vocab_size == 50304:
+        if self.vocab_size == 128256:
+            self.invalid_logit_slice_low = (0, 0)
+            self.invalid_logit_start_high = 128000
+        elif self.vocab_size == 50304:
             self.invalid_logit_slice_low = (0, 2)
             self.invalid_logit_start_high = 50254
         else:
@@ -264,9 +274,9 @@ class DonorHFTokenizer:
             if int(tid) < 0 and (int(tid) & self.prompt_mask_bit) == 0:
                 continue
             clean = int(tid) & self.value_mask
-            if clean in (self.pad_id, self.eos_id):
+            if clean in (self.pad_id, self.bos_id, self.eos_id):
                 continue
-            if 0 < clean < self.vocab_size:
+            if 0 <= clean < self.vocab_size:
                 clean_ids.append(clean)
         if not clean_ids:
             return ""
@@ -332,33 +342,43 @@ class TokenBlockDataset(Dataset):
         self.include_partial = include_partial
 
         resolved_dtype = dtype
-        if resolved_dtype is None:
+        resolved_pad_id = pad_id
+        if resolved_dtype is None or resolved_pad_id is None:
             receipt_candidate = self.path.with_suffix(".receipt.json")
             if receipt_candidate.is_file():
                 try:
                     r_data = json.loads(receipt_candidate.read_text(encoding="utf-8"))
-                    resolved_dtype = str(r_data.get("dtype", "uint16"))
+                    if resolved_dtype is None:
+                        resolved_dtype = str(r_data.get("dtype", "uint16"))
+                    if resolved_pad_id is None and r_data.get("pad_id") is not None:
+                        resolved_pad_id = int(r_data["pad_id"])
                 except Exception:
-                    resolved_dtype = None
-            if resolved_dtype is None:
+                    pass
+            if resolved_dtype is None or resolved_pad_id is None:
                 idx_candidate = self.path.parent / "index_receipt.json"
                 if idx_candidate.is_file():
                     try:
                         i_data = json.loads(idx_candidate.read_text(encoding="utf-8"))
-                        resolved_dtype = str(i_data.get("dtype", "uint16"))
+                        if resolved_dtype is None:
+                            resolved_dtype = str(i_data.get("dtype", "uint16"))
+                        if resolved_pad_id is None:
+                            if i_data.get("pad_id") is not None:
+                                resolved_pad_id = int(i_data["pad_id"])
+                            elif isinstance(i_data.get("totals"), dict) and i_data["totals"].get("pad_id") is not None:
+                                resolved_pad_id = int(i_data["totals"]["pad_id"])
                     except Exception:
-                        resolved_dtype = None
+                        pass
 
         if resolved_dtype in ("uint32", "<u4", "u4"):
             self._dtype_str = "<u4"
             self.prompt_mask_bit = 0x80000000
             self.value_mask = 0x7FFFFFFF
-            self.pad_id = 4 if pad_id is None else int(pad_id)
+            self.pad_id = 4 if resolved_pad_id is None else int(resolved_pad_id)
         else:
             self._dtype_str = "<u2"
             self.prompt_mask_bit = 0x8000
             self.value_mask = 0x7FFF
-            self.pad_id = ByteTokenizer.pad_id if pad_id is None else int(pad_id)
+            self.pad_id = ByteTokenizer.pad_id if resolved_pad_id is None else int(resolved_pad_id)
 
         itemsize = np.dtype(self._dtype_str).itemsize
         size = self.path.stat().st_size

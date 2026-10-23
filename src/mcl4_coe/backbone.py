@@ -75,6 +75,8 @@ class MCL4CEDConfig:
     dense_expert_indices: tuple[int, ...] = ()
     dense_subset_k: int = 0
     combine_dense_and_sparse: bool = False
+    routed_scaling_factor: float = 1.0
+    rope_scaling: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.dense_expert_indices, list):
@@ -212,6 +214,9 @@ class SparseMoE(nn.Module):
         self.dense_subset_k: int = int(getattr(config, "dense_subset_k", 0))
         self.combine_dense_and_sparse: bool = bool(
             getattr(config, "combine_dense_and_sparse", False)
+        )
+        self.routed_scaling_factor: float = float(
+            getattr(config, "routed_scaling_factor", 1.0)
         )
         self.router = nn.Linear(config.d_model, config.num_experts, bias=False)
         self.experts = nn.ModuleList(
@@ -698,6 +703,8 @@ class SparseMoE(nn.Module):
                 dense_weights = dense_weights / dense_weights.sum(dim=-1, keepdim=True).clamp_min(
                     1e-9
                 )
+                if self.routed_scaling_factor != 1.0:
+                    dense_weights = dense_weights * self.routed_scaling_factor
                 sel_mask_active = x.new_zeros(
                     (active_x.shape[0], self.num_experts), dtype=torch.float32
                 )
@@ -853,6 +860,8 @@ class SparseMoE(nn.Module):
                         weights, selected = routed_probs.topk(self.top_k, dim=-1)
                     if self.norm_topk_prob:
                         weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
+                if self.routed_scaling_factor != 1.0:
+                    weights = weights * self.routed_scaling_factor
                 sel_mask_2d = x.new_zeros((flat.shape[0], self.num_experts), dtype=torch.float32)
                 sel_mask_2d.scatter_add_(
                     1,
@@ -992,6 +1001,8 @@ class SparseMoE(nn.Module):
                     weights, selected = routed_probs.topk(self.top_k, dim=-1)
                 if self.norm_topk_prob:
                     weights = weights / weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
+            if self.routed_scaling_factor != 1.0:
+                weights = weights * self.routed_scaling_factor
             one_hot_sel = F.one_hot(selected, num_classes=self.num_experts)
             full_sel_mask = x.new_zeros((flat.shape[0], self.num_experts), dtype=torch.float32)
             full_sel_mask.index_copy_(
@@ -1083,9 +1094,7 @@ class LocalAttentionBlock(nn.Module):
             else nn.Identity()
         )
         self.out_proj = nn.Linear(config.d_model, config.d_model, bias=False)
-        inv_freq = 1.0 / (
-            config.rope_theta ** (torch.arange(0, self.head_dim, 2).float() / self.head_dim)
-        )
+        inv_freq = self._compute_inv_freq(torch.device("cpu"))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self.markov_router: MarkovLocal4Router | None = None
         self.markov_gate: nn.Parameter | None = None
@@ -1108,20 +1117,52 @@ class LocalAttentionBlock(nn.Module):
             if config.preserve_residual_across_stacks:
                 self.markov_gate = nn.Parameter(torch.zeros(()))
 
-    def _apply_rope(self, x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
-        even, odd = x[..., 0::2], x[..., 1::2]
-        return torch.stack((even * cos - odd * sin, even * sin + odd * cos), dim=-1).flatten(-2)
-
-    def _get_inv_freq(self, device: torch.device) -> Tensor:
-        if self.inv_freq.dtype == torch.float32:
-            return self.inv_freq
-        return 1.0 / (
+    def _compute_inv_freq(self, device: torch.device) -> Tensor:
+        inv_freq = 1.0 / (
             self.config.rope_theta
             ** (
                 torch.arange(0, self.head_dim, 2, device=device, dtype=torch.float32)
                 / self.head_dim
             )
         )
+        rope_scaling = getattr(self.config, "rope_scaling", None)
+        if isinstance(rope_scaling, dict) and str(
+            rope_scaling.get("rope_type", rope_scaling.get("type", ""))
+        ).lower() == "llama3":
+            factor = float(rope_scaling.get("factor", 8.0))
+            low_freq_factor = float(rope_scaling.get("low_freq_factor", 1.0))
+            high_freq_factor = float(rope_scaling.get("high_freq_factor", 4.0))
+            old_context_len = float(
+                rope_scaling.get("original_max_position_embeddings", 8192)
+            )
+            low_freq_wavelen = old_context_len / low_freq_factor
+            high_freq_wavelen = old_context_len / high_freq_factor
+            wavelen = 2.0 * math.pi / inv_freq
+            inv_freq_llama = torch.where(
+                wavelen > low_freq_wavelen, inv_freq / factor, inv_freq
+            )
+            smooth_factor = (old_context_len / wavelen - low_freq_factor) / (
+                high_freq_factor - low_freq_factor
+            )
+            smoothed_inv_freq = (
+                1.0 - smooth_factor
+            ) * inv_freq_llama / factor + smooth_factor * inv_freq_llama
+            is_medium_freq = ~(wavelen < high_freq_wavelen) & ~(
+                wavelen > low_freq_wavelen
+            )
+            inv_freq = torch.where(is_medium_freq, smoothed_inv_freq, inv_freq_llama)
+        return inv_freq
+
+    def _apply_rope(self, x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
+        even, odd = x[..., 0::2], x[..., 1::2]
+        return torch.stack((even * cos - odd * sin, even * sin + odd * cos), dim=-1).flatten(-2)
+
+    def _get_inv_freq(self, device: torch.device) -> Tensor:
+        if self.inv_freq.dtype == torch.float32 and self.inv_freq.device == device:
+            return self.inv_freq
+        inv_freq = self._compute_inv_freq(device)
+        self.inv_freq = inv_freq
+        return inv_freq
 
     def _get_rope_cos_sin(
         self,

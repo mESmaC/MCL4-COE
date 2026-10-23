@@ -155,6 +155,8 @@ class TrainingRunConfig:
     dense_expert_indices: tuple[int, ...] = ()
     dense_subset_k: int = 0
     combine_dense_and_sparse: bool = False
+    routed_scaling_factor: float = 1.0
+    rope_scaling: dict[str, Any] | None = None
     max_experts: int = 12
     mitosis_every: int = 300
     mitosis_step_size: int = 2
@@ -472,9 +474,12 @@ class MCL4COETrainer:
             "embedding_multiplier",
             "residual_multiplier",
             "logits_scaling",
+            "routed_scaling_factor",
         ):
             if f_key in b_cfg and b_cfg[f_key] is not None:
                 setattr(self.config, f_key, float(b_cfg[f_key]))
+        if "rope_scaling" in b_cfg and b_cfg["rope_scaling"] is not None:
+            self.config.rope_scaling = dict(b_cfg["rope_scaling"])
         if "attention_multiplier" in b_cfg:
             self.config.attention_multiplier = (
                 float(b_cfg["attention_multiplier"])
@@ -816,6 +821,8 @@ class MCL4COETrainer:
             dense_expert_indices=tuple(self.config.dense_expert_indices),
             dense_subset_k=self.config.dense_subset_k,
             combine_dense_and_sparse=self.config.combine_dense_and_sparse,
+            routed_scaling_factor=float(self.config.routed_scaling_factor),
+            rope_scaling=self.config.rope_scaling,
         )
         self.coe_cfg = COEConfig(
             projection_dim=self.config.projection_dim,
@@ -859,7 +866,7 @@ class MCL4COETrainer:
                 vq_embed_dim=int(self.config.ncm_vq_embed_dim),
                 d_model=int(self.config.d_model),
                 vocab_size=int(self.config.vocab_size),
-                pad_id=int(self.config.pad_id),
+                pad_id=int(eff_pad_id),
                 rms_norm_eps=float(self.config.rms_norm_eps),
                 scale_adaptive_top_k=bool(self.config.ncm_scale_adaptive_top_k),
             )
@@ -977,25 +984,18 @@ class MCL4COETrainer:
     def _create_optimizer(self) -> None:
         """Build `self.optimizer` over all currently trainable (`requires_grad=True`) parameters."""
         if self.config.preserve_residual_across_stacks and float(self.config.donor_backbone_lr_scale) != 1.0:
-            new_adapter_markers = (
-                (
-                    ".ple.",
-                    ".markov_router.",
-                    ".markov_gate",
-                    ".global_",
-                    ".feedback.",
-                )
-                if str(self.config.qk_norm_mode).lower() == "full"
-                else (
-                    ".ple.",
-                    ".markov_router.",
-                    ".markov_gate",
-                    ".global_",
-                    ".feedback.",
-                    ".q_norm.",
-                    ".k_norm.",
-                )
+            base_markers = (
+                ".ple.",
+                ".markov_router.",
+                ".markov_gate",
+                ".global_",
+                ".feedback.",
             )
+            if str(self.config.qk_norm_mode).lower() != "full":
+                base_markers = (*base_markers, ".q_norm.", ".k_norm.")
+            if float(self.config.routed_scaling_factor) > 1.0:
+                base_markers = (*base_markers, ".moe.router.")
+            new_adapter_markers = base_markers
             ncm_decay, ncm_nodecay = [], []
             adapter_decay, adapter_nodecay = [], []
             donor_decay, donor_nodecay = [], []

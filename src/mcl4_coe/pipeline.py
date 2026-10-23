@@ -1238,6 +1238,8 @@ class BlockAlignedShardWriter:
                 seq_len=seq_len,
                 max_tokens_per_shard=max_blocks_per_shard * seq_len,
             )
+        self.index_receipt.totals["pad_id"] = int(self.tokenizer.pad_id)
+        self.index_receipt.totals["vocab_size"] = int(self.vocab_size)
 
         self._current_blocks: list[np.ndarray] = []
         self._current_block_buf: list[int] = []
@@ -1387,6 +1389,8 @@ class BlockAlignedShardWriter:
 
         self.index_receipt.shards.append(receipt.to_dict())
         totals = self.index_receipt.totals
+        totals["pad_id"] = int(self.tokenizer.pad_id)
+        totals["vocab_size"] = int(self.vocab_size)
         totals["num_shards"] = len(self.index_receipt.shards)
         totals["num_tokens"] = totals.get("num_tokens", 0) + num_tokens
         totals["num_blocks"] = totals.get("num_blocks", 0) + num_blocks

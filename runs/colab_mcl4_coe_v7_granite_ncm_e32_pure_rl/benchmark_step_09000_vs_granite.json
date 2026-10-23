@@ -176,5 +176,169 @@
       "mcl4_coe_ncm_step_08175_peak_e40_nvfp4": 43.75,
       "mcl4_coe_ncm_step_09000_e40_nvfp4": 36.72
     }
+  },
+  "deductive_and_multistep_reasoning_benchmarks": {
+    "MuSR_Murder_Mysteries (N=250, 2-way)": {
+      "raw_hf_granite_instruct_bf16_0shot": {
+        "acc": 53.6,
+        "acc_norm": 52.4
+      },
+      "mcl4_coe_ncm_step_05500_pre_sherlock_e32_nvfp4": {
+        "acc": 53.2,
+        "acc_norm": 52.0,
+        "coe_decision_acc": 51.6,
+        "hybrid_acc": 52.0
+      },
+      "mcl4_coe_ncm_step_09000_e40_nvfp4": {
+        "acc": 53.6,
+        "acc_norm": 52.8,
+        "coe_decision_acc": 50.8,
+        "hybrid_acc": 52.8
+      }
+    },
+    "MuSR_Object_Placements (N=256, 5-way)": {
+      "raw_hf_granite_instruct_bf16_0shot": {
+        "acc": 32.81,
+        "acc_norm": 24.61
+      },
+      "mcl4_coe_ncm_step_05500_pre_sherlock_e32_nvfp4": {
+        "acc": 32.81,
+        "acc_norm": 23.05,
+        "coe_decision_acc": 27.73,
+        "hybrid_acc": 23.44
+      },
+      "mcl4_coe_ncm_step_09000_e40_nvfp4": {
+        "acc": 35.16,
+        "acc_norm": 25.78,
+        "coe_decision_acc": 27.73,
+        "hybrid_acc": 25.78
+      }
+    },
+    "MuSR_Team_Allocation (N=250, 3-way)": {
+      "raw_hf_granite_instruct_bf16_0shot": {
+        "acc": 36.0,
+        "acc_norm": 36.0
+      },
+      "mcl4_coe_ncm_step_05500_pre_sherlock_e32_nvfp4": {
+        "acc": 32.8,
+        "acc_norm": 32.8,
+        "coe_decision_acc": 38.4,
+        "hybrid_acc": 34.4
+      },
+      "mcl4_coe_ncm_step_09000_e40_nvfp4": {
+        "acc": 37.2,
+        "acc_norm": 37.2,
+        "coe_decision_acc": 40.0,
+        "hybrid_acc": 37.6
+      }
+    },
+    "BBH_Tracking_Shuffled_Objects (N=250, 3-way)": {
+      "raw_hf_granite_instruct_bf16_0shot": {
+        "acc": 27.2,
+        "acc_norm": 29.2
+      },
+      "mcl4_coe_ncm_step_05500_pre_sherlock_e32_nvfp4": {
+        "acc": 34.0,
+        "acc_norm": 33.2,
+        "coe_decision_acc": 28.0,
+        "hybrid_acc": 34.0
+      },
+      "mcl4_coe_ncm_step_09000_e40_nvfp4": {
+        "acc": 35.2,
+        "acc_norm": 33.2,
+        "coe_decision_acc": 30.8,
+        "hybrid_acc": 31.6
+      }
+    },
+    "BBH_Web_of_Lies (N=250, 2-way)": {
+      "raw_hf_granite_instruct_bf16_0shot": {
+        "acc": 49.6,
+        "acc_norm": 47.6
+      },
+      "mcl4_coe_ncm_step_05500_pre_sherlock_e32_nvfp4": {
+        "acc": 48.8,
+        "acc_norm": 48.8,
+        "coe_decision_acc": 51.6,
+        "hybrid_acc": 48.8
+      },
+      "mcl4_coe_ncm_step_09000_e40_nvfp4": {
+        "acc": 48.8,
+        "acc_norm": 48.8,
+        "coe_decision_acc": 52.0,
+        "hybrid_acc": 48.8
+      }
+    },
+    "BBH_Formal_Fallacies (N=250, 2-way)": {
+      "raw_hf_granite_instruct_bf16_0shot": {
+        "acc": 46.8,
+        "acc_norm": 46.8
+      },
+      "mcl4_coe_ncm_step_05500_pre_sherlock_e32_nvfp4": {
+        "acc": 47.6,
+        "acc_norm": 46.8,
+        "coe_decision_acc": 56.8,
+        "hybrid_acc": 46.8
+      },
+      "mcl4_coe_ncm_step_09000_e40_nvfp4": {
+        "acc": 47.6,
+        "acc_norm": 46.8,
+        "coe_decision_acc": 52.0,
+        "hybrid_acc": 46.8
+      }
+    },
+    "BBH_Logical_Deduction_3Obj (N=250, 3-way)": {
+      "raw_hf_granite_instruct_bf16_0shot": {
+        "acc": 37.6,
+        "acc_norm": 38.0
+      },
+      "mcl4_coe_ncm_step_05500_pre_sherlock_e32_nvfp4": {
+        "acc": 39.2,
+        "acc_norm": 37.6,
+        "coe_decision_acc": 35.6,
+        "hybrid_acc": 38.8
+      },
+      "mcl4_coe_ncm_step_09000_e40_nvfp4": {
+        "acc": 36.4,
+        "acc_norm": 37.2,
+        "coe_decision_acc": 34.4,
+        "hybrid_acc": 37.2
+      }
+    },
+    "BBH_Logical_Deduction_5Obj (N=250, 5-way)": {
+      "raw_hf_granite_instruct_bf16_0shot": {
+        "acc": 22.8,
+        "acc_norm": 23.6
+      },
+      "mcl4_coe_ncm_step_05500_pre_sherlock_e32_nvfp4": {
+        "acc": 25.6,
+        "acc_norm": 26.0,
+        "coe_decision_acc": 19.6,
+        "hybrid_acc": 26.8
+      },
+      "mcl4_coe_ncm_step_09000_e40_nvfp4": {
+        "acc": 22.8,
+        "acc_norm": 22.0,
+        "coe_decision_acc": 22.4,
+        "hybrid_acc": 22.8
+      }
+    },
+    "OpenBookQA_MultiHop_Science (N=500, 4-way)": {
+      "raw_hf_granite_instruct_bf16_0shot": {
+        "acc": 26.2,
+        "acc_norm": 38.0
+      },
+      "mcl4_coe_ncm_step_05500_pre_sherlock_e32_nvfp4": {
+        "acc": 27.4,
+        "acc_norm": 34.0,
+        "coe_decision_acc": 28.8,
+        "hybrid_acc": 33.2
+      },
+      "mcl4_coe_ncm_step_09000_e40_nvfp4": {
+        "acc": 24.8,
+        "acc_norm": 35.0,
+        "coe_decision_acc": 28.8,
+        "hybrid_acc": 35.2
+      }
+    }
   }
 }

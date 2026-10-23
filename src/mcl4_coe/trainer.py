@@ -1170,6 +1170,9 @@ class MCL4COETrainer:
             "backbone_config": asdict(self.backbone_cfg),
             "coe_config": asdict(self.coe_cfg),
             "mitotic_pairs": [list(p) for p in self._get_model_mitotic_pairs()],
+            "released_mitotic_pairs": [
+                list(p) for p in getattr(self, "_released_mitotic_pairs", [])
+            ],
             "model_state": model_state_cpu(self.model),
             "optimizer_state": opt_state_cpu,
             "sampler_state": self.sampler.state_dict(),
@@ -1847,7 +1850,10 @@ class MCL4COETrainer:
         ckpt_experts = int(b_cfg.get("num_experts", self.config.num_experts))
         model_state = payload["model_state"]
         raw_pairs = payload.get("mitotic_pairs") or payload.get("latest_metrics", {}).get("mitotic_pairs") or []
+        raw_released = payload.get("released_mitotic_pairs") or []
         existing_pairs = [tuple(p) for p in raw_pairs]
+        prev_released = [tuple(p) for p in raw_released]
+        all_prior_pairs = prev_released + [p for p in existing_pairs if p not in prev_released]
         added_pairs: list[tuple[int, int]] = []
         if self.config.num_experts > ckpt_experts:
             prev_loads = payload.get("latest_metrics", {}).get("expert_load")
@@ -1855,14 +1861,14 @@ class MCL4COETrainer:
                 ckpt_experts,
                 self.config.num_experts,
                 expert_loads=prev_loads,
-                existing_pairs=existing_pairs,
+                existing_pairs=all_prior_pairs,
             )
             model_state = upcycle_state_dict_experts(
                 model_state,
                 ckpt_experts,
                 self.config.num_experts,
                 expert_loads=prev_loads,
-                existing_pairs=existing_pairs,
+                existing_pairs=all_prior_pairs,
                 seed=self.config.seed,
                 orthogonal=self.config.orthogonal_mitosis,
             )
@@ -1872,16 +1878,16 @@ class MCL4COETrainer:
         with torch.no_grad():
             self.model.log_scale.data.clamp_(math.log(0.5), math.log(3.5))
         if self.config.release_mitotic_pairs:
-            self._released_mitotic_pairs = list(existing_pairs) + list(added_pairs)
+            self._released_mitotic_pairs = list(all_prior_pairs) + list(added_pairs)
             self._set_model_mitotic_pairs([])
-        elif (existing_pairs or added_pairs) and not self._get_model_mitotic_pairs():
-            newly_split = {idx for pair in added_pairs for idx in pair}
-            active_existing = [
-                (p, c)
-                for p, c in existing_pairs
-                if p not in newly_split and c not in newly_split
-            ]
-            self._set_model_mitotic_pairs(active_existing + added_pairs)
+        elif added_pairs:
+            # Release prior-generation mitotic pairs so they graduate into independent top-k experts,
+            # keeping only the newly split pairs twin-locked and plastic for the current run.
+            self._released_mitotic_pairs = list(all_prior_pairs)
+            self._set_model_mitotic_pairs(list(added_pairs))
+        elif existing_pairs and not self._get_model_mitotic_pairs():
+            self._released_mitotic_pairs = list(prev_released)
+            self._set_model_mitotic_pairs(list(existing_pairs))
 
         self.latest_metrics = dict(payload.get("latest_metrics", {}))
         init_loads = list(self.latest_metrics.get("expert_load", []))

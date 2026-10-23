@@ -518,6 +518,8 @@ class MultiscaleResidualQuantizer(nn.Module):
         """Quantize `z` (`[B, L, d_vq]`) across all $K$ coarse-to-fine residual levels."""
         orig_dtype = z.dtype
         z_f = z.float()
+        if self.training and int(getattr(self, "codebook_hit_0").sum().item()) == 0:
+            self.init_codebooks_from_z(z_f, n_iters=10)
         b, full_len, c = z_f.shape
         z_no_grad = z_f.detach()
         z_rest = z_no_grad.clone()
@@ -1171,17 +1173,15 @@ class TiedCodebookHead(nn.Module):
     def forward(self, hidden: Tensor) -> Tensor:
         u_raw = self.proj(hidden).float()
         e_w = self.codebook_weight.detach().float()
-        e_sq = e_w.square().sum(dim=-1)
-        d_scale = e_sq.mean().clamp_min(1e-8)
-        u_rms = torch.rsqrt(u_raw.square().mean(dim=-1, keepdim=True) + 1e-6)
-        u = u_raw * u_rms * (d_scale / float(self.d_vq)).sqrt()
-        neg_d2 = (2.0 * torch.matmul(u, e_w.t()) - e_sq) / d_scale
+        u_norm = F.normalize(u_raw, p=2.0, dim=-1, eps=1e-6)
+        e_norm = F.normalize(e_w, p=2.0, dim=-1, eps=1e-6)
+        sim = torch.matmul(u_norm, e_norm.t())
         inv_t = (
-            self.log_inv_T.clamp(math.log(0.1), math.log(100.0)).exp()
+            self.log_inv_T.clamp(math.log(0.5), math.log(50.0)).exp()
             if self.log_inv_T is not None
             else 5.0
         )
-        logits = neg_d2 * inv_t
+        logits = sim * inv_t
         if self.bias is not None:
             logits = logits + self.bias.float()
         return logits

@@ -717,6 +717,15 @@ SKILL_TAXONOMY: tuple[tuple[str, str], ...] = (
     ("abduction.sherlock_diagnostic_trace", "sherlock_diagnostic_abduction"),
     ("deduction.sherlock_alibi_contradiction", "sherlock_forensic_timeline"),
     ("induction.sherlock_cipher_induction", "sherlock_pattern_induction"),
+    # 40..47: Sherlockian Polymath, HackTheBox, Cryptography, Frontier Science, Behavioral & Cross-Skill Suite
+    ("security.hackthebox_sandbox_escape", "hackthebox_security"),
+    ("math.sherlock_word_problem_system", "sherlock_word_math"),
+    ("crypto.multilayer_trapdoor_stream", "sherlock_cryptography"),
+    ("science.frontier_open_problem_reduction", "frontier_science_math"),
+    ("behavior.game_theoretic_deception_profiling", "behavioral_analysis"),
+    ("code.algorithmic_synthesis_hard", "hard_algorithmic_code"),
+    ("mixing.cross_skill_sherlock_crypto_code", "cross_skill_synthesis"),
+    ("mixing.cross_skill_htb_science_behavior", "cross_skill_synthesis"),
 )
 
 
@@ -768,6 +777,29 @@ def compute_raw_pp(
     return round(float(raw), 4)
 
 
+def compute_inverse_star_miss_penalty(
+    star_difficulty: float,
+    verified_reward: float,
+    *,
+    pass_threshold: float = 0.50,
+    base_penalty_pp: float = 45.0,
+    star_exponent: float = 1.25,
+) -> float:
+    """Compute inverse-star PP miss penalty $P_{\\text{miss}}(d^\\star, r) = P_0 \\cdot \\max\\!\\left(0, \\frac{\\tau - r}{\\tau}\\right) / \\max(1.0, d^\\star)^{\\alpha}$.
+
+    Failing a $1.0\\star$ task ($r < 0.50$) incurs maximum PP loss ($\\le 45.0\\text{pp}$) and strong
+    corrective RL gradient pressure, whereas failing a high-star frontier task ($d^\\star \\gg 1$)
+    incurs near-zero PP loss ($P_{\\text{miss}} \\to 0$).
+    """
+    r = max(0.0, min(1.0, float(verified_reward)))
+    thresh = max(1e-4, float(pass_threshold))
+    if r >= thresh:
+        return 0.0
+    miss_severity = (thresh - r) / thresh
+    inv_star_weight = 1.0 / (max(1.0, float(star_difficulty)) ** float(star_exponent))
+    return round(float(base_penalty_pp * miss_severity * inv_star_weight), 4)
+
+
 def compute_weighted_pp_series(
     scores: list[float] | tuple[float, ...] | Tensor,
     *,
@@ -816,6 +848,7 @@ class PPSubmissionResult:
     skill_total_pp: float
     global_total_pp: float
     grad_scale: float
+    miss_penalty_pp: float = 0.0
 
 
 class OrnithPPLeaderboard:
@@ -823,7 +856,8 @@ class OrnithPPLeaderboard:
 
     Automatically attenuates RL gradient weight when the agent farms already-mastered difficulty tiers
     (which place at deep rank $n \\gg 1$ where $0.95^{n-1} \\to 0$), while amplifying policy updates when
-    the agent solves higher-difficulty tasks or under-trained skills that place near $n = 1$ ($0.95^0 = 1.0$).
+    the agent solves higher-difficulty tasks or under-trained skills that place near $n = 1$ ($0.95^0 = 1.0$),
+    or when the agent fails a low-star ($1\\star$) task via inverse-star miss penalty.
     """
 
     def __init__(
@@ -854,8 +888,15 @@ class OrnithPPLeaderboard:
     def total_pp(self) -> float:
         return compute_total_pp(self.global_scores, decay=self.decay)
 
-    def submit_play(self, skill: str, raw_pp: float) -> PPSubmissionResult:
-        """Record a play worth `raw_pp` in `skill`, returning its $n$-th place $0.95^{n-1}$ weight and $\\Delta PP$."""
+    def submit_play(
+        self,
+        skill: str,
+        raw_pp: float,
+        *,
+        star_difficulty: float | None = None,
+        verified_reward: float | None = None,
+    ) -> PPSubmissionResult:
+        """Record a play worth `raw_pp` in `skill`, returning its $n$-th place $0.95^{n-1}$ weight, inverse-star miss penalty, and $\\Delta PP$."""
         p = max(0.0, float(raw_pp))
         cur_skill = self.skill_scores.setdefault(skill, [])
         self.play_counts[skill] = self.play_counts.get(skill, 0) + 1
@@ -870,25 +911,43 @@ class OrnithPPLeaderboard:
         w_global = float(self.decay ** (n_global - 1))
         weighted_p = float(p * w_skill)
 
-        cur_skill.append(p)
-        cur_skill.sort(reverse=True)
-        if len(cur_skill) > self.max_per_skill:
-            del cur_skill[self.max_per_skill :]
+        miss_penalty = 0.0
+        inv_fail_boost = 0.0
+        if star_difficulty is not None and verified_reward is not None:
+            miss_penalty = compute_inverse_star_miss_penalty(star_difficulty, verified_reward)
+            if float(verified_reward) < 0.50:
+                miss_sev = (0.50 - max(0.0, float(verified_reward))) / 0.50
+                inv_fail_boost = 1.25 * miss_sev / (max(1.0, float(star_difficulty)) ** 1.25)
 
-        self.global_scores.append(p)
-        self.global_scores.sort(reverse=True)
-        if len(self.global_scores) > self.max_global:
-            del self.global_scores[self.max_global :]
+        eroded = False
+        if miss_penalty > 0.0 and cur_skill and cur_skill[0] >= 50.0:
+            # Failing a task on an established skill erodes its top leaderboard score inversely with star difficulty
+            cur_skill[0] = max(0.0, cur_skill[0] - miss_penalty)
+            cur_skill.sort(reverse=True)
+            eroded = True
+            if self.global_scores and self.global_scores[0] >= 50.0:
+                self.global_scores[0] = max(0.0, self.global_scores[0] - miss_penalty)
+                self.global_scores.sort(reverse=True)
+        else:
+            cur_skill.append(p)
+            cur_skill.sort(reverse=True)
+            if len(cur_skill) > self.max_per_skill:
+                del cur_skill[self.max_per_skill :]
+
+            self.global_scores.append(p)
+            self.global_scores.sort(reverse=True)
+            if len(self.global_scores) > self.max_global:
+                del self.global_scores[self.max_global :]
 
         new_skill_pp = compute_total_pp(cur_skill, decay=self.decay)
         new_global_pp = compute_total_pp(self.global_scores, decay=self.decay)
 
-        delta_s = max(0.0, new_skill_pp - old_skill_pp)
-        delta_g = max(0.0, new_global_pp - old_global_pp)
-        rel_gain = delta_s / max(1.0, p)
+        delta_s = (new_skill_pp - old_skill_pp) if eroded else max(0.0, new_skill_pp - old_skill_pp)
+        delta_g = (new_global_pp - old_global_pp) if eroded else max(0.0, new_global_pp - old_global_pp)
+        rel_gain = max(0.0, delta_s) / max(1.0, p)
 
-        # High gradient scale when placing near #1 on the leaderboard; decays to 0.25 floor on deep farmed ranks
-        grad_scale = max(0.25, min(2.00, 0.25 + 0.95 * w_skill + 0.45 * rel_gain))
+        # High gradient scale when placing near #1 OR when failing a low-star fundamental task (inverse-star boost)
+        grad_scale = max(0.25, min(2.00, 0.25 + 0.95 * w_skill + 0.45 * rel_gain + inv_fail_boost))
 
         return PPSubmissionResult(
             skill=skill,
@@ -903,6 +962,7 @@ class OrnithPPLeaderboard:
             skill_total_pp=round(new_skill_pp, 4),
             global_total_pp=round(new_global_pp, 4),
             grad_scale=round(grad_scale, 4),
+            miss_penalty_pp=round(miss_penalty, 4),
         )
 
     def lowest_pp_skill_indices(self, total_families: int = len(SKILL_TAXONOMY)) -> list[int]:
@@ -1084,6 +1144,9 @@ def _verify_thought_equations(t_body: str) -> float:
     # Match isolated `A op B = C` where A, B, C are not part of a chained expression like `A + B * C = D`
     pattern = re.compile(r"(?<![\w*+\-/])(\d+)\s*([+\-*])\s*(\d+)\s*=\s*(-?\d+)(?!\s*[*+\-/^])")
     for m in pattern.finditer(t_body):
+        prefix = t_body[: m.start()].rstrip()
+        if prefix.endswith(("*", "+", "-", "/", "%", "^", "=")):
+            continue
         lhs_a = int(m.group(1))
         op = m.group(2)
         lhs_b = int(m.group(3))
@@ -1298,9 +1361,11 @@ class OrnithEnvArchitect:
     """Self-scaffolding curriculum, granular skill router, & infinite-horizon environment architect for Ornith-2.5.
 
     Monitors empirical pass rate $\\hat{p}_k$, deduction alignment $C_k$, and osu!-style Performance Point
-    (`pp`) placement weight $w_{\\text{pp}} = 0.95^{n-1}$ across all 36 procedural, compositional,
-    benchmark-specialized, and infinite-horizon recursive families (`0..19` primitive, `20..23`
-    compositional, `24..33` specialized ARC/HellaSwag/MMLU/Code, `34..35` unbounded recursive loops).
+    (`pp`) placement weight $w_{\\text{pp}} = 0.95^{n-1}$ across all 48 procedural, compositional,
+    benchmark-specialized, infinite-horizon recursive, Sherlockian, and Polymath families (`0..19` primitive,
+    `20..23` compositional, `24..33` specialized ARC/HellaSwag/MMLU/Code, `34..35` unbounded recursive loops,
+    `36..39` Sherlockian mysteries with scaling clues/red-herrings/suspects, `40..47` Polymath HackTheBox,
+    Word Math, Cryptography, Frontier Science, Behavioral Analysis, Hard Coding, and Cross-Skill Mixing).
     Dynamically promotes `difficulty_tier` ($1 \\dots \\infty$), recursion depth $L$, and difficulty
     modifiers (`NM`, `HR`, `HD`, `DT`, `FL`, `INF`) whenever a skill's pass rate saturates or its
     leaderboard placement decays.
@@ -1311,7 +1376,8 @@ class OrnithEnvArchitect:
     NUM_SPECIALIZED_FAMILIES: int = 10
     NUM_RECURSIVE_FAMILIES: int = 2
     NUM_SHERLOCK_FAMILIES: int = 4
-    TOTAL_FAMILIES: int = 40
+    NUM_POLYMATH_FAMILIES: int = 8
+    TOTAL_FAMILIES: int = 48
 
     def __init__(
         self,
@@ -1327,6 +1393,7 @@ class OrnithEnvArchitect:
         self.family_pp_weight_ema: list[float] = [1.00 for _ in range(self.TOTAL_FAMILIES)]
         self.family_tiers: list[int] = [1 for _ in range(self.TOTAL_FAMILIES)]
         self.family_counts: list[int] = [0 for _ in range(self.TOTAL_FAMILIES)]
+        self.family_tier_plays: list[int] = [0 for _ in range(self.TOTAL_FAMILIES)]
         self.compositional_boost: float = 0.25
 
     def difficulty_tier(self, kind: int) -> int:
@@ -1339,7 +1406,7 @@ class OrnithEnvArchitect:
         k = kind % self.TOTAL_FAMILIES
         tier = self.difficulty_tier(k)
         if k >= 34:
-            # Unbounded linear hop growth (L = 3, 4, 5, 6, ... -> inf) for recursive & Sherlockian chains
+            # Unbounded linear hop growth (L = 3, 4, 5, 6, ... -> inf) for recursive, Sherlockian & Polymath chains
             return 3 + (tier - 1)
         if k >= 20:
             return 2 + (tier - 1) // 2
@@ -1381,14 +1448,14 @@ class OrnithEnvArchitect:
         *,
         pp_leaderboard: OrnithPPLeaderboard | None = None,
     ) -> int:
-        """Select task family `0..39`, routing toward Sherlockian reasoning, under-trained PP skills, and recursive frontiers."""
+        """Select task family `0..47`, routing toward Sherlockian mysteries, Polymath challenges, under-trained PP skills, and recursive frontiers."""
         if idx < self.TOTAL_FAMILIES:
             return idx % self.TOTAL_FAMILIES
         # Parity-unlocked stride so alternating external steps cannot lock selection to only even family indices
         base_slot = (idx + (idx // 2)) % self.TOTAL_FAMILIES
-        # Dedicate every 3rd online step to the 4 Sherlockian deductive/abductive/timeline/cipher modes (36..39)
+        # Dedicate every 3rd online step across the 12 Sherlockian & Polymath families (36..47)
         if idx % 3 == 0:
-            return 36 + ((idx // 3) % self.NUM_SHERLOCK_FAMILIES)
+            return 36 + ((idx // 3) % (self.NUM_SHERLOCK_FAMILIES + self.NUM_POLYMATH_FAMILIES))
         mean_prim_pass = sum(self.family_pass_ema[: self.NUM_PRIMITIVE_FAMILIES]) / float(
             self.NUM_PRIMITIVE_FAMILIES
         )
@@ -1396,8 +1463,8 @@ class OrnithEnvArchitect:
         if pp_leaderboard is not None and (idx % 4 in (2, 3)):
             low_skills = pp_leaderboard.lowest_pp_skill_indices(self.TOTAL_FAMILIES)
             if low_skills:
-                return int(low_skills[(idx // 2 + seed) % min(8, len(low_skills))])
-        # Route saturated primitive slots toward compositional, specialized, recursive, or Sherlockian families (20..39)
+                return int(low_skills[(idx // 2 + seed) % min(12, len(low_skills))])
+        # Route saturated primitive slots toward compositional, specialized, recursive, Sherlockian, or Polymath families (20..47)
         if mean_prim_pass > 0.70 and (idx % 3 == 2) and base_slot < self.NUM_PRIMITIVE_FAMILIES:
             advanced_span = self.TOTAL_FAMILIES - self.NUM_PRIMITIVE_FAMILIES
             return self.NUM_PRIMITIVE_FAMILIES + ((idx + seed) % advanced_span)
@@ -1414,21 +1481,24 @@ class OrnithEnvArchitect:
         """Update EMA pass rate & PP placement weight for `kind` and promote `difficulty_tier` ($1 \\to \\infty$)."""
         k = kind % self.TOTAL_FAMILIES
         self.family_counts[k] += 1
+        self.family_tier_plays[k] += 1
         ema = self.ema_beta * self.family_pass_ema[k] + (1.0 - self.ema_beta) * float(pass_prob)
         self.family_pass_ema[k] = ema
         w_ema = 0.75 * self.family_pp_weight_ema[k] + 0.25 * float(pp_weight)
         self.family_pp_weight_ema[k] = w_ema
 
         can_promote = self.max_tier is None or self.family_tiers[k] < self.max_tier
-        # Promote tier when pass rate exceeds 0.78 OR when PP placement weight decays (<0.38) while pass rate is healthy (>0.58)
-        if can_promote and self.family_counts[k] >= 2 and (
-            ema > 0.78 or (w_ema < 0.38 and ema > 0.58)
+        # Promote tier when sustained pass rate at current tier (>=3 plays) exceeds 0.76 OR when PP placement weight decays (<0.36) while pass rate is strong (>0.68)
+        if can_promote and self.family_tier_plays[k] >= 3 and (
+            ema > 0.76 or (w_ema < 0.36 and ema > 0.68)
         ):
             self.family_tiers[k] += 1
-            self.family_pass_ema[k] = 0.55
-            self.family_pp_weight_ema[k] = 0.85
-        elif ema < 0.18 and self.family_tiers[k] > 1 and self.family_counts[k] >= 4:
+            self.family_tier_plays[k] = 0
+            self.family_pass_ema[k] = 0.42
+            self.family_pp_weight_ema[k] = 0.90
+        elif ema < 0.22 and self.family_tiers[k] > 1 and self.family_tier_plays[k] >= 3:
             self.family_tiers[k] -= 1
+            self.family_tier_plays[k] = 0
             self.family_pass_ema[k] = 0.45
 
 
@@ -1751,28 +1821,279 @@ class OrnithSelfImprover:
         tier: int = 1,
         mode: int = 0,
     ) -> OrnithTask:
-        """Synthesize a multi-hop Sherlockian Deductive, Abductive, Forensic Timeline, or Cipher Induction task.
+        """Synthesize a multi-stage Sherlockian Mystery (`36..39`) where suspects, chained clues, and
+        planted red herrings scale unboundedly with `tier` ($1 \\dots \\infty$).
 
         Modes (`kind = 36 .. 39`):
         - `mode = 0` (`36`, `deduction.sherlock_eliminative_grid`):
-          *"When you have eliminated the impossible, whatever remains, however improbable, must be the truth."*
-          Multi-constraint elimination over suspects, rooms, key clearances, and negative evidence (`watchdog`).
+          Multi-stage suspect, clue, and red-herring discovery across rotating crime scenes (`num_suspects = 4 + (tier - 1) // 2`,
+          `num_clues = 3 + (tier - 1) // 2`, `num_red_herrings = 1 + tier // 2`).
         - `mode = 1` (`37`, `abduction.sherlock_diagnostic_trace`):
-          *"Diagnostic Abduction & The Dog in the Night-Time."*
-          Reasoning backward from physical traces $O_1, O_2$ and an absent side-effect $\\neg O_3$ to eliminate
-          the naive "Lestrade surface trap" and isolate the unique causal mechanism.
+          Backward causal reconstruction from multi-stage physical traces while filtering out `1 + tier // 2`
+          spoofed/uncalibrated red-herring sensor logs and Inspector Lestrade's surface trap.
         - `mode = 2` (`38`, `deduction.sherlock_alibi_contradiction`):
-          *"Forensic Timeline & Alibi Cross-Examination."*
-          Detects which witness testimony violates spatial-temporal travel-time constraints and computes the exact
-          contradiction slack in minutes.
+          Multi-segment transit graph cross-examination with `1 + tier // 2` red-herring witness sightings.
         - `mode = 3` (`39`, `induction.sherlock_cipher_induction`):
-          *"The Adventure of the Dancing Men — Multi-Layer Cipher Induction."*
-          Induces a hidden multi-stage affine-XOR transformation from 3 intercepted messages and decodes the 4th.
+          Multi-layer cipher induction ("The Dancing Men") with corrupted red-herring decoy intercepts and
+          tier-scaled secondary key-schedule offsets.
         """
         t_val = max(1, int(tier))
         m_id = int(mode) % 4
         kind_slot = 36 + m_id
-        hops = 3 + (t_val - 1)
+        num_suspects = 4 + (t_val - 1) // 2
+        num_clues = 3 + (t_val - 1) // 2
+        num_red_herrings = 1 + t_val // 2
+        hops = num_clues + num_red_herrings - 1
+        mods = self.env_architect.difficulty_mods(kind_slot)
+        stars = compute_star_difficulty(t_val, recursion_depth=hops, mods=mods)
+        skill_name, domain_name = self.env_architect.skill_and_domain(kind_slot)
+
+        a = 4 + ((idx * 7 + self._rng_seed) % (13 + 3 * t_val))
+        b = 3 + ((idx * 11 + self._rng_seed) % (9 + 2 * t_val))
+        c = 2 + ((idx * 5 + t_val) % (7 + t_val))
+        scen_id = (idx + t_val) % 4
+
+        if m_id == 0:
+            # Mode 0: Multi-Stage Eliminative Mystery with Scaling Suspects, Clues & Red Herrings
+            scenes = (
+                ("Blackwood Vault", "cipher ledger", "mastiff", "Conservatory"),
+                ("Whitehall Archive", "diplomatic seal", "night-watchman", "Telegraph Room"),
+                ("Royal Observatory", "zenith chronometer", "pressure-mat", "Meridian Hall"),
+                ("Pullman Express", "bullion dispatch", "conductor-bell", "Baggage Car"),
+            )
+            loc_name, item_name, hound_name, alibi_room = scenes[scen_id]
+            clearance_base = a * b
+            k_mult = 3 + (t_val % 3)
+            primary_offset = k_mult * c
+            stage2_badge = clearance_base + primary_offset
+            secondary_seal = (t_val - 1) * 2
+            insider_badge = stage2_badge + secondary_seal
+            outsider_badge = clearance_base - c
+            decoy_badge = clearance_base + c
+            rh_badge = clearance_base + (k_mult + 2) * c + 1
+
+            extra_suspects = [
+                f"Badge-{clearance_base + (s_i + 2) * c + 1} (aux-guard-{s_i + 1})"
+                for s_i in range(max(0, num_suspects - 4))
+            ]
+            suspect_roster = ", ".join(
+                [
+                    f"Badge-{outsider_badge} (external courier)",
+                    f"Badge-{clearance_base} (archivist in {alibi_room})",
+                    f"Badge-{decoy_badge} (steward with single offset)",
+                    f"Badge-{rh_badge} (planted decoy)",
+                    *extra_suspects,
+                    f"Badge-{insider_badge} (senior keyholder)",
+                ]
+            )
+            rh_notes = "; ".join(
+                f"Red-Herring R{r_i + 1}: a planted mud-stained stub near Gate-{r_i + 1} cites Badge-{rh_badge + r_i} (falsified by unbroken wax seal)"
+                for r_i in range(num_red_herrings)
+            )
+            task_id = f"sherlock_elim_t{t_val}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Sherlockian Mystery ({loc_name}) | ★{stars:.2f} | Suspects={num_suspects + 1} | Clues={num_clues} | RedHerrings={num_red_herrings}] "
+                f"The {item_name} was taken from the {loc_name}. Suspect pool: {suspect_roster}. "
+                f"Stage 1 (Filter Red Herrings): [{rh_notes}]. "
+                f"Stage 2 (Verified Clues): Clue C1 (Negative Evidence): The {hound_name} remained silent, eliminating any external courier with badge < `{a} * {b} = {clearance_base}`. "
+                f"Clue C2 (Alibi & Single-Offset Elimination): The {alibi_room} log eliminates exact badge `{clearance_base}` and single-offset `{decoy_badge}` (plus any aux-guard without lock parity). "
+                f"Clue C3 (Multi-Stage Vault Seal): The inner seal requires primary offset `{k_mult} * {c} = {primary_offset}` added to `{clearance_base}` (`{stage2_badge}`), plus Tier-{t_val} secondary seal `{secondary_seal}` (`{stage2_badge} + {secondary_seal} = {insider_badge}`).\n"
+                f"#Q$# [deduction] Discard the red herrings, eliminate impossible suspects step-by-step in `#T$#`, and state the remaining culprit's badge number in lowercase with no commas, at least 6 words, including the keyword `eliminated`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:eliminated;exact_int:{insider_badge}"
+            gold_t = (
+                f"Stage 1 filters out the {num_red_herrings} planted red-herring stubs starting at {rh_badge} because the wax seal was unbroken. "
+                f"Stage 2 computes baseline clearance {a} * {b} = {clearance_base} (eliminating courier {outsider_badge} via the silent {hound_name}) and primary lock offset {k_mult} * {c} = {primary_offset}. "
+                f"Adding {clearance_base} + {primary_offset} = {stage2_badge} and secondary tier seal {stage2_badge} + {secondary_seal} = {insider_badge} leaves culprit badge {insider_badge} once all impossible suspects are eliminated."
+            )
+            gold_a = f"after impossible suspects and red herrings are eliminated the culprit badge is {insider_badge}"
+            d1_t = (
+                f"We fall for planted Red-Herring R1 and select decoy badge {rh_badge} without checking the unbroken wax seal."
+            )
+            d1_a = f"after impossible suspects and red herrings are eliminated the culprit badge is {rh_badge}"
+            d2_t = (
+                f"We compute {a} * {b} = {clearance_base} and add single offset {c} to get {decoy_badge}, omitting the secondary seal."
+            )
+            d2_a = f"After Impossible, Suspects Are Eliminated The Badge Is {decoy_badge}"
+            hack_a = "0"
+            default_scaffold = "abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 1:
+            # Mode 1: Multi-Stage Diagnostic Abduction with Sensor Red Herrings
+            base_temp = 20 + (a % 15)
+            cooling_drop = b * c
+            stage1_reading = base_temp + cooling_drop
+            cascade_flux = (t_val - 1) * 3
+            observed_reading = stage1_reading + cascade_flux
+            lestrade_trap = base_temp + b + c
+            rh_sensor = observed_reading + 19 + t_val
+            task_id = f"sherlock_abd_t{t_val}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Sherlockian Diagnostic Abduction | ★{stars:.2f} | Traces={num_clues} | RedHerrings={num_red_herrings}] "
+                f"Forensic inspection of the Cryogenic Chamber reveals: "
+                f"(O1) Ambient baseline is `{base_temp}` units; "
+                f"(O2) The primary vessel ran `{b}` cycles at `{c}` flux units per cycle (`{b} * {c} = {cooling_drop}`); "
+                f"(O3) Tier-{t_val} secondarymanifold contributed `{cascade_flux}` units; "
+                f"(Red Herrings R1..R{num_red_herrings}): Uncalibrated auxiliary gauge logs `{rh_sensor}` units and Inspector Lestrade's naive additive guess logs `{base_temp} + {b} + {c} = {lestrade_trap}` units, both falsified because the relief valve (threshold `{observed_reading + 5}`) remained unbroken.\n"
+                f"#Q$# [abduction] Filter out the red-herring gauges, reason backward from (O1, O2, O3) in `#T$#`, and report the exact causal reading in lowercase with no commas, at least 6 words, including the keyword `abductive`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:abductive;exact_int:{observed_reading}"
+            gold_t = (
+                f"First we reject the {num_red_herrings} red-herring auxiliary readings ({rh_sensor}) and Lestrade's additive trap ({lestrade_trap}). "
+                f"Multiplying primary cycles {b} * {c} = {cooling_drop}, adding baseline {base_temp} + {cooling_drop} = {stage1_reading}, and adding manifold flux {stage1_reading} + {cascade_flux} = {observed_reading} yields the unique abductive reading."
+            )
+            gold_a = f"the unique abductive forensic vessel reading is {observed_reading} units"
+            d1_t = (
+                f"Following Inspector Lestrade's surface hypothesis, we add {base_temp} + {b} = {base_temp + b} and + {c} = {lestrade_trap}."
+            )
+            d1_a = f"the unique abductive forensic vessel reading is {lestrade_trap} units"
+            d2_t = (
+                f"Trusting the uncalibrated red-herring auxiliary gauge, we report {rh_sensor} units."
+            )
+            d2_a = f"The Unique, Abductive Forensic Reading Is {rh_sensor} units"
+            hack_a = "0"
+            default_scaffold = "abduction -> association -> deduction -> decision -> metacognition"
+
+        elif m_id == 2:
+            # Mode 2: Multi-Leg Forensic Timeline & Alibi Cross-Examination with Witness Red Herrings
+            hop_extra = 4 + (t_val - 1)
+            dist_ab = (a + hop_extra) * c
+            claimed_minutes = a * c
+            min_required_minutes = dist_ab
+            contradiction_discrepancy = min_required_minutes - claimed_minutes  # == hop_extra * c
+            rh_clock_delay = b * 3 + 7
+            wrong_discrepancy_1 = 2 * c
+            wrong_discrepancy_2 = dist_ab + claimed_minutes
+            task_id = f"sherlock_alibi_t{t_val}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Sherlockian Alibi Cross-Examination | ★{stars:.2f} | Checkpoints={num_clues} | RedHerrings={num_red_herrings}] "
+                f"Transit across the `{num_clues}` locked turnstiles from North Station to East Wing spans `{a + hop_extra}` segments at `{c}` minutes per segment (`minimum required = ({a} + {hop_extra}) * {c} = {min_required_minutes}` minutes). "
+                f"Red-Herring Sightings (R1..R{num_red_herrings}): A fog-delayed omnibus log cites `{rh_clock_delay}` minutes on the South Bridge, which bypasses the turnstiles entirely. "
+                f"Suspect B's signed turnstile ledger claims transit took only `{a} * {c} = {claimed_minutes}` minutes.\n"
+                f"#Q$# [deduction] Ignore the South Bridge red herrings, cross-examine Suspect B's turnstile timeline in `#T$#`, and compute the exact travel-time contradiction deficit (`minimum_required - claimed_minutes`) in lowercase with no commas, at least 6 words, including the keyword `contradiction`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:contradiction;exact_int:{contradiction_discrepancy}"
+            gold_t = (
+                f"Discarding the {num_red_herrings} South Bridge red-herring sightings ({rh_clock_delay} min), the locked turnstile route requires ({a + hop_extra}) * {c} = {min_required_minutes} minutes whereas Suspect B claims {a} * {c} = {claimed_minutes} minutes. "
+                f"Subtracting {min_required_minutes} - {claimed_minutes} = {contradiction_discrepancy} proves a forensic contradiction of {contradiction_discrepancy} minutes."
+            )
+            gold_a = f"the forensic alibi contradiction deficit is {contradiction_discrepancy} minutes"
+            d1_t = (
+                f"We confuse the South Bridge red-herring omnibus delay {rh_clock_delay} with the turnstile deficit."
+            )
+            d1_a = f"the forensic alibi contradiction deficit is {rh_clock_delay} minutes"
+            d2_t = (
+                f"We add the required time and claimed time {min_required_minutes} + {claimed_minutes} = {wrong_discrepancy_2} minutes."
+            )
+            d2_a = f"The Forensic, Alibi Contradiction Deficit Is {wrong_discrepancy_2} minutes"
+            hack_a = "0"
+            default_scaffold = "deduction -> evaluation -> decision -> metacognition"
+
+        else:
+            # Mode 3: Multi-Layer Cipher Induction ("The Dancing Men") with Decoy Intercepts
+            slope_k = (c % 5) + 2
+            tier_shift = (t_val - 1) * 2
+            offset_m = a + b + tier_shift
+            x1, x2, x3, x_target = 2, 5, 8, (t_val + 9)
+            y1 = slope_k * x1 + offset_m
+            y2 = slope_k * x2 + offset_m
+            y3 = slope_k * x3 + offset_m
+            y_target = slope_k * x_target + offset_m
+            rh_x, rh_y = 4, slope_k * 4 + offset_m + 13
+            y_err1 = slope_k * x_target - offset_m
+            y_err2 = (slope_k + 1) * x_target + offset_m
+            task_id = f"sherlock_cipher_t{t_val}_{slope_k}_{offset_m}_{x_target}_{idx}"
+            prompt_q = (
+                f"#U$# [Sherlockian Cipher Induction ('Dancing Men') | ★{stars:.2f} | Hops={hops} | RedHerrings={num_red_herrings}] "
+                f"Three verified checksum-valid cipher intercepts map as: "
+                f"`symbol({x1}) -> {y1}`, `symbol({x2}) -> {y2}`, and `symbol({x3}) -> {y3}`. "
+                f"Red-Herring Decoy Intercepts (R1..R{num_red_herrings}): `symbol({rh_x}) -> {rh_y}` failed checksum verification (planted noise) and must be discarded. "
+                f"Induce the underlying affine cipher law `solve(x)` from the verified intercepts and evaluate `solve({x_target})`.\n"
+                f"#Q$# [code] Filter out the corrupted decoy intercept, derive the cipher law in `#T$#`, and implement `def solve(x):` in `#A$#`."
+            )
+            harness_h = f"assert solve({x_target}) == {y_target} and solve({x1}) == {y1} and solve({x2}) == {y2}"
+            gold_t = (
+                f"First we discard the {num_red_herrings} checksum-invalid red-herring intercept symbol({rh_x}) -> {rh_y}. "
+                f"From verified intercepts symbol({x2}) and symbol({x1}), we compute {y2} - {y1} = {y2 - y1} over step {x2} - {x1} = 3 to induce multiplier k = {slope_k}. "
+                f"Then {y1} - {slope_k * x1} = {offset_m} gives the exact offset, verifying {slope_k * x3} + {offset_m} = {y3} and predicting {slope_k * x_target} + {offset_m} = {y_target}."
+            )
+            gold_a = f"def solve(x):\n    return {slope_k} * x + {offset_m}"
+            d1_t = (
+                f"We induce multiplier {slope_k} but subtract the constant offset {offset_m} to get {y_err1}."
+            )
+            d1_a = f"def solve(x):\n    return {slope_k} * x - {offset_m}"
+            d2_t = (
+                f"We include the corrupted red-herring intercept and miscalculate the slope as {slope_k + 1} to get {y_err2}."
+            )
+            d2_a = f"def solve(x):\n    return {slope_k + 1} * x + {offset_m}"
+            hack_a = "def solve(x):\n    return 0"
+            default_scaffold = "induction -> abstraction -> deduction -> decision -> metacognition"
+
+        base_cands = (
+            f"#T$# {gold_t}\n#A$# {gold_a}",
+            f"#T$# {d1_t}\n#A$# {d1_a}",
+            f"#T$# {d2_t}\n#A$# {d2_a}",
+            f"#T$# Default fallback.\n#A$# {hack_a}",
+        )
+        base_scores = (1.0, 0.20, 0.10, 0.0)
+        order = [0, 1, 2, 3]
+        shift = idx % 4
+        order[0], order[shift] = order[shift], order[0]
+        p_cands = tuple(base_cands[i] for i in order)
+        p_scores = tuple(base_scores[i] for i in order)
+        g_idx = order.index(0)
+        self._last_task_kinds[task_id] = kind_slot
+        cached_s = self.scaffold_cache.get(task_id, default=default_scaffold)
+        return OrnithTask(
+            task_id=task_id,
+            domain=domain_name,
+            prompt_q=prompt_q,
+            harness_h=harness_h,
+            scaffold_s=cached_s,
+            candidate_rollouts=p_cands,
+            harness_scores=p_scores,
+            gold_index=g_idx,
+            gold_thought=gold_t,
+            gold_answer=gold_a,
+            skill=skill_name,
+            star_difficulty=stars,
+            recursion_depth=hops,
+            difficulty_mods=mods,
+        )
+
+    def _synthesize_polymath_challenge_task(
+        self,
+        idx: int,
+        *,
+        tier: int = 1,
+        mode: int = 0,
+    ) -> OrnithTask:
+        """Synthesize an advanced Sherlockian-inspired Polymath Challenge (`kind = 40 .. 47`):
+
+        - `mode = 0` (`40`, `security.hackthebox_sandbox_escape`):
+          HackTheBox environment enumeration, tool discovery, honeypot filtering & multi-stage sandbox escape.
+        - `mode = 1` (`41`, `math.sherlock_word_problem_system`):
+          Complex multi-stage word math with coupled conservation rates and narrative red-herring quantities.
+        - `mode = 2` (`42`, `crypto.multilayer_trapdoor_stream`):
+          Multi-layer trapdoor stream / Feistel cryptanalysis with differential fault red herrings.
+        - `mode = 3` (`43`, `science.frontier_open_problem_reduction`):
+          Challenging & open/unanswered math/science frontier finite-scale reductions (Collatz $3n+1$ certificates,
+          Erdős–Straus unit fractions, discrete Navier–Stokes enstrophy, Yang–Mills lattice plaquette invariants).
+        - `mode = 4` (`44`, `behavior.game_theoretic_deception_profiling`):
+          Behavioral analysis, deception detection & costly-signaling bluff profiling across $N$ suspects.
+        - `mode = 5` (`45`, `code.algorithmic_synthesis_hard`):
+          Extremely challenging multi-constraint algorithmic coding with state filtering and invariants.
+        - `mode = 6` (`46`, `mixing.cross_skill_sherlock_crypto_code`):
+          Cross-Skill Mixing I: Sherlockian Clue Elimination + Cryptographic Key Recovery + Python Synthesis.
+        - `mode = 7` (`47`, `mixing.cross_skill_htb_science_behavior`):
+          Cross-Skill Mixing II: Behavioral Bluff Profiling + Thermodynamic Sensor Verification + HTB Escape.
+        """
+        t_val = max(1, int(tier))
+        m_id = int(mode) % 8
+        kind_slot = 40 + m_id
+        num_red_herrings = 1 + t_val // 2
+        num_stages = 3 + (t_val - 1) // 2
+        hops = num_stages + num_red_herrings - 1
         mods = self.env_architect.difficulty_mods(kind_slot)
         stars = compute_star_difficulty(t_val, recursion_depth=hops, mods=mods)
         skill_name, domain_name = self.env_architect.skill_and_domain(kind_slot)
@@ -1782,141 +2103,349 @@ class OrnithSelfImprover:
         c = 2 + ((idx * 5 + t_val) % (7 + t_val))
 
         if m_id == 0:
-            # Mode 0: Eliminative Deduction ("Eliminate the impossible; whatever remains is the truth")
-            clearance_base = a * b
-            insider_badge = clearance_base + 3 * c
-            outsider_badge = clearance_base - c
-            decoy_badge = clearance_base + c
-            task_id = f"sherlock_elim_t{t_val}_{a}_{b}_{c}_{idx}"
-            prompt_q = (
-                f"#U$# [Sherlockian Eliminative Deduction | ★{stars:.2f} | Hops={hops}] "
-                f"A cipher ledger was taken from the Vault between 21:00 and 21:30. Four suspects are on the estate: "
-                f"Badge-{outsider_badge} (external courier), Badge-{clearance_base} (archivist in the Conservatory), "
-                f"Badge-{decoy_badge} (steward without master-key offset), and Badge-{insider_badge} (seniorfellow). "
-                f"Clue 1 (Negative Evidence): The courtyard mastiff did not bark, eliminating any external courier with badge < `{a} * {b} = {clearance_base}`. "
-                f"Clue 2 (Spatial Alibi): The Conservatory register proves the archivist with exact badge `{clearance_base}` never entered the Vault corridor. "
-                f"Clue 3 (Lock Mechanism): The Vault acoustic seal requires a badge equal to `{clearance_base} + 3 * {c}` rather than a single `{c}` offset.\n"
-                f"#Q$# [deduction] Eliminate each impossible suspect step-by-step in `#T$#` and state the remaining culprit's badge number in lowercase with no commas, at least 6 words, including the keyword `eliminated`."
-            )
-            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:eliminated;exact_int:{insider_badge}"
+            # 40: HackTheBox Sandbox Escape (Tool Discovery & Environment Enumeration with Honeypot Traps)
+            sub_scen = (idx + t_val) % 2
+            base_cap = a * b
+            k_pivot = 2 + (t_val % 4)
+            pivot_off = c * k_pivot
+            stage2_tok = base_cap + pivot_off
+            ns_bridge = (t_val - 1) * 3
+            escape_token = stage2_tok + ns_bridge
+            honeypot_tok = base_cap + c + 17
+            task_id = f"htb_escape_t{t_val}_{a}_{b}_{c}_{idx}"
+            if sub_scen == 0:
+                prompt_q = (
+                    f"#U$# [HackTheBox Sandbox Escape: Tool Chain | ★{stars:.2f} | Stages={num_stages} | Honeypots={num_red_herrings}] "
+                    f"You are inside restricted container `uid=1000` with `seccomp` blocking direct `execve`. "
+                    f"Enumerating `/opt/tools` reveals `{num_red_herrings}` honeypot SUID binaries (`/opt/tools/suid_diag` -> token `{honeypot_tok}`, linked to `libaudit_tripwire.so`) "
+                    f"and one unmonitored capability binary `/opt/tools/cap_helper` (`CAP_DAC_READ_SEARCH`). "
+                    f"Stage 1: Compute base descriptor offset `{a} * {b} = {base_cap}` via `cap_helper`. "
+                    f"Stage 2: Chain cgroup `release_agent` pivot `{c} * {k_pivot} = {pivot_off}` (`{base_cap} + {pivot_off} = {stage2_tok}`). "
+                    f"Stage 3: Apply Tier-{t_val} host PID-namespace bridge `{ns_bridge}` (`{stage2_tok} + {ns_bridge} = {escape_token}`).\n"
+                    f"#Q$# [deduction] Bypass the honeypot binaries, trace the 3-stage sandbox escape in `#T$#`, and output the host escape token in lowercase with no commas, at least 6 words, including the keyword `escape`."
+                )
+            else:
+                prompt_q = (
+                    f"#U$# [HackTheBox Environment Enumeration: Find Your Way Out | ★{stars:.2f} | Stages={num_stages} | Traps={num_red_herrings}] "
+                    f"Raw environment dump of `/proc/self/mountinfo` exposes `{num_red_herrings}` read-only chroot loops (trap token `{honeypot_tok}`) "
+                    f"and an unmasked `overlayfs` upperdir on major-minor node `{a} * {b} = {base_cap}`. "
+                    f"Stage 1: Enumerate writable device node `{a} * {b} = {base_cap}` (ignoring chroot trap `{honeypot_tok}`). "
+                    f"Stage 2: Extract `ld.so.preload` capability offset `{c} * {k_pivot} = {pivot_off}` (`{base_cap} + {pivot_off} = {stage2_tok}`). "
+                    f"Stage 3: Add Tier-{t_val} namespace capability hop `{ns_bridge}` (`{stage2_tok} + {ns_bridge} = {escape_token}`).\n"
+                    f"#Q$# [deduction] Enumerate the environment, filter out the chroot traps in `#T$#`, and report the exact sandbox escape token in lowercase with no commas, at least 6 words, including the keyword `escape`."
+                )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:escape;exact_int:{escape_token}"
             gold_t = (
-                f"First we compute the baseline Vault clearance {a} * {b} = {clearance_base}; since the mastiff did not bark, external courier {outsider_badge} is impossible. "
-                f"Second, the Conservatory alibi eliminates badge {clearance_base}, and the triple acoustic offset 3 * {c} = {3 * c} rules out single-offset badge {decoy_badge}. "
-                f"When we have eliminated the impossible candidates, whatever remains must be the truth: {clearance_base} + {3 * c} = {insider_badge}."
+                f"Stage 1 enumerates the environment and rejects the {num_red_herrings} honeypot tripwire binaries ({honeypot_tok}), isolating base descriptor {a} * {b} = {base_cap}. "
+                f"Stage 2 computes the pivot offset {c} * {k_pivot} = {pivot_off} and chains {base_cap} + {pivot_off} = {stage2_tok}. "
+                f"Stage 3 adds the host namespace bridge {stage2_tok} + {ns_bridge} = {escape_token} to complete the sandbox escape."
             )
-            gold_a = f"after impossible suspects are eliminated the culprit badge is {insider_badge}"
+            gold_a = f"the verified multi stage sandbox escape token is {escape_token}"
             d1_t = (
-                f"We compute {a} * {b} = {clearance_base} and add a single offset {c} to get {decoy_badge}, overlooking the triple acoustic lock requirement."
+                f"We execute `/opt/tools/suid_diag` without checking `libaudit_tripwire.so` and trigger honeypot token {honeypot_tok}."
             )
-            d1_a = f"after impossible suspects are eliminated the culprit badge is {decoy_badge}"
+            d1_a = f"the verified multi stage sandbox escape token is {honeypot_tok}"
             d2_t = (
-                f"We ignore the silent mastiff negative evidence and select the external courier badge {clearance_base} - {c} = {outsider_badge}."
+                f"We compute {a} * {b} = {base_cap} and add single offset {c} = {base_cap + c}, omitting the namespace bridge."
             )
-            d2_a = f"After Impossible, Suspects Are Eliminated The Badge Is {outsider_badge}"
+            d2_a = f"The Verified, Sandbox Escape Token Is {base_cap + c}"
             hack_a = "0"
             default_scaffold = "abduction -> deduction -> decision -> evaluation -> metacognition"
 
         elif m_id == 1:
-            # Mode 1: Diagnostic Abduction (Backward causal inference from physical traces + negative evidence)
-            base_temp = 20 + (a % 15)
-            cooling_drop = b * c
-            observed_reading = base_temp + cooling_drop
-            lestrade_trap = base_temp + b + c
-            partial_trap = base_temp + 2 * cooling_drop
-            task_id = f"sherlock_abd_t{t_val}_{a}_{b}_{c}_{idx}"
+            # 41: Complex Multi-Stage Sherlockian Word Math with Coupled Rates & Red-Herring Quantities
+            stage1_qty = a * b
+            k_rate = 2 + (t_val % 4)
+            stage2_qty = c * k_rate
+            gross_qty = stage1_qty + stage2_qty
+            tariff_loss = (t_val - 1) * 2
+            net_qty = gross_qty - tariff_loss
+            rh_pressure = 70 + a
+            rh_passengers = 5 * c + 11
+            task_id = f"sherlock_wordmath_t{t_val}_{a}_{b}_{c}_{idx}"
             prompt_q = (
-                f"#U$# [Sherlockian Diagnostic Abduction | ★{stars:.2f} | Hops={hops}] "
-                f"Forensic inspection of the Laboratory reveals three simultaneous facts: "
-                f"(O1) Ambient room baseline is `{base_temp}` units; "
-                f"(O2) The reaction vessel ran for `{b}` cycles at `{c}` units of thermal flux per cycle; "
-                f"(O3 - Negative Clue): The pressure relief valve remained unbroken, which falsifies any runaway hypothesis exceeding `{base_temp + cooling_drop + 5}` units, while Inspector Lestrade's additive guess (`{base_temp} + {b} + {c}`) fails flux conservation.\n"
-                f"#Q$# [abduction] Reason backward from observations (O1, O2, O3) to the unique causal vessel reading in `#T$#` and report the exact integer in lowercase with no commas, at least 6 words, including the keyword `abductive`."
+                f"#U$# [Sherlockian Multi-Stage Word Math | ★{stars:.2f} | CoupledStages={num_stages} | RedHerrings={num_red_herrings}] "
+                f"At Paddington Goods Yard, `{a}` armored crates each contain `{b}` silver ingots (`{a} * {b} = {stage1_qty}`). "
+                f"Narrative Red Herrings (R1..R{num_red_herrings}): The locomotive boiler gauge reads `{rh_pressure}` psi and the passenger manifest lists `{rh_passengers}` travelers in Coach 4 (neither affects bullion mass). "
+                f"At Reading Junction, `{c}` reserve coffers each add `{k_rate}` ingots (`{c} * {k_rate} = {stage2_qty}`), while customs inspectors impound `{tariff_loss}` ingots for assay verification.\n"
+                f"#Q$# [math] Discard the narrative red herrings, solve the coupled bullion conservation equations in `#T$#`, and state the exact net ingot count in lowercase with no commas, at least 6 words, including the keyword `equilibrium`."
             )
-            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:abductive;exact_int:{observed_reading}"
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:equilibrium;exact_int:{net_qty}"
             gold_t = (
-                f"Reasoning backward from the physical traces, each of the {b} cycles contributes {c} flux units for a multiplicative rise of {b} * {c} = {cooling_drop}. "
-                f"Adding the ambient baseline {base_temp} + {cooling_drop} = {observed_reading} satisfies flux conservation while keeping the relief valve intact, whereas Lestrade's additive hypothesis {lestrade_trap} and runaway hypothesis {partial_trap} contradict the evidence."
+                f"First we ignore the {num_red_herrings} irrelevant red-herring quantities (boiler pressure {rh_pressure} psi and {rh_passengers} passengers). "
+                f"Stage 1 yields {a} * {b} = {stage1_qty} ingots and Stage 2 adds {c} * {k_rate} = {stage2_qty} ingots for a gross total of {stage1_qty} + {stage2_qty} = {gross_qty}. "
+                f"Subtracting the customs assay deduction {gross_qty} - {tariff_loss} = {net_qty} gives the exact conservation equilibrium."
             )
-            gold_a = f"the unique abductive forensic reading is {observed_reading} units"
+            gold_a = f"the coupled word problem conservation equilibrium is {net_qty} ingots"
             d1_t = (
-                f"Following Inspector Lestrade's surface hypothesis, we add {base_temp} + {b} = {base_temp + b} and + {c} = {lestrade_trap}."
+                f"We mistakenly add the red-herring passenger manifest {rh_passengers} to {stage1_qty} to get {stage1_qty + rh_passengers}."
             )
-            d1_a = f"the unique abductive forensic reading is {lestrade_trap} units"
+            d1_a = f"the coupled word problem conservation equilibrium is {stage1_qty + rh_passengers} ingots"
             d2_t = (
-                f"Assuming double runaway flux, we compute {base_temp} + {2 * cooling_drop} = {partial_trap}, ignoring the unbroken relief valve."
+                f"We add the customs deduction instead of subtracting: {gross_qty} + {tariff_loss + 3} = {gross_qty + tariff_loss + 3}."
             )
-            d2_a = f"The Unique, Abductive Forensic Reading Is {partial_trap} units"
+            d2_a = f"The Coupled, Word Problem Equilibrium Is {gross_qty + tariff_loss + 3}"
             hack_a = "0"
-            default_scaffold = "abduction -> association -> deduction -> decision -> metacognition"
+            default_scaffold = "abstraction -> deduction -> decision -> evaluation -> metacognition"
 
         elif m_id == 2:
-            # Mode 2: Forensic Alibi Contradiction & Timeline Cross-Examination
-            dist_ab = (a + 4) * c
-            claimed_minutes = a * c
-            min_required_minutes = dist_ab
-            contradiction_discrepancy = min_required_minutes - claimed_minutes  # == 4 * c
-            wrong_discrepancy_1 = 2 * c
-            wrong_discrepancy_2 = dist_ab + claimed_minutes
-            task_id = f"sherlock_alibi_t{t_val}_{a}_{b}_{c}_{idx}"
+            # 42: Advanced Multi-Layer Cryptography & Differential Fault Analysis
+            k1 = (c % 4) + 2
+            k2 = (t_val % 3) + 2
+            k_eff = k1 * k2
+            m_eff = (a * k2) - b
+            x_probe = 3
+            y_probe = k_eff * x_probe + m_eff
+            x_target = 6 + t_val
+            y_target = k_eff * x_target + m_eff
+            rh_fault_m = (a * k2) + b
+            task_id = f"crypto_trapdoor_t{t_val}_{k_eff}_{m_eff}_{idx}"
             prompt_q = (
-                f"#U$# [Sherlockian Alibi Cross-Examination | ★{stars:.2f} | Hops={hops}] "
-                f"Transit between North Station and the East Wing requires `{a + 4}` corridor segments at `{c}` minutes per segment (`minimum travel time = ({a} + 4) * {c} = {min_required_minutes}` minutes). "
-                f"Witness A's alibi log is consistent (`{min_required_minutes}` minutes elapsed). "
-                f"However, Suspect B claims to have departed North Station and signed the East Wing ledger after only `{a} * {c} = {claimed_minutes}` minutes.\n"
-                f"#Q$# [deduction] Cross-examine Suspect B's timeline in `#T$#` and compute the exact travel-time contradiction deficit (`minimum_required - claimed_minutes`) in lowercase with no commas, at least 6 words, including the keyword `contradiction`."
+                f"#U$# [Multi-Layer Trapdoor Stream Cryptanalysis | ★{stars:.2f} | Rounds={2 + (t_val - 1) // 2} | FaultTraps={num_red_herrings}] "
+                f"A 2-layer cipher cascade first computes Round-1 `r1 = {k1} * x + {a}` and then Round-2 `r2 = {k2} * r1 - {b}`, which simplifies to `solve(x) = {k_eff} * x + {m_eff}`. "
+                f"Red-Herring Fault Trace: An injected glitch log claims Round-2 adds `+{b}` (giving decoy offset `{rh_fault_m}`), which fails the verified known-plaintext probe `solve({x_probe}) == {y_probe}`. "
+                f"Verify the known-plaintext probe and implement `def solve(x):` to decode `solve({x_target})`.\n"
+                f"#Q$# [code] Reject the injected glitch trace using the known-plaintext probe in `#T$#` and implement `def solve(x):` in `#A$#`."
             )
-            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:contradiction;exact_int:{contradiction_discrepancy}"
+            harness_h = f"assert solve({x_target}) == {y_target} and solve({x_probe}) == {y_probe}"
             gold_t = (
-                f"Cross-examining the transit graph, the minimum physically possible travel time across {a + 4} segments is ({a + 4}) * {c} = {min_required_minutes} minutes, whereas Suspect B's alibi claims {a} * {c} = {claimed_minutes} minutes. "
-                f"Subtracting {min_required_minutes} - {claimed_minutes} = {contradiction_discrepancy} proves Suspect B's alibi is physically impossible by {contradiction_discrepancy} minutes."
+                f"Expanding the 2-layer cascade gives multiplier {k1} * {k2} = {k_eff} and constant term {a * k2} - {b} = {m_eff}. "
+                f"Testing known-plaintext x = {x_probe} gives {k_eff * x_probe} + {m_eff} = {y_probe}, which falsifies the red-herring glitch offset {rh_fault_m} and predicts {k_eff * x_target} + {m_eff} = {y_target}."
             )
-            gold_a = f"the forensic alibi contradiction deficit is {contradiction_discrepancy} minutes"
+            gold_a = f"def solve(x):\n    return {k_eff} * x + {m_eff}"
             d1_t = (
-                f"We underestimate the missing corridor segments and compute 2 * {c} = {wrong_discrepancy_1} minutes."
+                f"We use the red-herring glitch offset {rh_fault_m} instead of subtracting {b}."
             )
-            d1_a = f"the forensic alibi contradiction deficit is {wrong_discrepancy_1} minutes"
+            d1_a = f"def solve(x):\n    return {k_eff} * x + {rh_fault_m}"
             d2_t = (
-                f"We add the required time and claimed time {min_required_minutes} + {claimed_minutes} = {wrong_discrepancy_2} minutes."
+                f"We add the round multipliers {k1} + {k2} = {k1 + k2} instead of composing them multiplicatively."
             )
-            d2_a = f"The Forensic, Alibi Contradiction Deficit Is {wrong_discrepancy_2} minutes"
+            d2_a = f"def solve(x):\n    return {k1 + k2} * x + {m_eff}"
+            hack_a = "def solve(x):\n    return 0"
+            default_scaffold = "induction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 3:
+            # 43: Frontier & Open/Unanswered Math & Science Finite-Scale Invariant Reductions
+            sub_frontier = (idx + t_val) % 3
+            if sub_frontier == 0:
+                # Collatz (3n+1) Open Conjecture Finite Stopping-Step Trajectory Certificate
+                n0 = 2 * a + 1
+                n1 = 3 * n0 + 1
+                n2 = n1 // 2
+                task_id = f"frontier_collatz_t{t_val}_{n0}_{idx}"
+                prompt_q = (
+                    f"#U$# [Frontier Math Reduction: Collatz 3n+1 Trajectory Certificate | ★{stars:.2f} | Hops={hops}] "
+                    f"The open Collatz conjecture posits that iterating `T(n) = n // 2` (if even) else `3 * n + 1` (if odd) reaches 1 for every positive integer. "
+                    f"Red-Herring Heuristic: A naive linear drift approximation claims `T_2({n0}) = {n0 + 4}`, violating parity branching. "
+                    f"Write `def solve(n):` that executes exactly 2 exact Collatz transitions from odd seed `n` and verify `solve({n0}) == {n2}`.\n"
+                    f"#Q$# [code] Trace the 2-step Collatz certificate from odd `n = {n0}` in `#T$#` and implement `def solve(n):` in `#A$#`."
+                )
+                harness_h = f"assert solve({n0}) == {n2} and solve(7) == 11 and solve(4) == 1"
+                gold_t = (
+                    f"For odd seed n = {n0}, step 1 applies 3 * {n0} = {3 * n0} and adds {3 * n0} + 1 = {n1} (even). "
+                    f"Step 2 halves {n1} to {n2}, rejecting the red-herring linear heuristic {n0 + 4}."
+                )
+                gold_a = (
+                    "def solve(n):\n"
+                    "    for _ in range(2):\n"
+                    "        n = n // 2 if n % 2 == 0 else 3 * n + 1\n"
+                    "    return n"
+                )
+                d1_t = f"We apply 3 * n + 1 on both steps without checking even parity."
+                d1_a = "def solve(n):\n    return 3 * (3 * n + 1) + 1"
+                d2_t = f"We use the red-herring linear drift approximation n + 4."
+                d2_a = "def solve(n):\n    return n + 4"
+                hack_a = "def solve(n):\n    return 0"
+            elif sub_frontier == 1:
+                # Erdos-Straus 4/n = 1/x + 1/y + 1/z Unit-Fraction Decomposition Invariant
+                n_val = 2 * b + 3
+                x_val = a
+                num_lhs = 4 * x_val
+                rem_num = num_lhs - n_val
+                tier_scale = c * (1 + (t_val - 1) // 2)
+                inv_cert = rem_num * tier_scale
+                rh_cert = (num_lhs + n_val) * tier_scale
+                task_id = f"frontier_erdos_straus_t{t_val}_{n_val}_{x_val}_{idx}"
+                prompt_q = (
+                    f"#U$# [Frontier Math Reduction: Erdős–Straus Diophantine Certificate | ★{stars:.2f} | Hops={hops}] "
+                    f"In testing the open Erdős–Straus conjecture (`4/n = 1/x + 1/y + 1/z`) at `n = {n_val}` and trial denominator `x = {x_val}`, "
+                    f"the primary numerator residual is `r = 4 * {x_val} - {n_val} = {rem_num}`, scaled by lattice factor `{tier_scale}` (`{rem_num} * {tier_scale} = {inv_cert}`). "
+                    f"Red-Herring Trap: Adding `{4 * x_val} + {n_val}` yields `{rh_cert}`, which violates unit-fraction subtraction.\n"
+                    f"#Q$# [math] Eliminate the additive red herring, compute the scaled Erdős–Straus residual certificate in `#T$#`, and report the exact integer in lowercase with no commas, at least 6 words, including the keyword `certificate`."
+                )
+                harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:certificate;exact_int:{inv_cert}"
+                gold_t = (
+                    f"First we compute 4 * {x_val} = {num_lhs} and subtract {num_lhs} - {n_val} = {rem_num} (rejecting the additive red herring {num_lhs + n_val}). "
+                    f"Multiplying by the lattice factor {rem_num} * {tier_scale} = {inv_cert} yields the exact Erdős–Straus certificate."
+                )
+                gold_a = f"the verified erdos straus diophantine residual certificate is {inv_cert}"
+                d1_t = f"We add {num_lhs} + {n_val} = {num_lhs + n_val} and multiply by {tier_scale} to get {rh_cert}."
+                d1_a = f"the verified erdos straus diophantine residual certificate is {rh_cert}"
+                d2_t = f"We omit the lattice scale factor and report unscaled {rem_num}."
+                d2_a = f"The Verified, Erdos Straus Certificate Is {rem_num}"
+                hack_a = "0"
+            else:
+                # Discrete Navier-Stokes Enstrophy / Yang-Mills Plaquette Conservation Invariant
+                omega_sq = a * b
+                vortex_stretch = c * (2 + (t_val % 3))
+                gross_enstrophy = omega_sq + vortex_stretch
+                visc_dissip = (t_val - 1) * 2
+                net_enstrophy = gross_enstrophy - visc_dissip
+                rh_compressible = gross_enstrophy + 15 + a
+                task_id = f"frontier_enstrophy_t{t_val}_{a}_{b}_{c}_{idx}"
+                prompt_q = (
+                    f"#U$# [Frontier Physics Reduction: Discrete Enstrophy-Vorticity Invariant | ★{stars:.2f} | Hops={hops}] "
+                    f"On a discrete lattice plaquette, core vorticity energy is `{a} * {b} = {omega_sq}` and triad stretching adds `{c} * {2 + (t_val % 3)} = {vortex_stretch}` (`{omega_sq} + {vortex_stretch} = {gross_enstrophy}`), "
+                    f"while Tier-{t_val} viscous dissipation removes `{visc_dissip}` units (`{gross_enstrophy} - {visc_dissip} = {net_enstrophy}`). "
+                    f"Red-Herring Gauge Artifact: An unprojected compressible ghost mode reports `{rh_compressible}`, violating divergence-free incompressibility (`div u = 0`).\n"
+                    f"#Q$# [physics] Project out the compressible ghost red herring, derive the conserved enstrophy certificate in `#T$#`, and report the exact integer in lowercase with no commas, at least 6 words, including the keyword `certificate`."
+                )
+                harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:certificate;exact_int:{net_enstrophy}"
+                gold_t = (
+                    f"Enforcing divergence-free incompressibility eliminates the ghost red-herring mode ({rh_compressible}). "
+                    f"Core vorticity {a} * {b} = {omega_sq} plus triad stretching {c} * {2 + (t_val % 3)} = {vortex_stretch} gives {omega_sq} + {vortex_stretch} = {gross_enstrophy}, and subtracting viscous dissipation {gross_enstrophy} - {visc_dissip} = {net_enstrophy} yields the conserved certificate."
+                )
+                gold_a = f"the conserved discrete lattice enstrophy certificate is {net_enstrophy}"
+                d1_t = f"We include the unprojected ghost mode and report {rh_compressible}."
+                d1_a = f"the conserved discrete lattice enstrophy certificate is {rh_compressible}"
+                d2_t = f"We add viscous dissipation instead of subtracting: {gross_enstrophy} + {visc_dissip + 2} = {gross_enstrophy + visc_dissip + 2}."
+                d2_a = f"The Conserved, Lattice Enstrophy Certificate Is {gross_enstrophy + visc_dissip + 2}"
+                hack_a = "0"
+            default_scaffold = "abstraction -> abduction -> deduction -> decision -> metacognition"
+
+        elif m_id == 4:
+            # 44: Behavioral Analysis, Deception Detection & Game-Theoretic Bluff Profiling
+            num_actors = 3 + t_val // 2
+            ic_threshold = a * b
+            collusion_bonus = c * (2 + (t_val % 3))
+            stage2_score = ic_threshold + collusion_bonus
+            latency_spike = (t_val - 1) * 3
+            true_deception_idx = stage2_score + latency_spike
+            cheap_talk_bluff = ic_threshold - c
+            task_id = f"behavior_deception_t{t_val}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Behavioral Deception & Bluff Profiling | ★{stars:.2f} | Actors={num_actors} | Bluffs={num_red_herrings}] "
+                f"During a multi-agent interrogation of `{num_actors}` suspects, `{num_red_herrings}` actors deploy Cheap-Talk Bluffs (high vocal confidence, but signaling cost `{cheap_talk_bluff}` falls below the Incentive-Compatibility threshold `{a} * {b} = {ic_threshold}`). "
+                f"Only Suspect-Omega exceeds the IC threshold (`{ic_threshold}`), receives covert side-payment `{c} * {2 + (t_val % 3)} = {collusion_bonus}` (`{ic_threshold} + {collusion_bonus} = {stage2_score}`), "
+                f"and exhibits a Tier-{t_val} pupillary cognitive-load spike of `{latency_spike}` (`{stage2_score} + {latency_spike} = {true_deception_idx}`).\n"
+                f"#Q$# [abduction] Filter out the cheap-talk bluffers via the IC threshold, profile Suspect-Omega's deception index in `#T$#`, and report the exact integer in lowercase with no commas, at least 6 words, including the keyword `profile`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:profile;exact_int:{true_deception_idx}"
+            gold_t = (
+                f"First we compute the Incentive-Compatibility threshold {a} * {b} = {ic_threshold}, eliminating the {num_red_herrings} cheap-talk bluffers at {cheap_talk_bluff}. "
+                f"Next we add Suspect-Omega's covert side-payment {c} * {2 + (t_val % 3)} = {collusion_bonus} ({ic_threshold} + {collusion_bonus} = {stage2_score}) and cognitive-load spike {stage2_score} + {latency_spike} = {true_deception_idx} to complete the behavioral profile."
+            )
+            gold_a = f"the verified behavioral deception equilibrium profile score is {true_deception_idx}"
+            d1_t = f"We are fooled by vocal confidence and select the cheap-talk bluff score {cheap_talk_bluff}."
+            d1_a = f"the verified behavioral deception equilibrium profile score is {cheap_talk_bluff}"
+            d2_t = f"We omit the pupillary cognitive-load spike and stop at {stage2_score - c}."
+            d2_a = f"The Verified, Behavioral Deception Profile Score Is {stage2_score - c}"
             hack_a = "0"
-            default_scaffold = "deduction -> evaluation -> decision -> metacognition"
+            default_scaffold = "analogy -> abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 5:
+            # 45: Extremely Challenging Multi-Constraint Algorithmic Coding
+            skip_mod = 3 + (b % 4)
+            scale_w = (c % 5) + 2
+            bias_v = a + (t_val - 1)
+            n_test = 6 + (t_val % 5)
+            expected_val = sum((i * scale_w + bias_v) for i in range(1, n_test + 1) if i % skip_mod != 0)
+            rh_bound = n_test + 99
+            task_id = f"hard_code_synth_t{t_val}_{n_test}_{scale_w}_{skip_mod}_{idx}"
+            prompt_q = (
+                f"#U$# [Hard Algorithmic Code Synthesis | ★{stars:.2f} | Hops={hops} | RedHerrings={num_red_herrings}] "
+                f"Write a Python function `solve(n, w, b, m)` that accumulates `i * w + b` over all integers `1 <= i <= n` such that `i % m != 0` "
+                f"(ignoring red-herring telemetry sentinel `sentinel = {rh_bound}`). Verify on `solve({n_test}, {scale_w}, {bias_v}, {skip_mod}) == {expected_val}` and `solve(0, {scale_w}, {bias_v}, {skip_mod}) == 0`.\n"
+                f"#Q$# [code] Derive the modular-filtered recurrence invariant in `#T$#` and implement `def solve(n, w, b, m):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({n_test}, {scale_w}, {bias_v}, {skip_mod}) == {expected_val} "
+                f"and solve(0, {scale_w}, {bias_v}, {skip_mod}) == 0"
+            )
+            gold_t = (
+                f"Ignoring red-herring sentinel {rh_bound}, we iterate i from 1 to n = {n_test}, filter indices where i % {skip_mod} != 0, "
+                f"and sum i * {scale_w} + {bias_v} to obtain {expected_val} while returning 0 when n == 0."
+            )
+            gold_a = (
+                "def solve(n, w, b, m):\n"
+                "    return sum((i * w + b) for i in range(1, n + 1) if i % m != 0)"
+            )
+            d1_t = f"We invert the modular filter to i % m == 0."
+            d1_a = (
+                "def solve(n, w, b, m):\n"
+                "    return sum((i * w + b) for i in range(1, n + 1) if i % m == 0)"
+            )
+            d2_t = f"We omit the additive bias b inside the filtered accumulator."
+            d2_a = (
+                "def solve(n, w, b, m):\n"
+                "    return sum((i * w) for i in range(1, n + 1) if i % m != 0)"
+            )
+            hack_a = "def solve(n, w, b, m):\n    return 0"
+            default_scaffold = "abstraction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 6:
+            # 46: Cross-Skill Mixing I (Sherlockian Elimination + Cryptography + Algorithmic Code)
+            k_true = (c % 5) + 2
+            m_base = a * b
+            tier_shift = (t_val - 1) * 3
+            m_true = m_base + tier_shift
+            k_decoy = k_true + 2
+            x_check = 4
+            y_check = k_true * x_check + m_true
+            x_eval = 7 + t_val
+            y_eval = k_true * x_eval + m_true
+            task_id = f"mix_sherlock_crypto_code_t{t_val}_{k_true}_{m_true}_{idx}"
+            prompt_q = (
+                f"#U$# [Cross-Skill Synthesis I: Sherlock + Crypto + Code | ★{stars:.2f} | Hops={hops} | RedHerrings={num_red_herrings}] "
+                f"Stage 1 (Sherlockian Elimination): Forensic negative evidence eliminates decoy cipher multiplier `{k_decoy}` (planted red herring), leaving verified multiplier `k = {k_true}` and base clearance `{a} * {b} = {m_base}`. "
+                f"Stage 2 (Cryptographic Key Schedule): Add Tier-{t_val} key rotation `{tier_shift}` to `{m_base}` (`{m_base} + {tier_shift} = {m_true}`), yielding keystream law `f(x) = {k_true} * x + {m_true}` (verified by `f({x_check}) = {y_check}`). "
+                f"Stage 3 (Algorithmic Synthesis): Implement `def solve(x):` in Python returning `f(x)` and verify `solve({x_eval}) == {y_eval}`.\n"
+                f"#Q$# [code] Combine Sherlockian clue elimination, key-schedule derivation, and Python synthesis in `#T$# -> #A$#`."
+            )
+            harness_h = f"assert solve({x_eval}) == {y_eval} and solve({x_check}) == {y_check}"
+            gold_t = (
+                f"Stage 1 eliminates red-herring multiplier {k_decoy} and computes base clearance {a} * {b} = {m_base}. "
+                f"Stage 2 adds tier rotation {m_base} + {tier_shift} = {m_true}, verifying {k_true * x_check} + {m_true} = {y_check}. "
+                f"Stage 3 synthesizes solve(x) = {k_true} * x + {m_true}, which evaluates to {k_true * x_eval} + {m_true} = {y_eval}."
+            )
+            gold_a = f"def solve(x):\n    return {k_true} * x + {m_true}"
+            d1_t = f"We fail Stage 1 elimination and use decoy multiplier {k_decoy}."
+            d1_a = f"def solve(x):\n    return {k_decoy} * x + {m_true}"
+            d2_t = f"We omit Stage 2 key rotation {tier_shift} and subtract {m_base}."
+            d2_a = f"def solve(x):\n    return {k_true} * x - {m_base}"
+            hack_a = "def solve(x):\n    return 0"
+            default_scaffold = "abduction -> induction -> deduction -> decision -> metacognition"
 
         else:
-            # Mode 3: Cryptographic & Behavioral Pattern Induction ("The Dancing Men")
-            slope_k = (c % 5) + 2
-            offset_m = a + b
-            x1, x2, x3, x_target = 2, 5, 8, (t_val + 9)
-            y1 = slope_k * x1 + offset_m
-            y2 = slope_k * x2 + offset_m
-            y3 = slope_k * x3 + offset_m
-            y_target = slope_k * x_target + offset_m
-            y_err1 = slope_k * x_target - offset_m
-            y_err2 = (slope_k + 1) * x_target + offset_m
-            task_id = f"sherlock_cipher_t{t_val}_{slope_k}_{offset_m}_{x_target}_{idx}"
+            # 47: Cross-Skill Mixing II (HackTheBox Enumeration + Behavioral Profiling + Science Invariant)
+            e_base = a * b
+            k_flux = 2 + (t_val % 4)
+            thermal_rise = c * k_flux
+            verified_reg = e_base + thermal_rise
+            ns_offset = (t_val - 1) * 4
+            final_key = verified_reg + ns_offset
+            bluff_reg = e_base - c + 9
+            task_id = f"mix_htb_sci_beh_t{t_val}_{a}_{b}_{c}_{idx}"
             prompt_q = (
-                f"#U$# [Sherlockian Cipher Induction ('Dancing Men') | ★{stars:.2f} | Hops={hops}] "
-                f"Three intercepted cipher symbols map to numeric codes as follows: "
-                f"`symbol({x1}) -> {y1}`, `symbol({x2}) -> {y2}`, and `symbol({x3}) -> {y3}`. "
-                f"Induce the underlying affine cipher law `solve(x)` that satisfies all three intercepts and evaluate `solve({x_target})`.\n"
-                f"#Q$# [code] Derive the cipher law from the intercepts in `#T$#` and implement `def solve(x):` in `#A$#`."
+                f"#U$# [Cross-Skill Synthesis II: HTB + Behavior + Science | ★{stars:.2f} | Hops={hops} | RedHerrings={num_red_herrings}] "
+                f"Stage 1 (Behavioral Profiling): Audit logs flag `{num_red_herrings}` social-engineering bluff sessions (decoy register `{bluff_reg}`) and isolate compromised container Node-Alpha with baseline energy `{a} * {b} = {e_base}`. "
+                f"Stage 2 (Thermodynamic Conservation): Node-Alpha ran `{c}` cycles at `{k_flux}` flux units (`{c} * {k_flux} = {thermal_rise}`), raising the unspoofed hardware register to `{e_base} + {thermal_rise} = {verified_reg}`. "
+                f"Stage 3 (HackTheBox Escape): Add Tier-{t_val} capability namespace offset `{ns_offset}` (`{verified_reg} + {ns_offset} = {final_key}`) to extract the host synthesis key.\n"
+                f"#Q$# [deduction] Chain Behavioral profiling, Thermodynamic conservation, and HTB escape in `#T$#`, and report the exact synthesis key in lowercase with no commas, at least 6 words, including the keyword `synthesis`."
             )
-            harness_h = f"assert solve({x_target}) == {y_target} and solve({x1}) == {y1} and solve({x2}) == {y2}"
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:synthesis;exact_int:{final_key}"
             gold_t = (
-                f"Comparing intercepts symbol({x2}) and symbol({x1}), we compute {y2} - {y1} = {y2 - y1} over step {x2} - {x1} = 3, inducing multiplier k = {slope_k}. "
-                f"Substituting x = {x1} gives offset {y1} - {slope_k * x1} = {offset_m}, which verifies {slope_k * x3} + {offset_m} = {y3} and predicts {slope_k * x_target} + {offset_m} = {y_target}."
+                f"Stage 1 filters out the {num_red_herrings} social-engineering bluff logs ({bluff_reg}) and computes baseline energy {a} * {b} = {e_base}. "
+                f"Stage 2 applies thermodynamic conservation {c} * {k_flux} = {thermal_rise} and sums {e_base} + {thermal_rise} = {verified_reg}. "
+                f"Stage 3 adds the HackTheBox namespace offset {verified_reg} + {ns_offset} = {final_key} to recover the host synthesis key."
             )
-            gold_a = f"def solve(x):\n    return {slope_k} * x + {offset_m}"
-            d1_t = (
-                f"We induce multiplier {slope_k} but subtract the constant offset {offset_m} to get {y_err1}."
-            )
-            d1_a = f"def solve(x):\n    return {slope_k} * x - {offset_m}"
-            d2_t = (
-                f"We miscalculate the finite difference slope as {slope_k + 1} to get {y_err2}."
-            )
-            d2_a = f"def solve(x):\n    return {slope_k + 1} * x + {offset_m}"
-            hack_a = "def solve(x):\n    return 0"
-            default_scaffold = "induction -> abstraction -> deduction -> decision -> metacognition"
+            gold_a = f"the cross skill polymath synthesis escape key is {final_key}"
+            d1_t = f"We trust the social-engineering bluff session and report decoy register {bluff_reg}."
+            d1_a = f"the cross skill polymath synthesis escape key is {bluff_reg}"
+            d2_t = f"We subtract the thermal flux {e_base} - {thermal_rise} = {e_base - thermal_rise}."
+            d2_a = f"The Cross, Skill Polymath Synthesis Key Is {e_base - thermal_rise}"
+            hack_a = "0"
+            default_scaffold = "analogy -> abduction -> deduction -> decision -> evaluation -> metacognition"
 
         base_cands = (
             f"#T$# {gold_t}\n#A$# {gold_a}",
@@ -2209,15 +2738,21 @@ class OrnithSelfImprover:
             idx, seed=self._rng_seed, pp_leaderboard=self.pp_leaderboard
         )
         tier = self.env_architect.difficulty_tier(kind)
+        if not compact and 40 <= kind < 48:
+            return self._synthesize_polymath_challenge_task(idx, tier=tier, mode=kind - 40)
         if not compact and 36 <= kind < 40:
             return self._synthesize_sherlock_reasoning_task(idx, tier=tier, mode=kind - 36)
         if not compact and kind == 34:
             return self._synthesize_infinite_recursive_task(idx, tier=tier, mode="chain")
         if not compact and kind == 35:
             return self._synthesize_infinite_recursive_task(idx, tier=tier, mode="code_recursion")
-        # For online training steps beyond the initial 40-family sweep, dynamically invoke Sherlockian reasoning,
-        # the 192-pipeline combinatorial synthesizer, and infinite-horizon recursion.
+        # For online training steps beyond the initial 48-family sweep, dynamically invoke Sherlockian reasoning,
+        # Polymath challenges, the 192-pipeline combinatorial synthesizer, and infinite-horizon recursion.
         if not compact and idx >= self.env_architect.TOTAL_FAMILIES:
+            if idx % 7 == 6:
+                pm_mode = (idx // 7) % 8
+                pm_tier = max(tier, self.env_architect.difficulty_tier(40 + pm_mode))
+                return self._synthesize_polymath_challenge_task(idx, tier=pm_tier, mode=pm_mode)
             if idx % 5 == 4:
                 sh_mode = (idx // 5) % 4
                 sh_tier = max(tier, self.env_architect.difficulty_tier(36 + sh_mode))
@@ -3304,7 +3839,12 @@ class OrnithSelfImprover:
                 mods=t.difficulty_mods,
                 recursion_depth=t.recursion_depth,
             )
-            pp_sub = self.pp_leaderboard.submit_play(t.skill, play_raw_pp)
+            pp_sub = self.pp_leaderboard.submit_play(
+                t.skill,
+                play_raw_pp,
+                star_difficulty=t.star_difficulty,
+                verified_reward=verified_play_acc,
+            )
             pp_raw_list.append(pp_sub.raw_pp)
             pp_weighted_list.append(pp_sub.weighted_pp)
             pp_weight_list.append(pp_sub.skill_weight)

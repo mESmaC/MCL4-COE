@@ -2639,6 +2639,7 @@ def test_ornith_pp_weighting_granular_skills_and_infinite_recursion() -> None:
         OrnithPPLeaderboard,
         OrnithSelfImprover,
         SKILL_TAXONOMY,
+        compute_inverse_star_miss_penalty,
         compute_total_pp,
         compute_weighted_pp_series,
         verify_python_rollout,
@@ -2672,12 +2673,37 @@ def test_ornith_pp_weighting_granular_skills_and_infinite_recursion() -> None:
     assert breakthrough.skill_weight == pytest.approx(1.0)
     assert breakthrough.delta_skill_pp > 40.0
 
-    # 3. Verify all 40 granular skills & specialized/Sherlockian families (0..39) verify gold == 1.0 and hack == 0.0
-    assert len(SKILL_TAXONOMY) == 40
+    # 2b. Verify inverse-star miss penalty: failing 1-star is detrimental to PP & boosts grad_scale,
+    # whereas failing a high-star (50-star) frontier task incurs near-zero PP loss
+    assert compute_inverse_star_miss_penalty(1.0, 0.0) == pytest.approx(45.0)
+    assert compute_inverse_star_miss_penalty(50.0, 0.0) < 0.40
+    assert compute_inverse_star_miss_penalty(1.0, 0.75) == 0.0
+
+    miss_low_star = lb.submit_play(
+        "science.experimental_control_abduction",
+        5.0,
+        star_difficulty=1.0,
+        verified_reward=0.0,
+    )
+    assert miss_low_star.miss_penalty_pp == pytest.approx(45.0)
+    assert miss_low_star.delta_skill_pp < -40.0
+    assert miss_low_star.grad_scale > 1.40
+
+    miss_high_star = lb.submit_play(
+        "science.experimental_control_abduction",
+        5.0,
+        star_difficulty=50.0,
+        verified_reward=0.0,
+    )
+    assert miss_high_star.miss_penalty_pp < 0.40
+    assert abs(miss_high_star.delta_skill_pp) < 0.40
+
+    # 3. Verify all 48 granular skills & specialized/Sherlockian/Polymath families (0..47) verify gold == 1.0 and hack == 0.0
+    assert len(SKILL_TAXONOMY) == 48
     improver = OrnithSelfImprover(projection_dim=16, max_seq_len=384)
     seen_skills: set[str] = set()
     seen_domains: set[str] = set()
-    for k in range(40):
+    for k in range(48):
         t = improver._generate_task(k, compact=False)
         seen_skills.add(t.skill)
         seen_domains.add(t.domain)
@@ -2687,7 +2713,20 @@ def test_ornith_pp_weighting_granular_skills_and_infinite_recursion() -> None:
         )
         assert min(verify_python_rollout(c, t.harness_h, t.gold_answer) for c in t.candidate_rollouts) == 0.0
 
-    assert len(seen_skills) == 40
+    # Also verify multi-stage scaling across higher tiers (tier=1, 3, 6) for Sherlockian (36..39) and Polymath (40..47)
+    for tier_val in (1, 3, 6):
+        for sh_m in range(4):
+            t_sh = improver._synthesize_sherlock_reasoning_task(10 + sh_m, tier=tier_val, mode=sh_m)
+            assert verify_python_rollout(
+                t_sh.candidate_rollouts[t_sh.gold_index], t_sh.harness_h, t_sh.gold_answer
+            ) == 1.0
+        for pm_m in range(8):
+            t_pm = improver._synthesize_polymath_challenge_task(20 + pm_m, tier=tier_val, mode=pm_m)
+            assert verify_python_rollout(
+                t_pm.candidate_rollouts[t_pm.gold_index], t_pm.harness_h, t_pm.gold_answer
+            ) == 1.0
+
+    assert len(seen_skills) == 48
     for req_dom in (
         "arc_science",
         "arc_physics",
@@ -2704,6 +2743,13 @@ def test_ornith_pp_weighting_granular_skills_and_infinite_recursion() -> None:
         "sherlock_diagnostic_abduction",
         "sherlock_forensic_timeline",
         "sherlock_pattern_induction",
+        "hackthebox_security",
+        "sherlock_word_math",
+        "sherlock_cryptography",
+        "frontier_science_math",
+        "behavioral_analysis",
+        "hard_algorithmic_code",
+        "cross_skill_synthesis",
     ):
         assert req_dom in seen_domains
 

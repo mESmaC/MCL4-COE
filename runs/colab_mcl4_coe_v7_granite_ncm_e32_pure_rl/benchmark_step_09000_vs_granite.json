@@ -1,0 +1,180 @@
+{
+  "checkpoint": "colab_mcl4_coe_v7_granite_ncm_e32_pure_rl/step_09000",
+  "precision": "NVFP4 (Blackwell sm_120)",
+  "architecture": "MCL4-COE 1.77B (E=40, top_k=8, 2 Mitosis Splits [32->36->40], 12 Encoder + 12 CED Decoder + 9 COE Operators + 6-Level NCM + NCMCOEHeadBridge)",
+  "mitotic_pairs": [
+    [13, 32],
+    [31, 33],
+    [19, 34],
+    [8, 35],
+    [30, 36],
+    [24, 37],
+    [28, 38],
+    [0, 39]
+  ],
+  "ornith_pp_telemetry": {
+    "skills_explored": "48 / 48",
+    "sherlock_and_polymath_plays": {
+      "deduction.sherlock_eliminative_grid": {
+        "plays_total": 226,
+        "plays_8k_9k": 68,
+        "max_stars": 232.81,
+        "max_raw_pp": 594807.9
+      },
+      "deduction.sherlock_alibi_contradiction": {
+        "plays_total": 225,
+        "plays_8k_9k": 56,
+        "max_stars": 228.5,
+        "max_raw_pp": 565978.3
+      },
+      "abduction.sherlock_diagnostic_trace": {
+        "plays_total": 174,
+        "plays_8k_9k": 39,
+        "max_stars": 163.25,
+        "max_raw_pp": 312814.6
+      },
+      "induction.sherlock_cipher_induction": {
+        "plays_total": 150,
+        "plays_8k_9k": 37,
+        "max_stars": 129.82,
+        "max_raw_pp": 220690.9
+      },
+      "crypto.multilayer_trapdoor_stream": {
+        "plays_total": 59,
+        "plays_8k_9k": 59,
+        "max_stars": 51.2,
+        "max_raw_pp": 46591.7
+      },
+      "mixing.cross_skill_sherlock_crypto_code": {
+        "plays_total": 38,
+        "plays_8k_9k": 38,
+        "max_stars": 51.2,
+        "max_raw_pp": 46940.7
+      },
+      "science.frontier_open_problem_reduction": {
+        "plays_total": 50,
+        "plays_8k_9k": 50,
+        "max_stars": 31.23,
+        "max_raw_pp": 21573.0
+      },
+      "math.sherlock_word_problem_system": {
+        "plays_total": 43,
+        "plays_8k_9k": 43,
+        "max_stars": 26.7,
+        "max_raw_pp": 16932.3
+      },
+      "security.hackthebox_sandbox_escape": {
+        "plays_total": 42,
+        "plays_8k_9k": 42,
+        "max_stars": 26.7,
+        "max_raw_pp": 16880.1
+      },
+      "behavior.game_theoretic_deception_profiling": {
+        "plays_total": 41,
+        "plays_8k_9k": 41,
+        "max_stars": 26.7,
+        "max_raw_pp": 16722.0
+      },
+      "code.algorithmic_synthesis_hard": {
+        "plays_total": 33,
+        "plays_8k_9k": 33,
+        "max_stars": 20.29,
+        "max_raw_pp": 10989.3
+      },
+      "mixing.cross_skill_htb_science_behavior": {
+        "plays_total": 32,
+        "plays_8k_9k": 32,
+        "max_stars": 18.25,
+        "max_raw_pp": 9205.3
+      }
+    },
+    "max_star_difficulty": 232.81,
+    "total_weighted_pp": 10606273.58,
+    "ncm_codebook_utilization": 0.7778
+  },
+  "benchmarks": {
+    "ARC-Challenge (N=300, 0-shot)": {
+      "ibm_published_base": 39.42,
+      "ibm_published_instruct": 42.66,
+      "raw_hf_granite_instruct_bf16_0shot": {
+        "acc": 29.67,
+        "acc_norm": 34.67
+      },
+      "mcl4_coe_step_00000_graft_nvfp4": {
+        "acc": 25.67,
+        "acc_norm": 30.67,
+        "hybrid_acc": 30.33
+      },
+      "mcl4_coe_ncm_step_07000_e32_nvfp4": {
+        "acc": 31.0,
+        "acc_norm": 34.33,
+        "hybrid_acc": 34.67
+      },
+      "mcl4_coe_ncm_step_09000_e40_nvfp4": {
+        "acc": 32.0,
+        "acc_norm": 37.0,
+        "hybrid_acc": 36.33,
+        "hybrid_coe_acc": 34.67,
+        "hybrid_ncm_coe_acc": 36.33
+      }
+    },
+    "MMLU (N=342 stratified across all 57 subjects, 0-shot)": {
+      "ibm_published_base": 26.53,
+      "ibm_published_instruct": 26.13,
+      "raw_hf_granite_instruct_bf16_0shot": {
+        "acc": 34.21,
+        "acc_norm": 35.67
+      },
+      "mcl4_coe_step_00000_graft_nvfp4": {
+        "acc": 24.85,
+        "acc_norm": 22.51,
+        "hybrid_acc": 23.68
+      },
+      "mcl4_coe_ncm_step_07000_e32_nvfp4": {
+        "acc": 33.63,
+        "acc_norm": 35.38,
+        "hybrid_acc": 33.92
+      },
+      "mcl4_coe_ncm_step_09000_e40_nvfp4": {
+        "acc": 33.92,
+        "acc_norm": 33.63,
+        "hybrid_acc": 33.63,
+        "hybrid_coe_acc": 33.63,
+        "hybrid_ncm_coe_acc": 32.75
+      }
+    },
+    "HellaSwag (N=300, 0-shot)": {
+      "ibm_published_base": 66.13,
+      "ibm_published_instruct": 65.97,
+      "raw_hf_granite_instruct_bf16_0shot": {
+        "acc": 46.33,
+        "acc_norm": 53.33
+      },
+      "mcl4_coe_step_00000_graft_nvfp4": {
+        "acc": 27.0,
+        "acc_norm": 24.0,
+        "hybrid_acc": 26.0
+      },
+      "mcl4_coe_ncm_step_07000_e32_nvfp4": {
+        "acc": 46.33,
+        "acc_norm": 54.33,
+        "hybrid_acc": 54.33
+      },
+      "mcl4_coe_ncm_step_09000_e40_nvfp4": {
+        "acc": 45.67,
+        "acc_norm": 53.67,
+        "hybrid_acc": 53.0,
+        "hybrid_coe_acc": 53.0,
+        "hybrid_ncm_coe_acc": 52.67
+      }
+    },
+    "TypedDecision_MCQA (N=128, COE + NCMCOEHeadBridge Operators)": {
+      "mcl4_coe_step_00000_graft_nvfp4": 19.53,
+      "mcl4_coe_ncm_step_06850_peak_e32_nvfp4": 43.75,
+      "mcl4_coe_ncm_step_07000_e32_nvfp4": 36.72,
+      "mcl4_coe_ncm_step_07475_peak_e36_nvfp4": 44.53,
+      "mcl4_coe_ncm_step_08175_peak_e40_nvfp4": 43.75,
+      "mcl4_coe_ncm_step_09000_e40_nvfp4": 36.72
+    }
+  }
+}

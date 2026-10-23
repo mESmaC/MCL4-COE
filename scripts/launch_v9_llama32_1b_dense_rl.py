@@ -297,7 +297,7 @@ def graft_llama32_1b_dense_checkpoint(
                 return_tensors="pt",
             )["input_ids"]
             hf_logits = hf_model(test_ids).logits.float()
-            mcl_logits = model.backbone.forward_causal_lm(test_ids).logits.float()
+            mcl_logits = model.backbone(test_ids).logits.float()
             cos_sim = torch.nn.functional.cosine_similarity(
                 hf_logits.reshape(-1, hf_logits.shape[-1]),
                 mcl_logits.reshape(-1, mcl_logits.shape[-1]),
@@ -627,7 +627,7 @@ def build_v9_llama32_1b_dense_rl_config(
         ncm_weight=ncm_weight,
         ncm_target_length=64,
         ncm_num_levels=4,
-        ncm_level_schedule="4,3,2,1",
+        ncm_level_schedule="quadratic",
         ncm_codebook_size=1024,
         ncm_vq_embed_dim=256,
         ncm_scale_adaptive_top_k=True,

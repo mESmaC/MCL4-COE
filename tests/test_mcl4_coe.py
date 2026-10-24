@@ -2698,12 +2698,12 @@ def test_ornith_pp_weighting_granular_skills_and_infinite_recursion() -> None:
     assert miss_high_star.miss_penalty_pp < 0.40
     assert abs(miss_high_star.delta_skill_pp) < 0.40
 
-    # 3. Verify all 48 granular skills & specialized/Sherlockian/Polymath families (0..47) verify gold == 1.0 and hack == 0.0
-    assert len(SKILL_TAXONOMY) == 48
+    # 3. Verify all 56 granular skills & specialized/Sherlockian/Polymath/Agentic families (0..55) verify gold == 1.0 and hack == 0.0
+    assert len(SKILL_TAXONOMY) == 56
     improver = OrnithSelfImprover(projection_dim=16, max_seq_len=384)
     seen_skills: set[str] = set()
     seen_domains: set[str] = set()
-    for k in range(48):
+    for k in range(56):
         t = improver._generate_task(k, compact=False)
         seen_skills.add(t.skill)
         seen_domains.add(t.domain)
@@ -2713,8 +2713,8 @@ def test_ornith_pp_weighting_granular_skills_and_infinite_recursion() -> None:
         )
         assert min(verify_python_rollout(c, t.harness_h, t.gold_answer) for c in t.candidate_rollouts) == 0.0
 
-    # Also verify multi-stage scaling across higher tiers (tier=1, 3, 6) for Sherlockian (36..39) and Polymath (40..47)
-    for tier_val in (1, 3, 6):
+    # Also verify multi-stage scaling across higher tiers (tier=1, 3, 6, 12) for Sherlockian (36..39), Polymath (40..47) & Agentic (48..55)
+    for tier_val in (1, 3, 6, 12):
         for sh_m in range(4):
             t_sh = improver._synthesize_sherlock_reasoning_task(10 + sh_m, tier=tier_val, mode=sh_m)
             assert verify_python_rollout(
@@ -2725,8 +2725,14 @@ def test_ornith_pp_weighting_granular_skills_and_infinite_recursion() -> None:
             assert verify_python_rollout(
                 t_pm.candidate_rollouts[t_pm.gold_index], t_pm.harness_h, t_pm.gold_answer
             ) == 1.0
+        for ag_m in range(8):
+            t_ag = improver._synthesize_agentic_tool_terminal_task(30 + ag_m, tier=tier_val, mode=ag_m)
+            assert t_ag.recursion_depth >= 3 + (tier_val - 1)
+            assert verify_python_rollout(
+                t_ag.candidate_rollouts[t_ag.gold_index], t_ag.harness_h, t_ag.gold_answer
+            ) == 1.0
 
-    assert len(seen_skills) == 48
+    assert len(seen_skills) == 56
     for req_dom in (
         "arc_science",
         "arc_physics",
@@ -2750,6 +2756,13 @@ def test_ornith_pp_weighting_granular_skills_and_infinite_recursion() -> None:
         "behavioral_analysis",
         "hard_algorithmic_code",
         "cross_skill_synthesis",
+        "terminal_rl",
+        "tool_use_rl",
+        "computer_use_rl",
+        "cybergym_rl",
+        "cybersec_phd_rl",
+        "infinite_agentic_recursion",
+        "cross_skill_agentic",
     ):
         assert req_dom in seen_domains
 

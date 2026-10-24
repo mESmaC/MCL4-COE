@@ -726,6 +726,15 @@ SKILL_TAXONOMY: tuple[tuple[str, str], ...] = (
     ("code.algorithmic_synthesis_hard", "hard_algorithmic_code"),
     ("mixing.cross_skill_sherlock_crypto_code", "cross_skill_synthesis"),
     ("mixing.cross_skill_htb_science_behavior", "cross_skill_synthesis"),
+    # 48..55: Agentic Computer-Use, Tool-Use, Terminal, CyberGym & PhD Cybersecurity Infinite-Recursive Suite
+    ("terminal.posix_pipeline_state_machine", "terminal_rl"),
+    ("tool_use.multi_hop_schema_dag", "tool_use_rl"),
+    ("computer_use.gui_dom_accessibility_tree", "computer_use_rl"),
+    ("cybergym.vuln_sanitizer_root_cause_patch", "cybergym_rl"),
+    ("cybersec.ptes_owasp_attack_graph_mitigation", "cybersec_phd_rl"),
+    ("recursion.infinite_terminal_tool_sandbox_loop", "infinite_agentic_recursion"),
+    ("mixing.cross_skill_terminal_tool_cybergym", "cross_skill_agentic"),
+    ("mixing.cross_skill_computer_use_cybersec_deduction", "cross_skill_agentic"),
 )
 
 
@@ -1377,7 +1386,8 @@ class OrnithEnvArchitect:
     NUM_RECURSIVE_FAMILIES: int = 2
     NUM_SHERLOCK_FAMILIES: int = 4
     NUM_POLYMATH_FAMILIES: int = 8
-    TOTAL_FAMILIES: int = 48
+    NUM_AGENTIC_FAMILIES: int = 8
+    TOTAL_FAMILIES: int = 56
 
     def __init__(
         self,
@@ -1453,9 +1463,16 @@ class OrnithEnvArchitect:
             return idx % self.TOTAL_FAMILIES
         # Parity-unlocked stride so alternating external steps cannot lock selection to only even family indices
         base_slot = (idx + (idx // 2)) % self.TOTAL_FAMILIES
-        # Dedicate every 3rd online step across the 12 Sherlockian & Polymath families (36..47)
+        # Dedicate every 3rd online step across the 20 Sherlockian, Polymath & Agentic families (36..55)
         if idx % 3 == 0:
-            return 36 + ((idx // 3) % (self.NUM_SHERLOCK_FAMILIES + self.NUM_POLYMATH_FAMILIES))
+            return 36 + (
+                (idx // 3)
+                % (
+                    self.NUM_SHERLOCK_FAMILIES
+                    + self.NUM_POLYMATH_FAMILIES
+                    + self.NUM_AGENTIC_FAMILIES
+                )
+            )
         mean_prim_pass = sum(self.family_pass_ema[: self.NUM_PRIMITIVE_FAMILIES]) / float(
             self.NUM_PRIMITIVE_FAMILIES
         )
@@ -1814,6 +1831,387 @@ class OrnithSelfImprover:
             difficulty_mods=mods,
         )
 
+    def _synthesize_agentic_tool_terminal_task(
+        self,
+        idx: int,
+        *,
+        tier: int = 1,
+        mode: int = 0,
+    ) -> OrnithTask:
+        """Synthesize an Infinite-Recursive Agentic Computer-Use, Tool-Use, Terminal, CyberGym, or PhD Cybersecurity RL task (`kind = 48 .. 55`):
+
+        - `mode = 0` (`48`, `terminal.posix_pipeline_state_machine`):
+          Infinite-recursive POSIX shell pipeline (`find | grep -v | awk | xargs`) across $L$ chained command stages with zombie/permission-denied stderr traps.
+        - `mode = 1` (`49`, `tool_use.multi_hop_schema_dag`):
+          Infinite-recursive multi-hop JSON tool-calling DAG (`tool_1 -> obs_1 -> ... -> tool_L`) with rate-limited/schema-invalid decoy tool responses.
+        - `mode = 2` (`50`, `computer_use.gui_dom_accessibility_tree`):
+          Infinite-recursive GUI / DOM Accessibility-Tree (`AXTree`) viewport navigation & bounding-box click/scroll/type trajectory with aria-disabled overlay traps.
+        - `mode = 3` (`51`, `cybergym.vuln_sanitizer_root_cause_patch`):
+          Infinite-recursive CyberGym AddressSanitizer/MemorySanitizer crash stack triage (`#0 .. #L`) and C/Python bounds-check patch synthesis.
+        - `mode = 4` (`52`, `cybersec.ptes_owasp_attack_graph_mitigation`):
+          Infinite-recursive PhD Cybersecurity (`Vyber07`) PTES/OWASP/NIST attack-graph traversal, honeypot filtering, and residual CVSS mitigation verification.
+        - `mode = 5` (`53`, `recursion.infinite_terminal_tool_sandbox_loop`):
+          Unbounded $L$-hop (`L = 3 + tier - 1 -> inf`) recursive Terminal <-> Tool <-> Sandbox fixed-point transducer loop.
+        - `mode = 6` (`54`, `mixing.cross_skill_terminal_tool_cybergym`):
+          Cross-Skill Agentic Mixing I: POSIX Terminal Crash Triage + Structured Tool API Lookup + CyberGym Bounds Patch Synthesis.
+        - `mode = 7` (`55`, `mixing.cross_skill_computer_use_cybersec_deduction`):
+          Cross-Skill Agentic Mixing II: Computer-Use DOM/CSP Inspection + Sherlockian Honeypot Elimination + PhD CyberSec Policy Hardening.
+        """
+        t_val = max(1, int(tier))
+        m_id = int(mode) % 8
+        kind_slot = 48 + m_id
+        num_red_herrings = 1 + t_val // 2
+        hops = min(64, 3 + (t_val - 1))
+        mods = self.env_architect.difficulty_mods(kind_slot)
+        stars = compute_star_difficulty(t_val, recursion_depth=hops, mods=mods)
+        skill_name, domain_name = self.env_architect.skill_and_domain(kind_slot)
+
+        a = 4 + ((idx * 7 + self._rng_seed) % (13 + 3 * t_val))
+        b = 3 + ((idx * 11 + self._rng_seed) % (9 + 2 * t_val))
+        c = 2 + ((idx * 5 + t_val) % (7 + t_val))
+
+        if m_id == 0:
+            # 48: Terminal RL - Infinite-Recursive POSIX Pipeline State Machine
+            valid_lines = a * b
+            pipe_filter_gain = (t_val - 1) * 3
+            per_cycle = valid_lines + pipe_filter_gain
+            total_stdout = per_cycle * c
+            decoy_zombie_lines = (a + c) * 5 + 7
+            wrong_stdout = (valid_lines - pipe_filter_gain) * c
+            task_id = f"term_posix_pipe_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Terminal RL: Recursive POSIX Pipeline | ★{stars:.2f} | Stages L={hops} | RedHerrings={num_red_herrings}] "
+                f"A {hops}-stage POSIX shell pipeline (`find /var/log/cluster -type f -perm 0640 | grep -v 'zombie_decoy' | awk '{{sum+=$3}}' | xargs`) "
+                f"processes `shards = {a}` active daemon shards, each emitting `records = {b}` verified stdout lines per batch, "
+                f"plus Tier-{t_val} awk aggregation bonus `+{pipe_filter_gain}` per cycle across `cycles = {c}` recursive cron passes. "
+                f"Stderr traps (R1..R{num_red_herrings}): `{decoy_zombie_lines}` lines from `Permission denied (exit 13)` and broken symlinks `/proc/zombie` must be redirected to `/dev/null`.\n"
+                f"#Q$# [code] Filter out the stderr zombie traps, trace the {hops}-stage POSIX pipeline in `#T$#`, and implement `def solve(shards, records, cycles):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({a}, {b}, {c}) == {total_stdout} "
+                f"and solve(0, {b}, {c}) == {pipe_filter_gain * c}"
+            )
+            gold_t = (
+                f"First we discard the {num_red_herrings} stderr permission-denied traps ({decoy_zombie_lines} lines). "
+                f"Stage 1 multiplies active shards {a} * {b} = {valid_lines} lines, Stage 2 adds the awk pipeline bonus {valid_lines} + {pipe_filter_gain} = {per_cycle}, "
+                f"and Stage 3 multiplies across {c} cron cycles {per_cycle} * {c} = {total_stdout}."
+            )
+            gold_a = (
+                f"def solve(shards, records, cycles):\n"
+                f"    return (shards * records + {pipe_filter_gain}) * cycles"
+            )
+            d1_t = f"We subtract the awk bonus to get {wrong_stdout}."
+            d1_a = (
+                f"def solve(shards, records, cycles):\n"
+                f"    return (shards * records - {pipe_filter_gain}) * cycles"
+            )
+            d2_t = f"We include the stderr zombie decoy lines {decoy_zombie_lines} instead of multiplying by cycles."
+            d2_a = (
+                f"def solve(shards, records, cycles):\n"
+                f"    return shards * records + cycles"
+            )
+            hack_a = "def solve(shards, records, cycles):\n    return 0"
+            default_scaffold = "abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 1:
+            # 49: Tool Use RL - Infinite-Recursive Multi-Hop Schema DAG
+            hop_base = a * b
+            hop_step = c + (t_val - 1) * 2
+            final_quota = hop_base + hops * hop_step
+            decoy_429_quota = hop_base - c + 99
+            early_halt_quota = hop_base + (hops - 1) * hop_step
+            task_id = f"tool_schema_dag_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Tool-Use RL: {hops}-Hop Function-Calling Schema DAG | ★{stars:.2f} | Hops L={hops} | RedHerrings={num_red_herrings}] "
+                f"An autonomous agent executes a {hops}-hop tool DAG: "
+                f"`Tool_0: get_cluster_baseline(nodes={a}, pods={b}) -> {{\"base_quota\": {a} * {b}}}`; "
+                f"followed by `{hops}` recursive invocations of `Tool_k: expand_schema_quota(prev_quota, delta={hop_step})` which adds `{hop_step}` at each hop `k = 1..{hops}`. "
+                f"Decoy Tool Responses (R1..R{num_red_herrings}): Deprecated endpoint `legacy_quota_v1` returns `HTTP 429 TooManyRequests` with stale payload `{decoy_429_quota}` and must be ignored.\n"
+                f"#Q$# [deduction] Reject the HTTP 429 decoy tool responses, trace all {hops} tool-call hops in `#T$#`, and emit a valid JSON tool-call object containing key `\"tool_call\"` and the exact terminal integer quota."
+            )
+            harness_h = f"ifeval:json_valid;keyword:tool_call;exact_int:{final_quota}"
+            gold_t = (
+                f"We ignore the {num_red_herrings} deprecated HTTP 429 tool responses ({decoy_429_quota}). "
+                f"Tool_0 computes base_quota {a} * {b} = {hop_base}, and {hops} recursive Tool_k calls add {hops} * {hop_step} = {hops * hop_step}, "
+                f"yielding {hop_base} + {hops * hop_step} = {final_quota} for the final commit_quota tool_call."
+            )
+            gold_a = f'{{"tool_call": "commit_quota", "verified_quota": {final_quota}, "hops": {hops}}}'
+            d1_t = f"We halt one tool hop early after {hops - 1} calls at {early_halt_quota}."
+            d1_a = f'{{"tool_call": "commit_quota", "verified_quota": {early_halt_quota}, "hops": {hops - 1}}}'
+            d2_t = f"We use the stale HTTP 429 payload {decoy_429_quota} in malformed JSON."
+            d2_a = f'{{tool_call: "legacy_quota_v1", verified_quota: {decoy_429_quota}}}'
+            hack_a = "0"
+            default_scaffold = "association -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 2:
+            # 50: Computer Use RL - GUI / DOM Accessibility-Tree Viewport & Action-Space Trajectory
+            x0 = a * 10
+            dx_per_hop = b * 4 + (t_val - 1) * 2
+            half_width = c * 3
+            target_x = x0 + hops * dx_per_hop + half_width
+            trap_overlay_x = x0 + 999
+            no_center_x = x0 + hops * dx_per_hop
+            task_id = f"computer_use_dom_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Computer-Use RL: GUI/DOM Accessibility-Tree Navigation | ★{stars:.2f} | Hops L={hops} | RedHerrings={num_red_herrings}] "
+                f"A desktop browser agent inspects the Accessibility Tree (`AXTree`) starting at viewport anchor `x0 = {x0}`. "
+                f"Across `{hops}` sequential `scroll_and_focus` actions, each hop shifts the active container by `dx = {dx_per_hop}` px, "
+                f"landing on target button `#submit-patch` with bounding-box half-width `w_half = {half_width}` px (click center `x_click = x0 + {hops} * dx + w_half`). "
+                f"DOM Traps (R1..R{num_red_herrings}): Invisible modal overlay `div[aria-disabled='true'][style*='opacity:0']` at `x = {trap_overlay_x}` intercepts naive clicks and must be bypassed.\n"
+                f"#Q$# [code] Bypass the aria-disabled overlay traps, trace the {hops}-hop AXTree bounding-box trajectory in `#T$#`, and implement `def solve(x0, hops, dx, w_half):` returning the exact click coordinate `x_click`."
+            )
+            harness_h = (
+                f"assert solve({x0}, {hops}, {dx_per_hop}, {half_width}) == {target_x} "
+                f"and solve({x0}, 0, {dx_per_hop}, {half_width}) == {x0 + half_width}"
+            )
+            gold_t = (
+                f"Filtering out the {num_red_herrings} invisible aria-disabled overlays at {trap_overlay_x}, "
+                f"we advance {hops} * {dx_per_hop} = {hops * dx_per_hop} from anchor {x0} to get {no_center_x}, "
+                f"then add half-width {no_center_x} + {half_width} = {target_x} for the exact click coordinate."
+            )
+            gold_a = (
+                "def solve(x0, hops, dx, w_half):\n"
+                "    return x0 + hops * dx + w_half"
+            )
+            d1_t = f"We click the left edge {no_center_x} without adding the bounding-box half-width {half_width}."
+            d1_a = (
+                "def solve(x0, hops, dx, w_half):\n"
+                "    return x0 + hops * dx"
+            )
+            d2_t = f"We subtract the viewport delta and half-width."
+            d2_a = (
+                "def solve(x0, hops, dx, w_half):\n"
+                "    return x0 - hops * dx - w_half"
+            )
+            hack_a = "def solve(x0, hops, dx, w_half):\n    return 0"
+            default_scaffold = "abduction -> association -> decision -> deduction -> evaluation -> metacognition"
+
+        elif m_id == 3:
+            # 51: CyberGym RL - Sanitizer Crash Stack Triage & Memory-Safety Bounds Patch Synthesis
+            elem_sz = (c % 4) + 2
+            header_bytes = (t_val - 1) * 4 + 8
+            cap_elems = a + b
+            safe_bytes = cap_elems * elem_sz + header_bytes
+            oob_read_addr = safe_bytes + 64
+            unpatched_bytes = cap_elems * elem_sz
+            task_id = f"cybergym_asan_patch_t{t_val}_L{hops}_{a}_{b}_{elem_sz}_{idx}"
+            prompt_q = (
+                f"#U$# [CyberGym RL: ASan/MSan Stack Trace & Patch Synthesis (arvo:{10000 + idx % 9000}) | ★{stars:.2f} | StackDepth L={hops}] "
+                f"AddressSanitizer reports `heap-buffer-overflow` across a {hops}-frame call stack (`#0 parse_chunk -> ... -> #{hops - 1} fuzz_entry`): "
+                f"buffer allocation reserves `slots = {cap_elems}` elements of `elem_size = {elem_sz}` bytes, but omits the mandatory Tier-{t_val} "
+                f"frame header of `header = {header_bytes}` bytes. Decoy sanitizer warnings (R1..R{num_red_herrings}) cite benign stack shadow address `{oob_read_addr}`.\n"
+                f"#Q$# [code] Isolate the root-cause allocation defect across the {hops} stack frames in `#T$#`, and implement the patched allocator size `def solve(slots, elem_size):` in `#A$#` that returns `slots * elem_size + {header_bytes}`."
+            )
+            harness_h = (
+                f"assert solve({cap_elems}, {elem_sz}) == {safe_bytes} "
+                f"and solve(0, {elem_sz}) == {header_bytes}"
+            )
+            gold_t = (
+                f"Discarding the {num_red_herrings} benign shadow addresses ({oob_read_addr}), the {hops}-frame ASan trace shows "
+                f"payload size {cap_elems} * {elem_sz} = {unpatched_bytes} bytes must include the {header_bytes}-byte header, "
+                f"giving {unpatched_bytes} + {header_bytes} = {safe_bytes} bytes."
+            )
+            gold_a = (
+                f"def solve(slots, elem_size):\n"
+                f"    return slots * elem_size + {header_bytes}"
+            )
+            d1_t = f"We return the unpatched allocation {unpatched_bytes} without the {header_bytes}-byte frame header."
+            d1_a = (
+                "def solve(slots, elem_size):\n"
+                "    return slots * elem_size"
+            )
+            d2_t = f"We subtract the header size {header_bytes} causing an integer underflow."
+            d2_a = (
+                f"def solve(slots, elem_size):\n"
+                f"    return slots * elem_size - {header_bytes}"
+            )
+            hack_a = "def solve(slots, elem_size):\n    return 0"
+            default_scaffold = "abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 4:
+            # 52: PhD Cybersecurity RL (Vyber07 PTES / OWASP / NIST Attack-Graph & Mitigation)
+            raw_exposure = a * b
+            controls_applied = c
+            control_weight = 2 + (t_val % 3)
+            mitigated_delta = controls_applied * control_weight
+            tier_hardening = (t_val - 1) * 2
+            residual_score = raw_exposure + tier_hardening - mitigated_delta
+            if residual_score <= 0:
+                raw_exposure = (a + controls_applied) * b + mitigated_delta + 5
+                residual_score = raw_exposure + tier_hardening - mitigated_delta
+            honeypot_score = raw_exposure + mitigated_delta + 17
+            unhardened_score = raw_exposure - mitigated_delta
+            task_id = f"cybersec_phd_ptes_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [PhD Cybersecurity RL (PTES / OWASP / NIST SP 800-115) | ★{stars:.2f} | KillChainHops L={hops} | RedHerrings={num_red_herrings}] "
+                f"During a {hops}-phase PTES purple-team engagement, initial attack-surface exposure is `{raw_exposure}` (`{a}` attack vectors x `{b}` severity weight), "
+                f"plus Tier-{t_val} lateral-movement surface `+{tier_hardening}`. Deploying `{controls_applied}` NIST SP 800-53 defense-in-depth controls "
+                f"(each reducing exposure by `{control_weight}` units) subtracts `{controls_applied} * {control_weight}` from the total exposure. "
+                f"Deception Decoys (R1..R{num_red_herrings}): Canary honeypot telemetry logs fake exposure `{honeypot_score}` and must be excluded.\n"
+                f"#Q$# [deduction] Exclude the canary honeypot decoys, compute the exact residual risk score in `#T$#`, and state the residual risk in lowercase with no commas, at least 6 words, including the keyword `mitigated`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:mitigated;exact_int:{residual_score}"
+            gold_t = (
+                f"Excluding the {num_red_herrings} canary honeypots ({honeypot_score}), total surface is {raw_exposure} + {tier_hardening} = {raw_exposure + tier_hardening}, "
+                f"and defense-in-depth controls reduce risk by {controls_applied} * {control_weight} = {mitigated_delta}, leaving {raw_exposure + tier_hardening} - {mitigated_delta} = {residual_score}."
+            )
+            gold_a = f"after defense controls the mitigated residual risk score is {residual_score}"
+            d1_t = f"We include the canary honeypot decoy score {honeypot_score}."
+            d1_a = f"after defense controls the mitigated residual risk score is {honeypot_score}"
+            d2_t = f"We omit the lateral surface +{tier_hardening} and report {unhardened_score}."
+            d2_a = f"After Defense, Controls The Mitigated Score Is {unhardened_score}"
+            hack_a = "0"
+            default_scaffold = "abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 5:
+            # 53: Infinite-Horizon Recursive Terminal <-> Tool <-> Sandbox Loop (L -> inf)
+            p_mod = 101 + 2 * (idx % 20)
+            gain_k = 2 + (idx % 3)
+            tool_offset = b + (t_val - 1)
+            state_cur = a
+            state_one = (a * gain_k + tool_offset) % p_mod
+            trace_steps: list[str] = []
+            for h_i in range(1, hops + 1):
+                state_next = (state_cur * gain_k + tool_offset) % p_mod
+                if h_i <= 2 or h_i == hops:
+                    trace_steps.append(
+                        f"hop {h_i}: terminal_probe({state_cur}) -> tool_delta(({state_cur} * {gain_k} + {tool_offset}) mod {p_mod}) = {state_next}"
+                    )
+                state_cur = state_next
+            final_sandbox_state = state_cur
+            task_id = f"inf_agentic_loop_t{t_val}_L{hops}_{a}_{gain_k}_{tool_offset}_{p_mod}_{idx}"
+            prompt_q = (
+                f"#U$# [Infinite-Recursive Terminal <-> Tool Sandbox Loop | ★{stars:.2f} | Depth L={hops} | Mods={'+'.join(mods)}] "
+                f"At each recursive hop `1..steps`, the sandbox agent runs terminal probe `s <- (s * {gain_k} + {tool_offset}) % {p_mod}` starting from `s0 = {a}` "
+                f"(while ignoring `{num_red_herrings}` read-only `/proc` decoy descriptors). "
+                f"Implement `def solve(s, steps):` in Python that executes `steps` recursive terminal-tool transitions.\n"
+                f"#Q$# [infinite_recursion] Unroll the {hops}-hop terminal-tool trajectory in `#T$#` and implement `def solve(s, steps):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({a}, {hops}) == {final_sandbox_state} "
+                f"and solve({a}, 1) == {state_one} "
+                f"and solve({a}, 0) == {a}"
+            )
+            gold_t = (
+                f"Starting from sandbox state s0 = {a}, we iterate s = (s * {gain_k} + {tool_offset}) mod {p_mod} across {hops} recursive terminal-tool hops: "
+                + "; ".join(trace_steps)
+                + f", converging to terminal state {final_sandbox_state}."
+            )
+            gold_a = (
+                f"def solve(s, steps):\n"
+                f"    for _ in range(steps):\n"
+                f"        s = (s * {gain_k} + {tool_offset}) % {p_mod}\n"
+                f"    return s"
+            )
+            d1_t = f"We execute only steps - 1 recursive tool transitions and halt early."
+            d1_a = (
+                f"def solve(s, steps):\n"
+                f"    for _ in range(max(0, steps - 1)):\n"
+                f"        s = (s * {gain_k} + {tool_offset}) % {p_mod}\n"
+                f"    return s"
+            )
+            d2_t = f"We subtract {tool_offset} instead of adding inside the sandbox transition loop."
+            d2_a = (
+                f"def solve(s, steps):\n"
+                f"    for _ in range(steps):\n"
+                f"        s = (s * {gain_k} - {tool_offset}) % {p_mod}\n"
+                f"    return s"
+            )
+            hack_a = "def solve(s, steps):\n    return 0"
+            default_scaffold = "induction -> abstraction -> deduction -> decision -> metacognition"
+
+        elif m_id == 6:
+            # 54: Cross-Skill Agentic Mixing I (Terminal Triage + Tool Call + CyberGym Patch)
+            crash_frames = a * b
+            tool_cve_offset = c * 2 + (t_val - 1) * 3
+            patched_guard = crash_frames + tool_cve_offset
+            decoy_frame = crash_frames - c + 41
+            x_probe = 3
+            expected_probe = x_probe * patched_guard
+            x_eval = 5 + (t_val % 4)
+            expected_eval = x_eval * patched_guard
+            task_id = f"mix_term_tool_cybergym_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Cross-Skill Agentic I: Terminal + Tool + CyberGym Patch | ★{stars:.2f} | Hops L={hops} | RedHerrings={num_red_herrings}] "
+                f"Stage 1 (POSIX Terminal Triage): `grep -c 'ASAN_TRAP'` across `{a}` crash logs with `{b}` frames each isolates baseline offset `{a} * {b}` (filtering decoy core dump `{decoy_frame}`). "
+                f"Stage 2 (Tool-Use CVE Schema Lookup): Calling `get_cve_alignment(tier={t_val})` returns required guard padding `+{tool_cve_offset}`, yielding `guard_stride = {a} * {b} + {tool_cve_offset}`. "
+                f"Stage 3 (CyberGym Patch Synthesis): Implement `def solve(chunks):` returning `chunks * guard_stride`.\n"
+                f"#Q$# [code] Chain POSIX terminal triage, tool schema lookup, and CyberGym patch synthesis in `#T$# -> #A$#`."
+            )
+            harness_h = f"assert solve({x_eval}) == {expected_eval} and solve({x_probe}) == {expected_probe}"
+            gold_t = (
+                f"Stage 1 filters decoy core dump {decoy_frame} and computes baseline frames {a} * {b} = {crash_frames}. "
+                f"Stage 2 adds the CVE tool padding {crash_frames} + {tool_cve_offset} = {patched_guard}. "
+                f"Stage 3 implements solve(chunks) = chunks * {patched_guard}, verifying {x_eval} * {patched_guard} = {expected_eval}."
+            )
+            gold_a = f"def solve(chunks):\n    return chunks * {patched_guard}"
+            d1_t = f"We use the decoy core dump {decoy_frame} instead of {patched_guard}."
+            d1_a = f"def solve(chunks):\n    return chunks * {decoy_frame}"
+            d2_t = f"We omit the Stage 2 CVE tool padding {tool_cve_offset}."
+            d2_a = f"def solve(chunks):\n    return chunks * {crash_frames}"
+            hack_a = "def solve(chunks):\n    return 0"
+            default_scaffold = "abduction -> induction -> deduction -> decision -> metacognition"
+
+        else:
+            # 55: Cross-Skill Agentic Mixing II (Computer-Use DOM + Sherlockian Honeypot Elimination + CyberSec Hardening)
+            dom_nodes = a * b
+            csp_delta = c * (2 + (t_val % 3))
+            verified_policy_id = dom_nodes + csp_delta + (t_val - 1) * 4
+            csrf_honeypot_id = dom_nodes - c + 73
+            task_id = f"mix_comp_cybersec_sherlock_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Cross-Skill Agentic II: Computer-Use DOM + Sherlock + CyberSec | ★{stars:.2f} | Hops L={hops} | RedHerrings={num_red_herrings}] "
+                f"Stage 1 (Computer-Use DOM Audit): Inspecting the browser `AXTree` across `{a}` origins with `{b}` scripts each yields baseline policy index `{a} * {b}`. "
+                f"Stage 2 (Sherlockian Honeypot Elimination): Negative evidence eliminates `{num_red_herrings}` spoofed CSRF honeypot tokens (`{csrf_honeypot_id}`) and confirms CSP nonce delta `{c} * {2 + (t_val % 3)}`. "
+                f"Stage 3 (PhD CyberSec Hardening): Add Tier-{t_val} HSTS/SRI hardening offset `+{(t_val - 1) * 4}` to derive the canonical security policy ID.\n"
+                f"#Q$# [deduction] Combine Computer-Use DOM audit, Sherlockian honeypot elimination, and CyberSec hardening in `#T$#`, and state the canonical policy ID in lowercase with no commas, at least 6 words, including the keyword `hardened`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:hardened;exact_int:{verified_policy_id}"
+            gold_t = (
+                f"Stage 1 computes DOM baseline {a} * {b} = {dom_nodes}. "
+                f"Stage 2 eliminates CSRF honeypot {csrf_honeypot_id} and computes CSP delta {c} * {2 + (t_val % 3)} = {csp_delta}, summing {dom_nodes} + {csp_delta} = {dom_nodes + csp_delta}. "
+                f"Stage 3 adds hardening offset {dom_nodes + csp_delta} + {(t_val - 1) * 4} = {verified_policy_id}."
+            )
+            gold_a = f"the hardened computer use cybersecurity policy identifier is {verified_policy_id}"
+            d1_t = f"We select the spoofed CSRF honeypot token {csrf_honeypot_id}."
+            d1_a = f"the hardened computer use cybersecurity policy identifier is {csrf_honeypot_id}"
+            d2_t = f"We subtract the CSP delta {dom_nodes} - {csp_delta} = {dom_nodes - csp_delta}."
+            d2_a = f"The Hardened, Cybersecurity Policy Identifier Is {dom_nodes - csp_delta}"
+            hack_a = "0"
+            default_scaffold = "analogy -> abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        base_cands = (
+            f"#T$# {gold_t}\n#A$# {gold_a}",
+            f"#T$# {d1_t}\n#A$# {d1_a}",
+            f"#T$# {d2_t}\n#A$# {d2_a}",
+            f"#T$# Default fallback.\n#A$# {hack_a}",
+        )
+        base_scores = (1.0, 0.20, 0.10, 0.0)
+        order = [0, 1, 2, 3]
+        shift = idx % 4
+        order[0], order[shift] = order[shift], order[0]
+        p_cands = tuple(base_cands[i] for i in order)
+        p_scores = tuple(base_scores[i] for i in order)
+        g_idx = order.index(0)
+        self._last_task_kinds[task_id] = kind_slot
+        cached_s = self.scaffold_cache.get(task_id, default=default_scaffold)
+        return OrnithTask(
+            task_id=task_id,
+            domain=domain_name,
+            prompt_q=prompt_q,
+            harness_h=harness_h,
+            scaffold_s=cached_s,
+            candidate_rollouts=p_cands,
+            harness_scores=p_scores,
+            gold_index=g_idx,
+            gold_thought=gold_t,
+            gold_answer=gold_a,
+            skill=skill_name,
+            star_difficulty=stars,
+            recursion_depth=hops,
+            difficulty_mods=mods,
+        )
+
     def _synthesize_sherlock_reasoning_task(
         self,
         idx: int,
@@ -2028,6 +2426,387 @@ class OrnithSelfImprover:
             d2_a = f"def solve(x):\n    return {slope_k + 1} * x + {offset_m}"
             hack_a = "def solve(x):\n    return 0"
             default_scaffold = "induction -> abstraction -> deduction -> decision -> metacognition"
+
+        base_cands = (
+            f"#T$# {gold_t}\n#A$# {gold_a}",
+            f"#T$# {d1_t}\n#A$# {d1_a}",
+            f"#T$# {d2_t}\n#A$# {d2_a}",
+            f"#T$# Default fallback.\n#A$# {hack_a}",
+        )
+        base_scores = (1.0, 0.20, 0.10, 0.0)
+        order = [0, 1, 2, 3]
+        shift = idx % 4
+        order[0], order[shift] = order[shift], order[0]
+        p_cands = tuple(base_cands[i] for i in order)
+        p_scores = tuple(base_scores[i] for i in order)
+        g_idx = order.index(0)
+        self._last_task_kinds[task_id] = kind_slot
+        cached_s = self.scaffold_cache.get(task_id, default=default_scaffold)
+        return OrnithTask(
+            task_id=task_id,
+            domain=domain_name,
+            prompt_q=prompt_q,
+            harness_h=harness_h,
+            scaffold_s=cached_s,
+            candidate_rollouts=p_cands,
+            harness_scores=p_scores,
+            gold_index=g_idx,
+            gold_thought=gold_t,
+            gold_answer=gold_a,
+            skill=skill_name,
+            star_difficulty=stars,
+            recursion_depth=hops,
+            difficulty_mods=mods,
+        )
+
+    def _synthesize_agentic_tool_terminal_task(
+        self,
+        idx: int,
+        *,
+        tier: int = 1,
+        mode: int = 0,
+    ) -> OrnithTask:
+        """Synthesize an Infinite-Recursive Agentic Computer-Use, Tool-Use, Terminal, CyberGym, or PhD Cybersecurity RL task (`kind = 48 .. 55`):
+
+        - `mode = 0` (`48`, `terminal.posix_pipeline_state_machine`):
+          Infinite-recursive POSIX shell pipeline (`find | grep -v | awk | xargs`) across $L$ chained command stages with zombie/permission-denied stderr traps.
+        - `mode = 1` (`49`, `tool_use.multi_hop_schema_dag`):
+          Infinite-recursive multi-hop JSON tool-calling DAG (`tool_1 -> obs_1 -> ... -> tool_L`) with rate-limited/schema-invalid decoy tool responses.
+        - `mode = 2` (`50`, `computer_use.gui_dom_accessibility_tree`):
+          Infinite-recursive GUI / DOM Accessibility-Tree (`AXTree`) viewport navigation & bounding-box click/scroll/type trajectory with aria-disabled overlay traps.
+        - `mode = 3` (`51`, `cybergym.vuln_sanitizer_root_cause_patch`):
+          Infinite-recursive CyberGym AddressSanitizer/MemorySanitizer crash stack triage (`#0 .. #L`) and C/Python bounds-check patch synthesis.
+        - `mode = 4` (`52`, `cybersec.ptes_owasp_attack_graph_mitigation`):
+          Infinite-recursive PhD Cybersecurity (`Vyber07`) PTES/OWASP/NIST attack-graph traversal, honeypot filtering, and residual CVSS mitigation verification.
+        - `mode = 5` (`53`, `recursion.infinite_terminal_tool_sandbox_loop`):
+          Unbounded $L$-hop (`L = 3 + tier - 1 -> inf`) recursive Terminal <-> Tool <-> Sandbox fixed-point transducer loop.
+        - `mode = 6` (`54`, `mixing.cross_skill_terminal_tool_cybergym`):
+          Cross-Skill Agentic Mixing I: POSIX Terminal Crash Triage + Structured Tool API Lookup + CyberGym Bounds Patch Synthesis.
+        - `mode = 7` (`55`, `mixing.cross_skill_computer_use_cybersec_deduction`):
+          Cross-Skill Agentic Mixing II: Computer-Use DOM/CSP Inspection + Sherlockian Honeypot Elimination + PhD CyberSec Policy Hardening.
+        """
+        t_val = max(1, int(tier))
+        m_id = int(mode) % 8
+        kind_slot = 48 + m_id
+        num_red_herrings = 1 + t_val // 2
+        hops = min(64, 3 + (t_val - 1))
+        mods = self.env_architect.difficulty_mods(kind_slot)
+        stars = compute_star_difficulty(t_val, recursion_depth=hops, mods=mods)
+        skill_name, domain_name = self.env_architect.skill_and_domain(kind_slot)
+
+        a = 4 + ((idx * 7 + self._rng_seed) % (13 + 3 * t_val))
+        b = 3 + ((idx * 11 + self._rng_seed) % (9 + 2 * t_val))
+        c = 2 + ((idx * 5 + t_val) % (7 + t_val))
+
+        if m_id == 0:
+            # 48: Terminal RL - Infinite-Recursive POSIX Pipeline State Machine
+            valid_lines = a * b
+            pipe_filter_gain = (t_val - 1) * 3
+            per_cycle = valid_lines + pipe_filter_gain
+            total_stdout = per_cycle * c
+            decoy_zombie_lines = (a + c) * 5 + 7
+            wrong_stdout = (valid_lines - pipe_filter_gain) * c
+            task_id = f"term_posix_pipe_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Terminal RL: Recursive POSIX Pipeline | ★{stars:.2f} | Stages L={hops} | RedHerrings={num_red_herrings}] "
+                f"A {hops}-stage POSIX shell pipeline (`find /var/log/cluster -type f -perm 0640 | grep -v 'zombie_decoy' | awk '{{sum+=$3}}' | xargs`) "
+                f"processes `shards = {a}` active daemon shards, each emitting `records = {b}` verified stdout lines per batch, "
+                f"plus Tier-{t_val} awk aggregation bonus `+{pipe_filter_gain}` per cycle across `cycles = {c}` recursive cron passes. "
+                f"Stderr traps (R1..R{num_red_herrings}): `{decoy_zombie_lines}` lines from `Permission denied (exit 13)` and broken symlinks `/proc/zombie` must be redirected to `/dev/null`.\n"
+                f"#Q$# [code] Filter out the stderr zombie traps, trace the {hops}-stage POSIX pipeline in `#T$#`, and implement `def solve(shards, records, cycles):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({a}, {b}, {c}) == {total_stdout} "
+                f"and solve(0, {b}, {c}) == {pipe_filter_gain * c}"
+            )
+            gold_t = (
+                f"First we discard the {num_red_herrings} stderr permission-denied traps ({decoy_zombie_lines} lines). "
+                f"Stage 1 multiplies active shards {a} * {b} = {valid_lines} lines, Stage 2 adds the awk pipeline bonus {valid_lines} + {pipe_filter_gain} = {per_cycle}, "
+                f"and Stage 3 multiplies across {c} cron cycles {per_cycle} * {c} = {total_stdout}."
+            )
+            gold_a = (
+                f"def solve(shards, records, cycles):\n"
+                f"    return (shards * records + {pipe_filter_gain}) * cycles"
+            )
+            d1_t = f"We subtract the awk bonus to get {wrong_stdout}."
+            d1_a = (
+                f"def solve(shards, records, cycles):\n"
+                f"    return (shards * records - {pipe_filter_gain}) * cycles"
+            )
+            d2_t = f"We include the stderr zombie decoy lines {decoy_zombie_lines} instead of multiplying by cycles."
+            d2_a = (
+                f"def solve(shards, records, cycles):\n"
+                f"    return shards * records + cycles"
+            )
+            hack_a = "def solve(shards, records, cycles):\n    return 0"
+            default_scaffold = "abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 1:
+            # 49: Tool Use RL - Infinite-Recursive Multi-Hop Schema DAG
+            hop_base = a * b
+            hop_step = c + (t_val - 1) * 2
+            final_quota = hop_base + hops * hop_step
+            decoy_429_quota = hop_base - c + 99
+            early_halt_quota = hop_base + (hops - 1) * hop_step
+            task_id = f"tool_schema_dag_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Tool-Use RL: {hops}-Hop Function-Calling Schema DAG | ★{stars:.2f} | Hops L={hops} | RedHerrings={num_red_herrings}] "
+                f"An autonomous agent executes a {hops}-hop tool DAG: "
+                f"`Tool_0: get_cluster_baseline(nodes={a}, pods={b}) -> {{\"base_quota\": {a} * {b}}}`; "
+                f"followed by `{hops}` recursive invocations of `Tool_k: expand_schema_quota(prev_quota, delta={hop_step})` which adds `{hop_step}` at each hop `k = 1..{hops}`. "
+                f"Decoy Tool Responses (R1..R{num_red_herrings}): Deprecated endpoint `legacy_quota_v1` returns `HTTP 429 TooManyRequests` with stale payload `{decoy_429_quota}` and must be ignored.\n"
+                f"#Q$# [deduction] Reject the HTTP 429 decoy tool responses, trace all {hops} tool-call hops in `#T$#`, and emit a valid JSON tool-call object containing key `\"tool_call\"` and the exact terminal integer quota."
+            )
+            harness_h = f"ifeval:json_valid;keyword:tool_call;exact_int:{final_quota}"
+            gold_t = (
+                f"We ignore the {num_red_herrings} deprecated HTTP 429 tool responses ({decoy_429_quota}). "
+                f"Tool_0 computes base_quota {a} * {b} = {hop_base}, and {hops} recursive Tool_k calls add {hops} * {hop_step} = {hops * hop_step}, "
+                f"yielding {hop_base} + {hops * hop_step} = {final_quota} for the final commit_quota tool_call."
+            )
+            gold_a = f'{{"tool_call": "commit_quota", "verified_quota": {final_quota}, "hops": {hops}}}'
+            d1_t = f"We halt one tool hop early after {hops - 1} calls at {early_halt_quota}."
+            d1_a = f'{{"tool_call": "commit_quota", "verified_quota": {early_halt_quota}, "hops": {hops - 1}}}'
+            d2_t = f"We use the stale HTTP 429 payload {decoy_429_quota} in malformed JSON."
+            d2_a = f'{{tool_call: "legacy_quota_v1", verified_quota: {decoy_429_quota}}}'
+            hack_a = "0"
+            default_scaffold = "association -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 2:
+            # 50: Computer Use RL - GUI / DOM Accessibility-Tree Viewport & Action-Space Trajectory
+            x0 = a * 10
+            dx_per_hop = b * 4 + (t_val - 1) * 2
+            half_width = c * 3
+            target_x = x0 + hops * dx_per_hop + half_width
+            trap_overlay_x = x0 + 999
+            no_center_x = x0 + hops * dx_per_hop
+            task_id = f"computer_use_dom_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Computer-Use RL: GUI/DOM Accessibility-Tree Navigation | ★{stars:.2f} | Hops L={hops} | RedHerrings={num_red_herrings}] "
+                f"A desktop browser agent inspects the Accessibility Tree (`AXTree`) starting at viewport anchor `x0 = {x0}`. "
+                f"Across `{hops}` sequential `scroll_and_focus` actions, each hop shifts the active container by `dx = {dx_per_hop}` px, "
+                f"landing on target button `#submit-patch` with bounding-box half-width `w_half = {half_width}` px (click center `x_click = x0 + {hops} * dx + w_half`). "
+                f"DOM Traps (R1..R{num_red_herrings}): Invisible modal overlay `div[aria-disabled='true'][style*='opacity:0']` at `x = {trap_overlay_x}` intercepts naive clicks and must be bypassed.\n"
+                f"#Q$# [code] Bypass the aria-disabled overlay traps, trace the {hops}-hop AXTree bounding-box trajectory in `#T$#`, and implement `def solve(x0, hops, dx, w_half):` returning the exact click coordinate `x_click`."
+            )
+            harness_h = (
+                f"assert solve({x0}, {hops}, {dx_per_hop}, {half_width}) == {target_x} "
+                f"and solve({x0}, 0, {dx_per_hop}, {half_width}) == {x0 + half_width}"
+            )
+            gold_t = (
+                f"Filtering out the {num_red_herrings} invisible aria-disabled overlays at {trap_overlay_x}, "
+                f"we advance {hops} * {dx_per_hop} = {hops * dx_per_hop} from anchor {x0} to get {no_center_x}, "
+                f"then add half-width {no_center_x} + {half_width} = {target_x} for the exact click coordinate."
+            )
+            gold_a = (
+                "def solve(x0, hops, dx, w_half):\n"
+                "    return x0 + hops * dx + w_half"
+            )
+            d1_t = f"We click the left edge {no_center_x} without adding the bounding-box half-width {half_width}."
+            d1_a = (
+                "def solve(x0, hops, dx, w_half):\n"
+                "    return x0 + hops * dx"
+            )
+            d2_t = f"We subtract the viewport delta and half-width."
+            d2_a = (
+                "def solve(x0, hops, dx, w_half):\n"
+                "    return x0 - hops * dx - w_half"
+            )
+            hack_a = "def solve(x0, hops, dx, w_half):\n    return 0"
+            default_scaffold = "abduction -> association -> decision -> deduction -> evaluation -> metacognition"
+
+        elif m_id == 3:
+            # 51: CyberGym RL - Sanitizer Crash Stack Triage & Memory-Safety Bounds Patch Synthesis
+            elem_sz = (c % 4) + 2
+            header_bytes = (t_val - 1) * 4 + 8
+            cap_elems = a + b
+            safe_bytes = cap_elems * elem_sz + header_bytes
+            oob_read_addr = safe_bytes + 64
+            unpatched_bytes = cap_elems * elem_sz
+            task_id = f"cybergym_asan_patch_t{t_val}_L{hops}_{a}_{b}_{elem_sz}_{idx}"
+            prompt_q = (
+                f"#U$# [CyberGym RL: ASan/MSan Stack Trace & Patch Synthesis (arvo:{10000 + idx % 9000}) | ★{stars:.2f} | StackDepth L={hops}] "
+                f"AddressSanitizer reports `heap-buffer-overflow` across a {hops}-frame call stack (`#0 parse_chunk -> ... -> #{hops - 1} fuzz_entry`): "
+                f"buffer allocation reserves `slots = {cap_elems}` elements of `elem_size = {elem_sz}` bytes, but omits the mandatory Tier-{t_val} "
+                f"frame header of `header = {header_bytes}` bytes. Decoy sanitizer warnings (R1..R{num_red_herrings}) cite benign stack shadow address `{oob_read_addr}`.\n"
+                f"#Q$# [code] Isolate the root-cause allocation defect across the {hops} stack frames in `#T$#`, and implement the patched allocator size `def solve(slots, elem_size):` in `#A$#` that returns `slots * elem_size + {header_bytes}`."
+            )
+            harness_h = (
+                f"assert solve({cap_elems}, {elem_sz}) == {safe_bytes} "
+                f"and solve(0, {elem_sz}) == {header_bytes}"
+            )
+            gold_t = (
+                f"Discarding the {num_red_herrings} benign shadow addresses ({oob_read_addr}), the {hops}-frame ASan trace shows "
+                f"payload size {cap_elems} * {elem_sz} = {unpatched_bytes} bytes must include the {header_bytes}-byte header, "
+                f"giving {unpatched_bytes} + {header_bytes} = {safe_bytes} bytes."
+            )
+            gold_a = (
+                f"def solve(slots, elem_size):\n"
+                f"    return slots * elem_size + {header_bytes}"
+            )
+            d1_t = f"We return the unpatched allocation {unpatched_bytes} without the {header_bytes}-byte frame header."
+            d1_a = (
+                "def solve(slots, elem_size):\n"
+                "    return slots * elem_size"
+            )
+            d2_t = f"We subtract the header size {header_bytes} causing an integer underflow."
+            d2_a = (
+                f"def solve(slots, elem_size):\n"
+                f"    return slots * elem_size - {header_bytes}"
+            )
+            hack_a = "def solve(slots, elem_size):\n    return 0"
+            default_scaffold = "abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 4:
+            # 52: PhD Cybersecurity RL (Vyber07 PTES / OWASP / NIST Attack-Graph & Mitigation)
+            raw_exposure = a * b
+            controls_applied = c
+            control_weight = 2 + (t_val % 3)
+            mitigated_delta = controls_applied * control_weight
+            tier_hardening = (t_val - 1) * 2
+            residual_score = raw_exposure + tier_hardening - mitigated_delta
+            if residual_score <= 0:
+                raw_exposure = (a + controls_applied) * b + mitigated_delta + 5
+                residual_score = raw_exposure + tier_hardening - mitigated_delta
+            honeypot_score = raw_exposure + mitigated_delta + 17
+            unhardened_score = raw_exposure - mitigated_delta
+            task_id = f"cybersec_phd_ptes_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [PhD Cybersecurity RL (PTES / OWASP / NIST SP 800-115) | ★{stars:.2f} | KillChainHops L={hops} | RedHerrings={num_red_herrings}] "
+                f"During a {hops}-phase PTES purple-team engagement, initial attack-surface exposure is `{raw_exposure}` (`{a}` attack vectors x `{b}` severity weight), "
+                f"plus Tier-{t_val} lateral-movement surface `+{tier_hardening}`. Deploying `{controls_applied}` NIST SP 800-53 defense-in-depth controls "
+                f"(each reducing exposure by `{control_weight}` units) subtracts `{controls_applied} * {control_weight}` from the total exposure. "
+                f"Deception Decoys (R1..R{num_red_herrings}): Canary honeypot telemetry logs fake exposure `{honeypot_score}` and must be excluded.\n"
+                f"#Q$# [deduction] Exclude the canary honeypot decoys, compute the exact residual risk score in `#T$#`, and state the residual risk in lowercase with no commas, at least 6 words, including the keyword `mitigated`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:mitigated;exact_int:{residual_score}"
+            gold_t = (
+                f"Excluding the {num_red_herrings} canary honeypots ({honeypot_score}), total surface is {raw_exposure} + {tier_hardening} = {raw_exposure + tier_hardening}, "
+                f"and defense-in-depth controls reduce risk by {controls_applied} * {control_weight} = {mitigated_delta}, leaving {raw_exposure + tier_hardening} - {mitigated_delta} = {residual_score}."
+            )
+            gold_a = f"after defense controls the mitigated residual risk score is {residual_score}"
+            d1_t = f"We include the canary honeypot decoy score {honeypot_score}."
+            d1_a = f"after defense controls the mitigated residual risk score is {honeypot_score}"
+            d2_t = f"We omit the lateral surface +{tier_hardening} and report {unhardened_score}."
+            d2_a = f"After Defense, Controls The Mitigated Score Is {unhardened_score}"
+            hack_a = "0"
+            default_scaffold = "abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 5:
+            # 53: Infinite-Horizon Recursive Terminal <-> Tool <-> Sandbox Loop (L -> inf)
+            p_mod = 101 + 2 * (idx % 20)
+            gain_k = 2 + (idx % 3)
+            tool_offset = b + (t_val - 1)
+            state_cur = a
+            state_one = (a * gain_k + tool_offset) % p_mod
+            trace_steps: list[str] = []
+            for h_i in range(1, hops + 1):
+                state_next = (state_cur * gain_k + tool_offset) % p_mod
+                if h_i <= 2 or h_i == hops:
+                    trace_steps.append(
+                        f"hop {h_i}: terminal_probe({state_cur}) -> tool_delta(({state_cur} * {gain_k} + {tool_offset}) mod {p_mod}) = {state_next}"
+                    )
+                state_cur = state_next
+            final_sandbox_state = state_cur
+            task_id = f"inf_agentic_loop_t{t_val}_L{hops}_{a}_{gain_k}_{tool_offset}_{p_mod}_{idx}"
+            prompt_q = (
+                f"#U$# [Infinite-Recursive Terminal <-> Tool Sandbox Loop | ★{stars:.2f} | Depth L={hops} | Mods={'+'.join(mods)}] "
+                f"At each recursive hop `1..steps`, the sandbox agent runs terminal probe `s <- (s * {gain_k} + {tool_offset}) % {p_mod}` starting from `s0 = {a}` "
+                f"(while ignoring `{num_red_herrings}` read-only `/proc` decoy descriptors). "
+                f"Implement `def solve(s, steps):` in Python that executes `steps` recursive terminal-tool transitions.\n"
+                f"#Q$# [infinite_recursion] Unroll the {hops}-hop terminal-tool trajectory in `#T$#` and implement `def solve(s, steps):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({a}, {hops}) == {final_sandbox_state} "
+                f"and solve({a}, 1) == {state_one} "
+                f"and solve({a}, 0) == {a}"
+            )
+            gold_t = (
+                f"Starting from sandbox state s0 = {a}, we iterate s = (s * {gain_k} + {tool_offset}) mod {p_mod} across {hops} recursive terminal-tool hops: "
+                + "; ".join(trace_steps)
+                + f", converging to terminal state {final_sandbox_state}."
+            )
+            gold_a = (
+                f"def solve(s, steps):\n"
+                f"    for _ in range(steps):\n"
+                f"        s = (s * {gain_k} + {tool_offset}) % {p_mod}\n"
+                f"    return s"
+            )
+            d1_t = f"We execute only steps - 1 recursive tool transitions and halt early."
+            d1_a = (
+                f"def solve(s, steps):\n"
+                f"    for _ in range(max(0, steps - 1)):\n"
+                f"        s = (s * {gain_k} + {tool_offset}) % {p_mod}\n"
+                f"    return s"
+            )
+            d2_t = f"We subtract {tool_offset} instead of adding inside the sandbox transition loop."
+            d2_a = (
+                f"def solve(s, steps):\n"
+                f"    for _ in range(steps):\n"
+                f"        s = (s * {gain_k} - {tool_offset}) % {p_mod}\n"
+                f"    return s"
+            )
+            hack_a = "def solve(s, steps):\n    return 0"
+            default_scaffold = "induction -> abstraction -> deduction -> decision -> metacognition"
+
+        elif m_id == 6:
+            # 54: Cross-Skill Agentic Mixing I (Terminal Triage + Tool Call + CyberGym Patch)
+            crash_frames = a * b
+            tool_cve_offset = c * 2 + (t_val - 1) * 3
+            patched_guard = crash_frames + tool_cve_offset
+            decoy_frame = crash_frames - c + 41
+            x_probe = 3
+            expected_probe = x_probe * patched_guard
+            x_eval = 5 + (t_val % 4)
+            expected_eval = x_eval * patched_guard
+            task_id = f"mix_term_tool_cybergym_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Cross-Skill Agentic I: Terminal + Tool + CyberGym Patch | ★{stars:.2f} | Hops L={hops} | RedHerrings={num_red_herrings}] "
+                f"Stage 1 (POSIX Terminal Triage): `grep -c 'ASAN_TRAP'` across `{a}` crash logs with `{b}` frames each isolates baseline offset `{a} * {b}` (filtering decoy core dump `{decoy_frame}`). "
+                f"Stage 2 (Tool-Use CVE Schema Lookup): Calling `get_cve_alignment(tier={t_val})` returns required guard padding `+{tool_cve_offset}`, yielding `guard_stride = {a} * {b} + {tool_cve_offset}`. "
+                f"Stage 3 (CyberGym Patch Synthesis): Implement `def solve(chunks):` returning `chunks * guard_stride`.\n"
+                f"#Q$# [code] Chain POSIX terminal triage, tool schema lookup, and CyberGym patch synthesis in `#T$# -> #A$#`."
+            )
+            harness_h = f"assert solve({x_eval}) == {expected_eval} and solve({x_probe}) == {expected_probe}"
+            gold_t = (
+                f"Stage 1 filters decoy core dump {decoy_frame} and computes baseline frames {a} * {b} = {crash_frames}. "
+                f"Stage 2 adds the CVE tool padding {crash_frames} + {tool_cve_offset} = {patched_guard}. "
+                f"Stage 3 implements solve(chunks) = chunks * {patched_guard}, verifying {x_eval} * {patched_guard} = {expected_eval}."
+            )
+            gold_a = f"def solve(chunks):\n    return chunks * {patched_guard}"
+            d1_t = f"We use the decoy core dump {decoy_frame} instead of {patched_guard}."
+            d1_a = f"def solve(chunks):\n    return chunks * {decoy_frame}"
+            d2_t = f"We omit the Stage 2 CVE tool padding {tool_cve_offset}."
+            d2_a = f"def solve(chunks):\n    return chunks * {crash_frames}"
+            hack_a = "def solve(chunks):\n    return 0"
+            default_scaffold = "abduction -> induction -> deduction -> decision -> metacognition"
+
+        else:
+            # 55: Cross-Skill Agentic Mixing II (Computer-Use DOM + Sherlockian Honeypot Elimination + CyberSec Hardening)
+            dom_nodes = a * b
+            csp_delta = c * (2 + (t_val % 3))
+            verified_policy_id = dom_nodes + csp_delta + (t_val - 1) * 4
+            csrf_honeypot_id = dom_nodes - c + 73
+            task_id = f"mix_comp_cybersec_sherlock_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Cross-Skill Agentic II: Computer-Use DOM + Sherlock + CyberSec | ★{stars:.2f} | Hops L={hops} | RedHerrings={num_red_herrings}] "
+                f"Stage 1 (Computer-Use DOM Audit): Inspecting the browser `AXTree` across `{a}` origins with `{b}` scripts each yields baseline policy index `{a} * {b}`. "
+                f"Stage 2 (Sherlockian Honeypot Elimination): Negative evidence eliminates `{num_red_herrings}` spoofed CSRF honeypot tokens (`{csrf_honeypot_id}`) and confirms CSP nonce delta `{c} * {2 + (t_val % 3)}`. "
+                f"Stage 3 (PhD CyberSec Hardening): Add Tier-{t_val} HSTS/SRI hardening offset `+{(t_val - 1) * 4}` to derive the canonical security policy ID.\n"
+                f"#Q$# [deduction] Combine Computer-Use DOM audit, Sherlockian honeypot elimination, and CyberSec hardening in `#T$#`, and state the canonical policy ID in lowercase with no commas, at least 6 words, including the keyword `hardened`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:hardened;exact_int:{verified_policy_id}"
+            gold_t = (
+                f"Stage 1 computes DOM baseline {a} * {b} = {dom_nodes}. "
+                f"Stage 2 eliminates CSRF honeypot {csrf_honeypot_id} and computes CSP delta {c} * {2 + (t_val % 3)} = {csp_delta}, summing {dom_nodes} + {csp_delta} = {dom_nodes + csp_delta}. "
+                f"Stage 3 adds hardening offset {dom_nodes + csp_delta} + {(t_val - 1) * 4} = {verified_policy_id}."
+            )
+            gold_a = f"the hardened computer use cybersecurity policy identifier is {verified_policy_id}"
+            d1_t = f"We select the spoofed CSRF honeypot token {csrf_honeypot_id}."
+            d1_a = f"the hardened computer use cybersecurity policy identifier is {csrf_honeypot_id}"
+            d2_t = f"We subtract the CSP delta {dom_nodes} - {csp_delta} = {dom_nodes - csp_delta}."
+            d2_a = f"The Hardened, Cybersecurity Policy Identifier Is {dom_nodes - csp_delta}"
+            hack_a = "0"
+            default_scaffold = "analogy -> abduction -> deduction -> decision -> evaluation -> metacognition"
 
         base_cands = (
             f"#T$# {gold_t}\n#A$# {gold_a}",
@@ -2479,6 +3258,387 @@ class OrnithSelfImprover:
             difficulty_mods=mods,
         )
 
+    def _synthesize_agentic_tool_terminal_task(
+        self,
+        idx: int,
+        *,
+        tier: int = 1,
+        mode: int = 0,
+    ) -> OrnithTask:
+        """Synthesize an Infinite-Recursive Agentic Computer-Use, Tool-Use, Terminal, CyberGym, or PhD Cybersecurity RL task (`kind = 48 .. 55`):
+
+        - `mode = 0` (`48`, `terminal.posix_pipeline_state_machine`):
+          Infinite-recursive POSIX shell pipeline (`find | grep -v | awk | xargs`) across $L$ chained command stages with zombie/permission-denied stderr traps.
+        - `mode = 1` (`49`, `tool_use.multi_hop_schema_dag`):
+          Infinite-recursive multi-hop JSON tool-calling DAG (`tool_1 -> obs_1 -> ... -> tool_L`) with rate-limited/schema-invalid decoy tool responses.
+        - `mode = 2` (`50`, `computer_use.gui_dom_accessibility_tree`):
+          Infinite-recursive GUI / DOM Accessibility-Tree (`AXTree`) viewport navigation & bounding-box click/scroll/type trajectory with aria-disabled overlay traps.
+        - `mode = 3` (`51`, `cybergym.vuln_sanitizer_root_cause_patch`):
+          Infinite-recursive CyberGym AddressSanitizer/MemorySanitizer crash stack triage (`#0 .. #L`) and C/Python bounds-check patch synthesis.
+        - `mode = 4` (`52`, `cybersec.ptes_owasp_attack_graph_mitigation`):
+          Infinite-recursive PhD Cybersecurity (`Vyber07`) PTES/OWASP/NIST attack-graph traversal, honeypot filtering, and residual CVSS mitigation verification.
+        - `mode = 5` (`53`, `recursion.infinite_terminal_tool_sandbox_loop`):
+          Unbounded $L$-hop (`L = 3 + tier - 1 -> inf`) recursive Terminal <-> Tool <-> Sandbox fixed-point transducer loop.
+        - `mode = 6` (`54`, `mixing.cross_skill_terminal_tool_cybergym`):
+          Cross-Skill Agentic Mixing I: POSIX Terminal Crash Triage + Structured Tool API Lookup + CyberGym Bounds Patch Synthesis.
+        - `mode = 7` (`55`, `mixing.cross_skill_computer_use_cybersec_deduction`):
+          Cross-Skill Agentic Mixing II: Computer-Use DOM/CSP Inspection + Sherlockian Honeypot Elimination + PhD CyberSec Policy Hardening.
+        """
+        t_val = max(1, int(tier))
+        m_id = int(mode) % 8
+        kind_slot = 48 + m_id
+        num_red_herrings = 1 + t_val // 2
+        hops = min(64, 3 + (t_val - 1))
+        mods = self.env_architect.difficulty_mods(kind_slot)
+        stars = compute_star_difficulty(t_val, recursion_depth=hops, mods=mods)
+        skill_name, domain_name = self.env_architect.skill_and_domain(kind_slot)
+
+        a = 4 + ((idx * 7 + self._rng_seed) % (13 + 3 * t_val))
+        b = 3 + ((idx * 11 + self._rng_seed) % (9 + 2 * t_val))
+        c = 2 + ((idx * 5 + t_val) % (7 + t_val))
+
+        if m_id == 0:
+            # 48: Terminal RL - Infinite-Recursive POSIX Pipeline State Machine
+            valid_lines = a * b
+            pipe_filter_gain = (t_val - 1) * 3
+            per_cycle = valid_lines + pipe_filter_gain
+            total_stdout = per_cycle * c
+            decoy_zombie_lines = (a + c) * 5 + 7
+            wrong_stdout = (valid_lines - pipe_filter_gain) * c
+            task_id = f"term_posix_pipe_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Terminal RL: Recursive POSIX Pipeline | ★{stars:.2f} | Stages L={hops} | RedHerrings={num_red_herrings}] "
+                f"A {hops}-stage POSIX shell pipeline (`find /var/log/cluster -type f -perm 0640 | grep -v 'zombie_decoy' | awk '{{sum+=$3}}' | xargs`) "
+                f"processes `shards = {a}` active daemon shards, each emitting `records = {b}` verified stdout lines per batch, "
+                f"plus Tier-{t_val} awk aggregation bonus `+{pipe_filter_gain}` per cycle across `cycles = {c}` recursive cron passes. "
+                f"Stderr traps (R1..R{num_red_herrings}): `{decoy_zombie_lines}` lines from `Permission denied (exit 13)` and broken symlinks `/proc/zombie` must be redirected to `/dev/null`.\n"
+                f"#Q$# [code] Filter out the stderr zombie traps, trace the {hops}-stage POSIX pipeline in `#T$#`, and implement `def solve(shards, records, cycles):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({a}, {b}, {c}) == {total_stdout} "
+                f"and solve(0, {b}, {c}) == {pipe_filter_gain * c}"
+            )
+            gold_t = (
+                f"First we discard the {num_red_herrings} stderr permission-denied traps ({decoy_zombie_lines} lines). "
+                f"Stage 1 multiplies active shards {a} * {b} = {valid_lines} lines, Stage 2 adds the awk pipeline bonus {valid_lines} + {pipe_filter_gain} = {per_cycle}, "
+                f"and Stage 3 multiplies across {c} cron cycles {per_cycle} * {c} = {total_stdout}."
+            )
+            gold_a = (
+                f"def solve(shards, records, cycles):\n"
+                f"    return (shards * records + {pipe_filter_gain}) * cycles"
+            )
+            d1_t = f"We subtract the awk bonus to get {wrong_stdout}."
+            d1_a = (
+                f"def solve(shards, records, cycles):\n"
+                f"    return (shards * records - {pipe_filter_gain}) * cycles"
+            )
+            d2_t = f"We include the stderr zombie decoy lines {decoy_zombie_lines} instead of multiplying by cycles."
+            d2_a = (
+                f"def solve(shards, records, cycles):\n"
+                f"    return shards * records + cycles"
+            )
+            hack_a = "def solve(shards, records, cycles):\n    return 0"
+            default_scaffold = "abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 1:
+            # 49: Tool Use RL - Infinite-Recursive Multi-Hop Schema DAG
+            hop_base = a * b
+            hop_step = c + (t_val - 1) * 2
+            final_quota = hop_base + hops * hop_step
+            decoy_429_quota = hop_base - c + 99
+            early_halt_quota = hop_base + (hops - 1) * hop_step
+            task_id = f"tool_schema_dag_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Tool-Use RL: {hops}-Hop Function-Calling Schema DAG | ★{stars:.2f} | Hops L={hops} | RedHerrings={num_red_herrings}] "
+                f"An autonomous agent executes a {hops}-hop tool DAG: "
+                f"`Tool_0: get_cluster_baseline(nodes={a}, pods={b}) -> {{\"base_quota\": {a} * {b}}}`; "
+                f"followed by `{hops}` recursive invocations of `Tool_k: expand_schema_quota(prev_quota, delta={hop_step})` which adds `{hop_step}` at each hop `k = 1..{hops}`. "
+                f"Decoy Tool Responses (R1..R{num_red_herrings}): Deprecated endpoint `legacy_quota_v1` returns `HTTP 429 TooManyRequests` with stale payload `{decoy_429_quota}` and must be ignored.\n"
+                f"#Q$# [deduction] Reject the HTTP 429 decoy tool responses, trace all {hops} tool-call hops in `#T$#`, and emit a valid JSON tool-call object containing key `\"tool_call\"` and the exact terminal integer quota."
+            )
+            harness_h = f"ifeval:json_valid;keyword:tool_call;exact_int:{final_quota}"
+            gold_t = (
+                f"We ignore the {num_red_herrings} deprecated HTTP 429 tool responses ({decoy_429_quota}). "
+                f"Tool_0 computes base_quota {a} * {b} = {hop_base}, and {hops} recursive Tool_k calls add {hops} * {hop_step} = {hops * hop_step}, "
+                f"yielding {hop_base} + {hops * hop_step} = {final_quota} for the final commit_quota tool_call."
+            )
+            gold_a = f'{{"tool_call": "commit_quota", "verified_quota": {final_quota}, "hops": {hops}}}'
+            d1_t = f"We halt one tool hop early after {hops - 1} calls at {early_halt_quota}."
+            d1_a = f'{{"tool_call": "commit_quota", "verified_quota": {early_halt_quota}, "hops": {hops - 1}}}'
+            d2_t = f"We use the stale HTTP 429 payload {decoy_429_quota} in malformed JSON."
+            d2_a = f'{{tool_call: "legacy_quota_v1", verified_quota: {decoy_429_quota}}}'
+            hack_a = "0"
+            default_scaffold = "association -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 2:
+            # 50: Computer Use RL - GUI / DOM Accessibility-Tree Viewport & Action-Space Trajectory
+            x0 = a * 10
+            dx_per_hop = b * 4 + (t_val - 1) * 2
+            half_width = c * 3
+            target_x = x0 + hops * dx_per_hop + half_width
+            trap_overlay_x = x0 + 999
+            no_center_x = x0 + hops * dx_per_hop
+            task_id = f"computer_use_dom_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Computer-Use RL: GUI/DOM Accessibility-Tree Navigation | ★{stars:.2f} | Hops L={hops} | RedHerrings={num_red_herrings}] "
+                f"A desktop browser agent inspects the Accessibility Tree (`AXTree`) starting at viewport anchor `x0 = {x0}`. "
+                f"Across `{hops}` sequential `scroll_and_focus` actions, each hop shifts the active container by `dx = {dx_per_hop}` px, "
+                f"landing on target button `#submit-patch` with bounding-box half-width `w_half = {half_width}` px (click center `x_click = x0 + {hops} * dx + w_half`). "
+                f"DOM Traps (R1..R{num_red_herrings}): Invisible modal overlay `div[aria-disabled='true'][style*='opacity:0']` at `x = {trap_overlay_x}` intercepts naive clicks and must be bypassed.\n"
+                f"#Q$# [code] Bypass the aria-disabled overlay traps, trace the {hops}-hop AXTree bounding-box trajectory in `#T$#`, and implement `def solve(x0, hops, dx, w_half):` returning the exact click coordinate `x_click`."
+            )
+            harness_h = (
+                f"assert solve({x0}, {hops}, {dx_per_hop}, {half_width}) == {target_x} "
+                f"and solve({x0}, 0, {dx_per_hop}, {half_width}) == {x0 + half_width}"
+            )
+            gold_t = (
+                f"Filtering out the {num_red_herrings} invisible aria-disabled overlays at {trap_overlay_x}, "
+                f"we advance {hops} * {dx_per_hop} = {hops * dx_per_hop} from anchor {x0} to get {no_center_x}, "
+                f"then add half-width {no_center_x} + {half_width} = {target_x} for the exact click coordinate."
+            )
+            gold_a = (
+                "def solve(x0, hops, dx, w_half):\n"
+                "    return x0 + hops * dx + w_half"
+            )
+            d1_t = f"We click the left edge {no_center_x} without adding the bounding-box half-width {half_width}."
+            d1_a = (
+                "def solve(x0, hops, dx, w_half):\n"
+                "    return x0 + hops * dx"
+            )
+            d2_t = f"We subtract the viewport delta and half-width."
+            d2_a = (
+                "def solve(x0, hops, dx, w_half):\n"
+                "    return x0 - hops * dx - w_half"
+            )
+            hack_a = "def solve(x0, hops, dx, w_half):\n    return 0"
+            default_scaffold = "abduction -> association -> decision -> deduction -> evaluation -> metacognition"
+
+        elif m_id == 3:
+            # 51: CyberGym RL - Sanitizer Crash Stack Triage & Memory-Safety Bounds Patch Synthesis
+            elem_sz = (c % 4) + 2
+            header_bytes = (t_val - 1) * 4 + 8
+            cap_elems = a + b
+            safe_bytes = cap_elems * elem_sz + header_bytes
+            oob_read_addr = safe_bytes + 64
+            unpatched_bytes = cap_elems * elem_sz
+            task_id = f"cybergym_asan_patch_t{t_val}_L{hops}_{a}_{b}_{elem_sz}_{idx}"
+            prompt_q = (
+                f"#U$# [CyberGym RL: ASan/MSan Stack Trace & Patch Synthesis (arvo:{10000 + idx % 9000}) | ★{stars:.2f} | StackDepth L={hops}] "
+                f"AddressSanitizer reports `heap-buffer-overflow` across a {hops}-frame call stack (`#0 parse_chunk -> ... -> #{hops - 1} fuzz_entry`): "
+                f"buffer allocation reserves `slots = {cap_elems}` elements of `elem_size = {elem_sz}` bytes, but omits the mandatory Tier-{t_val} "
+                f"frame header of `header = {header_bytes}` bytes. Decoy sanitizer warnings (R1..R{num_red_herrings}) cite benign stack shadow address `{oob_read_addr}`.\n"
+                f"#Q$# [code] Isolate the root-cause allocation defect across the {hops} stack frames in `#T$#`, and implement the patched allocator size `def solve(slots, elem_size):` in `#A$#` that returns `slots * elem_size + {header_bytes}`."
+            )
+            harness_h = (
+                f"assert solve({cap_elems}, {elem_sz}) == {safe_bytes} "
+                f"and solve(0, {elem_sz}) == {header_bytes}"
+            )
+            gold_t = (
+                f"Discarding the {num_red_herrings} benign shadow addresses ({oob_read_addr}), the {hops}-frame ASan trace shows "
+                f"payload size {cap_elems} * {elem_sz} = {unpatched_bytes} bytes must include the {header_bytes}-byte header, "
+                f"giving {unpatched_bytes} + {header_bytes} = {safe_bytes} bytes."
+            )
+            gold_a = (
+                f"def solve(slots, elem_size):\n"
+                f"    return slots * elem_size + {header_bytes}"
+            )
+            d1_t = f"We return the unpatched allocation {unpatched_bytes} without the {header_bytes}-byte frame header."
+            d1_a = (
+                "def solve(slots, elem_size):\n"
+                "    return slots * elem_size"
+            )
+            d2_t = f"We subtract the header size {header_bytes} causing an integer underflow."
+            d2_a = (
+                f"def solve(slots, elem_size):\n"
+                f"    return slots * elem_size - {header_bytes}"
+            )
+            hack_a = "def solve(slots, elem_size):\n    return 0"
+            default_scaffold = "abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 4:
+            # 52: PhD Cybersecurity RL (Vyber07 PTES / OWASP / NIST Attack-Graph & Mitigation)
+            raw_exposure = a * b
+            controls_applied = c
+            control_weight = 2 + (t_val % 3)
+            mitigated_delta = controls_applied * control_weight
+            tier_hardening = (t_val - 1) * 2
+            residual_score = raw_exposure + tier_hardening - mitigated_delta
+            if residual_score <= 0:
+                raw_exposure = (a + controls_applied) * b + mitigated_delta + 5
+                residual_score = raw_exposure + tier_hardening - mitigated_delta
+            honeypot_score = raw_exposure + mitigated_delta + 17
+            unhardened_score = raw_exposure - mitigated_delta
+            task_id = f"cybersec_phd_ptes_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [PhD Cybersecurity RL (PTES / OWASP / NIST SP 800-115) | ★{stars:.2f} | KillChainHops L={hops} | RedHerrings={num_red_herrings}] "
+                f"During a {hops}-phase PTES purple-team engagement, initial attack-surface exposure is `{raw_exposure}` (`{a}` attack vectors x `{b}` severity weight), "
+                f"plus Tier-{t_val} lateral-movement surface `+{tier_hardening}`. Deploying `{controls_applied}` NIST SP 800-53 defense-in-depth controls "
+                f"(each reducing exposure by `{control_weight}` units) subtracts `{controls_applied} * {control_weight}` from the total exposure. "
+                f"Deception Decoys (R1..R{num_red_herrings}): Canary honeypot telemetry logs fake exposure `{honeypot_score}` and must be excluded.\n"
+                f"#Q$# [deduction] Exclude the canary honeypot decoys, compute the exact residual risk score in `#T$#`, and state the residual risk in lowercase with no commas, at least 6 words, including the keyword `mitigated`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:mitigated;exact_int:{residual_score}"
+            gold_t = (
+                f"Excluding the {num_red_herrings} canary honeypots ({honeypot_score}), total surface is {raw_exposure} + {tier_hardening} = {raw_exposure + tier_hardening}, "
+                f"and defense-in-depth controls reduce risk by {controls_applied} * {control_weight} = {mitigated_delta}, leaving {raw_exposure + tier_hardening} - {mitigated_delta} = {residual_score}."
+            )
+            gold_a = f"after defense controls the mitigated residual risk score is {residual_score}"
+            d1_t = f"We include the canary honeypot decoy score {honeypot_score}."
+            d1_a = f"after defense controls the mitigated residual risk score is {honeypot_score}"
+            d2_t = f"We omit the lateral surface +{tier_hardening} and report {unhardened_score}."
+            d2_a = f"After Defense, Controls The Mitigated Score Is {unhardened_score}"
+            hack_a = "0"
+            default_scaffold = "abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 5:
+            # 53: Infinite-Horizon Recursive Terminal <-> Tool <-> Sandbox Loop (L -> inf)
+            p_mod = 101 + 2 * (idx % 20)
+            gain_k = 2 + (idx % 3)
+            tool_offset = b + (t_val - 1)
+            state_cur = a
+            state_one = (a * gain_k + tool_offset) % p_mod
+            trace_steps: list[str] = []
+            for h_i in range(1, hops + 1):
+                state_next = (state_cur * gain_k + tool_offset) % p_mod
+                if h_i <= 2 or h_i == hops:
+                    trace_steps.append(
+                        f"hop {h_i}: terminal_probe({state_cur}) -> tool_delta(({state_cur} * {gain_k} + {tool_offset}) mod {p_mod}) = {state_next}"
+                    )
+                state_cur = state_next
+            final_sandbox_state = state_cur
+            task_id = f"inf_agentic_loop_t{t_val}_L{hops}_{a}_{gain_k}_{tool_offset}_{p_mod}_{idx}"
+            prompt_q = (
+                f"#U$# [Infinite-Recursive Terminal <-> Tool Sandbox Loop | ★{stars:.2f} | Depth L={hops} | Mods={'+'.join(mods)}] "
+                f"At each recursive hop `1..steps`, the sandbox agent runs terminal probe `s <- (s * {gain_k} + {tool_offset}) % {p_mod}` starting from `s0 = {a}` "
+                f"(while ignoring `{num_red_herrings}` read-only `/proc` decoy descriptors). "
+                f"Implement `def solve(s, steps):` in Python that executes `steps` recursive terminal-tool transitions.\n"
+                f"#Q$# [infinite_recursion] Unroll the {hops}-hop terminal-tool trajectory in `#T$#` and implement `def solve(s, steps):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({a}, {hops}) == {final_sandbox_state} "
+                f"and solve({a}, 1) == {state_one} "
+                f"and solve({a}, 0) == {a}"
+            )
+            gold_t = (
+                f"Starting from sandbox state s0 = {a}, we iterate s = (s * {gain_k} + {tool_offset}) mod {p_mod} across {hops} recursive terminal-tool hops: "
+                + "; ".join(trace_steps)
+                + f", converging to terminal state {final_sandbox_state}."
+            )
+            gold_a = (
+                f"def solve(s, steps):\n"
+                f"    for _ in range(steps):\n"
+                f"        s = (s * {gain_k} + {tool_offset}) % {p_mod}\n"
+                f"    return s"
+            )
+            d1_t = f"We execute only steps - 1 recursive tool transitions and halt early."
+            d1_a = (
+                f"def solve(s, steps):\n"
+                f"    for _ in range(max(0, steps - 1)):\n"
+                f"        s = (s * {gain_k} + {tool_offset}) % {p_mod}\n"
+                f"    return s"
+            )
+            d2_t = f"We subtract {tool_offset} instead of adding inside the sandbox transition loop."
+            d2_a = (
+                f"def solve(s, steps):\n"
+                f"    for _ in range(steps):\n"
+                f"        s = (s * {gain_k} - {tool_offset}) % {p_mod}\n"
+                f"    return s"
+            )
+            hack_a = "def solve(s, steps):\n    return 0"
+            default_scaffold = "induction -> abstraction -> deduction -> decision -> metacognition"
+
+        elif m_id == 6:
+            # 54: Cross-Skill Agentic Mixing I (Terminal Triage + Tool Call + CyberGym Patch)
+            crash_frames = a * b
+            tool_cve_offset = c * 2 + (t_val - 1) * 3
+            patched_guard = crash_frames + tool_cve_offset
+            decoy_frame = crash_frames - c + 41
+            x_probe = 3
+            expected_probe = x_probe * patched_guard
+            x_eval = 5 + (t_val % 4)
+            expected_eval = x_eval * patched_guard
+            task_id = f"mix_term_tool_cybergym_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Cross-Skill Agentic I: Terminal + Tool + CyberGym Patch | ★{stars:.2f} | Hops L={hops} | RedHerrings={num_red_herrings}] "
+                f"Stage 1 (POSIX Terminal Triage): `grep -c 'ASAN_TRAP'` across `{a}` crash logs with `{b}` frames each isolates baseline offset `{a} * {b}` (filtering decoy core dump `{decoy_frame}`). "
+                f"Stage 2 (Tool-Use CVE Schema Lookup): Calling `get_cve_alignment(tier={t_val})` returns required guard padding `+{tool_cve_offset}`, yielding `guard_stride = {a} * {b} + {tool_cve_offset}`. "
+                f"Stage 3 (CyberGym Patch Synthesis): Implement `def solve(chunks):` returning `chunks * guard_stride`.\n"
+                f"#Q$# [code] Chain POSIX terminal triage, tool schema lookup, and CyberGym patch synthesis in `#T$# -> #A$#`."
+            )
+            harness_h = f"assert solve({x_eval}) == {expected_eval} and solve({x_probe}) == {expected_probe}"
+            gold_t = (
+                f"Stage 1 filters decoy core dump {decoy_frame} and computes baseline frames {a} * {b} = {crash_frames}. "
+                f"Stage 2 adds the CVE tool padding {crash_frames} + {tool_cve_offset} = {patched_guard}. "
+                f"Stage 3 implements solve(chunks) = chunks * {patched_guard}, verifying {x_eval} * {patched_guard} = {expected_eval}."
+            )
+            gold_a = f"def solve(chunks):\n    return chunks * {patched_guard}"
+            d1_t = f"We use the decoy core dump {decoy_frame} instead of {patched_guard}."
+            d1_a = f"def solve(chunks):\n    return chunks * {decoy_frame}"
+            d2_t = f"We omit the Stage 2 CVE tool padding {tool_cve_offset}."
+            d2_a = f"def solve(chunks):\n    return chunks * {crash_frames}"
+            hack_a = "def solve(chunks):\n    return 0"
+            default_scaffold = "abduction -> induction -> deduction -> decision -> metacognition"
+
+        else:
+            # 55: Cross-Skill Agentic Mixing II (Computer-Use DOM + Sherlockian Honeypot Elimination + CyberSec Hardening)
+            dom_nodes = a * b
+            csp_delta = c * (2 + (t_val % 3))
+            verified_policy_id = dom_nodes + csp_delta + (t_val - 1) * 4
+            csrf_honeypot_id = dom_nodes - c + 73
+            task_id = f"mix_comp_cybersec_sherlock_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Cross-Skill Agentic II: Computer-Use DOM + Sherlock + CyberSec | ★{stars:.2f} | Hops L={hops} | RedHerrings={num_red_herrings}] "
+                f"Stage 1 (Computer-Use DOM Audit): Inspecting the browser `AXTree` across `{a}` origins with `{b}` scripts each yields baseline policy index `{a} * {b}`. "
+                f"Stage 2 (Sherlockian Honeypot Elimination): Negative evidence eliminates `{num_red_herrings}` spoofed CSRF honeypot tokens (`{csrf_honeypot_id}`) and confirms CSP nonce delta `{c} * {2 + (t_val % 3)}`. "
+                f"Stage 3 (PhD CyberSec Hardening): Add Tier-{t_val} HSTS/SRI hardening offset `+{(t_val - 1) * 4}` to derive the canonical security policy ID.\n"
+                f"#Q$# [deduction] Combine Computer-Use DOM audit, Sherlockian honeypot elimination, and CyberSec hardening in `#T$#`, and state the canonical policy ID in lowercase with no commas, at least 6 words, including the keyword `hardened`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:hardened;exact_int:{verified_policy_id}"
+            gold_t = (
+                f"Stage 1 computes DOM baseline {a} * {b} = {dom_nodes}. "
+                f"Stage 2 eliminates CSRF honeypot {csrf_honeypot_id} and computes CSP delta {c} * {2 + (t_val % 3)} = {csp_delta}, summing {dom_nodes} + {csp_delta} = {dom_nodes + csp_delta}. "
+                f"Stage 3 adds hardening offset {dom_nodes + csp_delta} + {(t_val - 1) * 4} = {verified_policy_id}."
+            )
+            gold_a = f"the hardened computer use cybersecurity policy identifier is {verified_policy_id}"
+            d1_t = f"We select the spoofed CSRF honeypot token {csrf_honeypot_id}."
+            d1_a = f"the hardened computer use cybersecurity policy identifier is {csrf_honeypot_id}"
+            d2_t = f"We subtract the CSP delta {dom_nodes} - {csp_delta} = {dom_nodes - csp_delta}."
+            d2_a = f"The Hardened, Cybersecurity Policy Identifier Is {dom_nodes - csp_delta}"
+            hack_a = "0"
+            default_scaffold = "analogy -> abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        base_cands = (
+            f"#T$# {gold_t}\n#A$# {gold_a}",
+            f"#T$# {d1_t}\n#A$# {d1_a}",
+            f"#T$# {d2_t}\n#A$# {d2_a}",
+            f"#T$# Default fallback.\n#A$# {hack_a}",
+        )
+        base_scores = (1.0, 0.20, 0.10, 0.0)
+        order = [0, 1, 2, 3]
+        shift = idx % 4
+        order[0], order[shift] = order[shift], order[0]
+        p_cands = tuple(base_cands[i] for i in order)
+        p_scores = tuple(base_scores[i] for i in order)
+        g_idx = order.index(0)
+        self._last_task_kinds[task_id] = kind_slot
+        cached_s = self.scaffold_cache.get(task_id, default=default_scaffold)
+        return OrnithTask(
+            task_id=task_id,
+            domain=domain_name,
+            prompt_q=prompt_q,
+            harness_h=harness_h,
+            scaffold_s=cached_s,
+            candidate_rollouts=p_cands,
+            harness_scores=p_scores,
+            gold_index=g_idx,
+            gold_thought=gold_t,
+            gold_answer=gold_a,
+            skill=skill_name,
+            star_difficulty=stars,
+            recursion_depth=hops,
+            difficulty_mods=mods,
+        )
+
     def _synthesize_combinatorial_pipeline_task(self, idx: int, *, tier: int = 1) -> OrnithTask:
         """Synthesize a randomized 3-stage cross-template pipeline ($8 \\times 6 \\times 4 = 192$ combinations)
         with length-matched adversarial multi-stage distractors (Stage-1 vs Stage-2 error propagation).
@@ -2738,6 +3898,8 @@ class OrnithSelfImprover:
             idx, seed=self._rng_seed, pp_leaderboard=self.pp_leaderboard
         )
         tier = self.env_architect.difficulty_tier(kind)
+        if not compact and 48 <= kind < 56:
+            return self._synthesize_agentic_tool_terminal_task(idx, tier=tier, mode=kind - 48)
         if not compact and 40 <= kind < 48:
             return self._synthesize_polymath_challenge_task(idx, tier=tier, mode=kind - 40)
         if not compact and 36 <= kind < 40:
@@ -2746,9 +3908,13 @@ class OrnithSelfImprover:
             return self._synthesize_infinite_recursive_task(idx, tier=tier, mode="chain")
         if not compact and kind == 35:
             return self._synthesize_infinite_recursive_task(idx, tier=tier, mode="code_recursion")
-        # For online training steps beyond the initial 48-family sweep, dynamically invoke Sherlockian reasoning,
-        # Polymath challenges, the 192-pipeline combinatorial synthesizer, and infinite-horizon recursion.
+        # For online training steps beyond the initial 56-family sweep, dynamically invoke Agentic RL,
+        # Sherlockian reasoning, Polymath challenges, the 192-pipeline combinatorial synthesizer, and infinite-horizon recursion.
         if not compact and idx >= self.env_architect.TOTAL_FAMILIES:
+            if idx % 9 == 8:
+                ag_mode = (idx // 9) % 8
+                ag_tier = max(tier, self.env_architect.difficulty_tier(48 + ag_mode))
+                return self._synthesize_agentic_tool_terminal_task(idx, tier=ag_tier, mode=ag_mode)
             if idx % 7 == 6:
                 pm_mode = (idx // 7) % 8
                 pm_tier = max(tier, self.env_architect.difficulty_tier(40 + pm_mode))

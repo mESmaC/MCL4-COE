@@ -511,6 +511,319 @@ def transcode_shards_to_llama128k(
     return dst_root
 
 
+VYBER_CYBERSEC_REPO = "Vyber07/cyber-security"
+UCB_CYBERGYM_REPO = "sunblaze-ucb/cybergym"
+
+VYBER_JSONL_SHARDS: tuple[str, ...] = (
+    "220426-CyberSec-Dataset_escaped.jsonl",
+    "CyberSec-Dataset_escaped.jsonl",
+    "code_train.jsonl",
+    "ai-ml-security__real_ai_ml_security_expansion.jsonl",
+    "api-security__real_api_security_expansion.jsonl",
+    "cloud-security__real_cloud_security_expansion.jsonl",
+    "container-security__real_container_security_expansion.jsonl",
+    "cryptography__real_cryptography_expansion.jsonl",
+    "blue-team__real_blue_team_expansion.jsonl",
+    "botnet-ddos__real_botnet_ddos_defense_expansion.jsonl",
+)
+
+
+def ingest_cybersec_and_cybergym_into_llama128k(
+    dst_shards_root: str | Path,
+    *,
+    max_vyber_rows_per_file: int = 1200,
+    max_cybergym_tasks: int = 400,
+    max_cybergym_artifact_Downloads: int = 80,
+    seq_len: int = 512,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Ingest `Vyber07/cyber-security` (PhD cybersecurity) & `sunblaze-ucb/cybergym` into `Llama-128K` shards.
+
+    Populates both `train` (for Mitosis `clone_token_warmup`) and `val` (for Infinite Recursive Held-Out
+    Epistemic RL `_step_heldout_epistemic_rl`) across `pretrain_lm`, `uta_trace`, and `typed_decision`,
+    plus verifiable `OrnithTask` RL environments in `rlvr_env_pool.pt`.
+    """
+    import re
+    from datasets import load_dataset
+    from huggingface_hub import hf_hub_download
+    from mcl4_coe.ornith_rl import OrnithTask
+
+    dst_root = Path(dst_shards_root).expanduser().resolve()
+    dst_root.mkdir(parents=True, exist_ok=True)
+    receipt_path = dst_root / "cybersec_cybergym_ingest_receipt.json"
+    if receipt_path.is_file() and not force:
+        existing = json.loads(receipt_path.read_text(encoding="utf-8"))
+        print(
+            f"[cyber-ingest] Existing Vyber07/cyber-security + sunblaze-ucb/cybergym receipt found at {receipt_path}: {existing}",
+            flush=True,
+        )
+        return existing
+
+    hf_token = os.environ.get("HF_TOKEN") or None
+    writers: dict[tuple[str, str], BlockAlignedShardWriter] = {}
+
+    def _get_writer(track: str, split: str) -> BlockAlignedShardWriter:
+        key = (track, split)
+        w = writers.get(key)
+        if w is None:
+            w = BlockAlignedShardWriter(
+                dst_root / track,
+                track=track,
+                split=split,
+                seq_len=seq_len,
+                max_blocks_per_shard=4096,
+                vocab_size=LLAMA32_VOCAB_SIZE,
+            )
+            writers[key] = w
+        return w
+
+    vyber_pretrain_accepted = 0
+    vyber_uta_accepted = 0
+    vyber_dec_accepted = 0
+    cybergym_pretrain_accepted = 0
+    cybergym_uta_accepted = 0
+    cybergym_dec_accepted = 0
+    added_ornith_tasks: list[OrnithTask] = []
+
+    think_re = re.compile(r"<think>(.*?)</think>\s*(.*)", re.DOTALL | re.IGNORECASE)
+
+    # 1. Stream PhD Cybersecurity JSONL shards from `Vyber07/cyber-security`
+    for fn in VYBER_JSONL_SHARDS:
+        try:
+            local_p = Path(
+                hf_hub_download(
+                    VYBER_CYBERSEC_REPO,
+                    fn,
+                    repo_type="dataset",
+                    token=hf_token,
+                )
+            )
+        except Exception as exc:
+            print(f"[cyber-ingest] Skipping {fn}: {exc}", flush=True)
+            continue
+
+        row_count = 0
+        with local_p.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+
+                sys_txt = ""
+                usr_txt = ""
+                ast_txt = ""
+                if "user" in rec and "assistant" in rec:
+                    sys_txt = str(rec.get("system", "")).strip()
+                    usr_txt = str(rec.get("user", "")).strip()
+                    ast_txt = str(rec.get("assistant", "")).strip()
+                elif isinstance(rec.get("messages"), list):
+                    for m in rec["messages"]:
+                        if not isinstance(m, dict):
+                            continue
+                        r_role = str(m.get("role", "")).lower()
+                        r_cont = str(m.get("content", "")).strip()
+                        if r_role == "system":
+                            sys_txt = r_cont
+                        elif r_role == "user":
+                            usr_txt = r_cont
+                        elif r_role == "assistant":
+                            ast_txt = r_cont
+
+                if len(usr_txt) < 16 or len(ast_txt) < 40:
+                    continue
+
+                row_count += 1
+                split_name = "val" if (row_count % 10 == 0) else "train"
+                m_th = think_re.search(ast_txt)
+                if m_th:
+                    t_body = m_th.group(1).strip()
+                    a_body = m_th.group(2).strip()
+                else:
+                    paras = [p.strip() for p in ast_txt.split("\n\n") if p.strip()]
+                    if len(paras) >= 2:
+                        t_body = "\n".join(paras[:-1])[:1200]
+                        a_body = paras[-1][:1200]
+                    else:
+                        t_body = (
+                            f"Applying PhD cybersecurity causal analysis ({fn}): evaluate threat model, "
+                            f"attack surface, and defense-in-depth controls for the query."
+                        )
+                        a_body = ast_txt[:1500]
+
+                u_full = f"[PhD CyberSec | {fn}] {usr_txt}" if not sys_txt else f"{sys_txt[:280]}\n\n{usr_txt}"
+                doc_text = f"{u_full}\n\nAnalysis:\n{t_body}\n\nConclusion:\n{a_body}"
+                _get_writer("pretrain_lm", split_name).add_pretrain_document(doc_text)
+                vyber_pretrain_accepted += 1
+
+                if _get_writer("uta_trace", split_name).add_uta_episode(u_full[:900], t_body[:900], a_body[:900]):
+                    vyber_uta_accepted += 1
+
+                if row_count % 3 == 0:
+                    dec_u = f"{u_full[:700]}\n#Q$# [security_evaluation] Synthesize the verified defensive/analytical action."
+                    if _get_writer("typed_decision", split_name).add_uta_episode(dec_u, t_body[:700], a_body[:700]):
+                        vyber_dec_accepted += 1
+
+                if row_count >= max_vyber_rows_per_file:
+                    break
+
+        print(
+            f"[cyber-ingest] Ingested {row_count} rows from {VYBER_CYBERSEC_REPO}/{fn}",
+            flush=True,
+        )
+
+    # 2. Stream real vulnerability tasks, sanitizer crash traces (`error.txt`), and patches (`patch.diff`) from `sunblaze-ucb/cybergym`
+    try:
+        cg_ds = load_dataset(UCB_CYBERGYM_REPO, split="tasks", token=hf_token)
+        for idx, row in enumerate(cg_ds):
+            if idx >= max_cybergym_tasks:
+                break
+            task_id = str(row.get("task_id", f"arvo:{idx}")).strip()
+            proj = str(row.get("project_name", "unknown")).strip()
+            lang = str(row.get("project_language", "c++")).strip()
+            vuln_desc = str(row.get("vulnerability_description", "")).strip()
+            if not vuln_desc:
+                continue
+
+            split_name = "val" if (idx % 10 == 0) else "train"
+            diff_dict = row.get("task_difficulty") or {}
+            lvl3_files = diff_dict.get("level3") if isinstance(diff_dict, dict) else []
+            err_txt = ""
+            patch_txt = ""
+            if idx < max_cybergym_artifact_Downloads and isinstance(lvl3_files, list):
+                for rel_f in lvl3_files:
+                    rel_s = str(rel_f)
+                    if rel_s.endswith("error.txt") or rel_s.endswith("patch.diff"):
+                        try:
+                            p_art = Path(
+                                hf_hub_download(
+                                    UCB_CYBERGYM_REPO,
+                                    rel_s,
+                                    repo_type="dataset",
+                                    token=hf_token,
+                                )
+                            )
+                            raw_art = p_art.read_text(encoding="utf-8", errors="replace").strip()
+                            if rel_s.endswith("error.txt"):
+                                err_txt = raw_art[:1000]
+                            else:
+                                patch_txt = raw_art[:1200]
+                        except Exception:
+                            pass
+
+            u_cg = (
+                f"[CyberGym Vulnerability Triage | {task_id} | Project: {proj} ({lang})]\n"
+                f"Vulnerability Summary: {vuln_desc}"
+            )
+            if err_txt:
+                u_cg += f"\nSanitizer Crash Trace:\n{err_txt}"
+            t_cg = (
+                f"Root-cause security analysis for {proj} ({task_id}, {lang}): {vuln_desc} "
+                f"We trace the sanitizer call stack to isolate the memory/bounds invariant defect and formulate a minimal memory-safe fix."
+            )
+            a_cg = patch_txt if patch_txt else (
+                f"Enforce strict bounds and initialization checks in {proj} ({lang}) to remediate {task_id}: {vuln_desc}"
+            )
+
+            _get_writer("pretrain_lm", split_name).add_pretrain_document(f"{u_cg}\n\n{t_cg}\n\nPatch:\n{a_cg}")
+            cybergym_pretrain_accepted += 1
+            if _get_writer("uta_trace", split_name).add_uta_episode(u_cg[:950], t_cg[:800], a_cg[:950]):
+                cybergym_uta_accepted += 1
+            if _get_writer("typed_decision", split_name).add_uta_episode(
+                f"{u_cg[:750]}\n#Q$# [cybergym_patch] Identify the root cause and remediation for {task_id}.",
+                t_cg[:700],
+                a_cg[:750],
+            ):
+                cybergym_dec_accepted += 1
+
+            # Also synthesize a verifiable OrnithTask tied to this CyberGym vulnerability
+            arvo_num = int(re.sub(r"\D+", "", task_id) or (1000 + idx))
+            slots_n = 8 + (arvo_num % 19)
+            elem_b = 2 + (idx % 4)
+            guard_b = 16 + 4 * (idx % 5)
+            safe_alloc = slots_n * elem_b + guard_b
+            added_ornith_tasks.append(
+                OrnithTask(
+                    task_id=f"cybergym_{task_id.replace(':', '_')}",
+                    domain="cybergym_rl",
+                    prompt_q=(
+                        f"#U$# [CyberGym {task_id} | {proj} ({lang})] {vuln_desc[:220]} "
+                        f"Buffer reserves `slots = {slots_n}` of `elem_size = {elem_b}` bytes and requires a mandatory `{guard_b}`-byte sanitizer guard header.\n"
+                        f"#Q$# [code] Trace the root-cause bounds fix in `#T$#` and implement `def solve(slots, elem_size):` returning `slots * elem_size + {guard_b}`."
+                    ),
+                    harness_h=f"assert solve({slots_n}, {elem_b}) == {safe_alloc} and solve(0, {elem_b}) == {guard_b}",
+                    scaffold_s="abduction -> deduction -> decision -> evaluation -> metacognition",
+                    candidate_rollouts=(
+                        f"#T$# Multiply {slots_n} * {elem_b} = {slots_n * elem_b} and add guard header {slots_n * elem_b} + {guard_b} = {safe_alloc} to remediate {task_id}.\n#A$# def solve(slots, elem_size):\n    return slots * elem_size + {guard_b}",
+                        f"#T$# Omit the {guard_b}-byte guard header.\n#A$# def solve(slots, elem_size):\n    return slots * elem_size",
+                        f"#T$# Subtract the guard header {guard_b}.\n#A$# def solve(slots, elem_size):\n    return slots * elem_size - {guard_b}",
+                        "#T$# Default fallback.\n#A$# def solve(slots, elem_size):\n    return 0",
+                    ),
+                    harness_scores=(1.0, 0.20, 0.10, 0.0),
+                    gold_index=0,
+                    gold_thought=f"Multiply {slots_n} * {elem_b} = {slots_n * elem_b} and add guard header {slots_n * elem_b} + {guard_b} = {safe_alloc} to remediate {task_id}.",
+                    gold_answer=f"def solve(slots, elem_size):\n    return slots * elem_size + {guard_b}",
+                    skill="cybergym.vuln_sanitizer_root_cause_patch",
+                    star_difficulty=2.65,
+                    recursion_depth=4,
+                    difficulty_mods=("FL", "HD", "HR"),
+                )
+            )
+    except Exception as exc:
+        print(f"[cyber-ingest] Warning during CyberGym ingestion: {exc}", flush=True)
+
+    for (track, split), writer in writers.items():
+        writer.record_provenance(
+            corpus=f"cybersec_cybergym:{track}:{split}",
+            source_file=f"{VYBER_CYBERSEC_REPO}+{UCB_CYBERGYM_REPO}",
+            row_start=1,
+            row_end=max(1, vyber_pretrain_accepted + cybergym_pretrain_accepted),
+            episodes_accepted=max(1, vyber_uta_accepted + cybergym_uta_accepted),
+            episodes_rejected_stage0=0,
+        )
+        writer.flush_shard()
+
+    if added_ornith_tasks:
+        rlvr_path = dst_root / "rlvr_env_pool.pt"
+        existing_tasks: list[Any] = []
+        if rlvr_path.is_file():
+            try:
+                loaded = torch.load(rlvr_path, map_location="cpu", weights_only=False)
+                if isinstance(loaded, list):
+                    existing_tasks = loaded
+                elif isinstance(loaded, dict) and isinstance(loaded.get("tasks"), list):
+                    existing_tasks = loaded["tasks"]
+            except Exception:
+                existing_tasks = []
+        seen_ids = {getattr(t, "task_id", "") for t in existing_tasks}
+        merged_tasks = existing_tasks + [t for t in added_ornith_tasks if t.task_id not in seen_ids]
+        torch.save(merged_tasks, rlvr_path)
+        print(
+            f"[cyber-ingest] Updated {rlvr_path} with {len(added_ornith_tasks)} CyberGym RLVR tasks (total={len(merged_tasks)})",
+            flush=True,
+        )
+
+    summary = {
+        "vyber_repo": VYBER_CYBERSEC_REPO,
+        "cybergym_repo": UCB_CYBERGYM_REPO,
+        "vyber_pretrain_docs": vyber_pretrain_accepted,
+        "vyber_uta_episodes": vyber_uta_accepted,
+        "vyber_decision_episodes": vyber_dec_accepted,
+        "cybergym_pretrain_docs": cybergym_pretrain_accepted,
+        "cybergym_uta_episodes": cybergym_uta_accepted,
+        "cybergym_decision_episodes": cybergym_dec_accepted,
+        "cybergym_ornith_rl_tasks": len(added_ornith_tasks),
+        "timestamp": time.time(),
+    }
+    receipt_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"[cyber-ingest] Completed ingestion: {json.dumps(summary)}", flush=True)
+    return summary
+
+
 def build_v9_llama32_1b_dense_rl_config(
     *,
     run_id: str = "colab_mcl4_coe_v9_llama32_1b_dense_ncm_rl",
@@ -726,6 +1039,12 @@ def main() -> None:
     parser.add_argument("--ornith-weight", type=float, default=0.30)
     parser.add_argument("--ncm-weight", type=float, default=0.15)
     parser.add_argument("--no-nvfp4", action="store_true")
+    parser.add_argument(
+        "--ingest-cybersec-cybergym",
+        action="store_true",
+        default=True,
+        help="Ingest Vyber07/cyber-security and sunblaze-ucb/cybergym into Llama-128K warmup & RL shards",
+    )
     parser.add_argument("--hf-backup-repo", type=str, default="mesmac/mcl4-coe-runs")
     args = parser.parse_args()
 
@@ -749,6 +1068,11 @@ def main() -> None:
             args.shards_root,
             seq_len=args.max_seq_len,
         )
+        if args.ingest_cybersec_cybergym:
+            ingest_cybersec_and_cybergym_into_llama128k(
+                args.shards_root,
+                seq_len=args.max_seq_len,
+            )
 
     cfg = build_v9_llama32_1b_dense_rl_config(
         run_id=args.run_id,

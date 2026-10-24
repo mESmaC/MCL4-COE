@@ -689,12 +689,17 @@ def _clean_bpe_decision_context(ctx: str) -> str:
         if q_part.startswith("[") and "]" in q_part:
             q_part = q_part.split("]", 1)[1].strip()
         u_part = u_part.strip()
-        if not u_part or u_part == q_part:
-            return q_part or u_part or ctx
-        if not q_part:
-            return u_part
-        return f"{u_part}\n{q_part}"
-    return text or ctx
+        if not u_part or u_part == q_part or q_part.endswith(u_part) or u_part in q_part:
+            out = q_part or u_part or ctx
+        elif not q_part:
+            out = u_part
+        else:
+            out = f"{u_part}\n{q_part}"
+    else:
+        out = text or ctx
+    if out.endswith("?") and "Answer:" not in out and "#S$#" not in out:
+        out = f"Question: {out}\nAnswer:" if not out.startswith("Question:") else f"{out}\nAnswer:"
+    return out
 
 
 def _clean_bpe_decision_option(desc: str) -> str:
@@ -718,10 +723,13 @@ def collate_decisions(
         tokenizer = get_tokenizer(vocab_size)
     is_donor_bpe = int(getattr(tokenizer, "vocab_size", vocab_size)) > 16384
     if is_donor_bpe:
-        contexts = [
-            tokenizer.encode(_clean_bpe_decision_context(item.context))[-max_length:]
-            for item in examples
-        ]
+        bos_tok = int(getattr(tokenizer, "bos_id", 128000))
+        contexts = []
+        for item in examples:
+            c_ids = tokenizer.encode(_clean_bpe_decision_context(item.context))
+            if len(c_ids) > max_length:
+                c_ids = [bos_tok] + c_ids[-(max_length - 1) :]
+            contexts.append(c_ids)
         candidates = [
             [
                 tokenizer.encode(_clean_bpe_decision_option(description))[:max_length]

@@ -563,9 +563,8 @@ class CognitiveOperatorEnsemble(nn.Module):
         # Persistent ContextLMCompressor soft gist queries & LayerNorm trained end-to-end
         self.gist_norm = nn.LayerNorm(d_model)
         self.gist_queries = nn.Parameter(
-            torch.empty(self.config.gist_tokens_per_chunk, d_model)
+            torch.randn(self.config.gist_tokens_per_chunk, d_model) * 0.02
         )
-        nn.init.normal_(self.gist_queries, std=0.02)
 
     def _load_from_state_dict(
         self,
@@ -585,10 +584,27 @@ class CognitiveOperatorEnsemble(nn.Module):
             full_key = prefix + opt_key
             if full_key not in state_dict:
                 state_dict[full_key] = param.detach().clone()
-            elif state_dict[full_key].shape != param.shape and opt_key == "gist_queries":
-                self.gist_queries = nn.Parameter(
-                    torch.empty_like(state_dict[full_key], device=param.device, dtype=param.dtype)
+            elif opt_key == "gist_queries":
+                loaded_q = state_dict[full_key]
+                is_corrupt = (
+                    not bool(torch.isfinite(loaded_q).all().item())
+                    or float(loaded_q.float().abs().max().item()) > 10.0
                 )
+                if loaded_q.shape != param.shape:
+                    self.gist_queries = nn.Parameter(
+                        (torch.randn_like(loaded_q, device=param.device, dtype=torch.float32) * 0.02).to(
+                            param.dtype
+                        )
+                    )
+                if is_corrupt:
+                    state_dict[full_key] = self.gist_queries.detach().clone().to(
+                        device=loaded_q.device, dtype=loaded_q.dtype
+                    )
+                    for k_sd, v_sd in list(state_dict.items()):
+                        if isinstance(v_sd, torch.Tensor) and (
+                            ".global_out_proj." in k_sd or ".ple.gate_scale" in k_sd
+                        ):
+                            state_dict[k_sd] = (v_sd.float() * 0.75).to(v_sd.dtype)
         super()._load_from_state_dict(
             state_dict,
             prefix,
@@ -681,6 +697,115 @@ class CognitiveOperatorEnsemble(nn.Module):
             owner_std = owner_var.sqrt().clamp_min(0.25).index_select(0, canon_owners)
             lm_rel_score = torch.tanh((centered_lp / owner_std) * 0.65)
         return lm_rel_score.to(cand_hidden.dtype)
+
+    @torch.no_grad()
+    def _compute_joint_comparative_coe_score(
+        self,
+        trimmed_ctx_ids: Tensor,
+        context_lengths: Tensor,
+        option_ids: Tensor,
+        option_lengths: Tensor,
+        valid_options: Tensor,
+        *,
+        recurrence_steps: int = 2,
+        depth_ponder: bool = True,
+    ) -> Tensor | None:
+        """Evaluate joint cross-candidate multi-option `COE` scratchpad scores (`A..H`) for BPE donors."""
+        if (
+            self.training
+            or not self.backbone.config.preserve_residual_across_stacks
+            or int(self.backbone.config.vocab_size) != 128256
+        ):
+            return None
+        batch_size, num_opts, _ = option_ids.shape
+        if num_opts < 2 or num_opts > 8:
+            return None
+        if num_opts == 2 and int(option_lengths.max().item()) <= 4:
+            return None
+        from .data import get_tokenizer
+
+        bpe_tok = get_tokenizer(128256)
+        bos_tok = int(bpe_tok.bos_id)
+        letters = ("A", "B", "C", "D", "E", "F", "G", "H")
+        letter_ids = [
+            bpe_tok.encode(letters[k], add_bos=False, add_eos=False)[0] for k in range(num_opts)
+        ]
+        sp_letter_ids = [
+            bpe_tok.encode(" " + letters[k], add_bos=False, add_eos=False)[0]
+            for k in range(num_opts)
+        ]
+        p_rows: list[list[int]] = []
+        p_last: list[int] = []
+        row_tok_pairs: list[list[tuple[int, int]]] = []
+        row_scale: list[float] = []
+        for b in range(batch_size):
+            c_len = int(context_lengths[b].item())
+            raw_q = bpe_tok.decode(trimmed_ctx_ids[b, :c_len]).strip()
+            if "#S$#" in raw_q:
+                return None
+            is_q_task = ("?" in raw_q) or ("Question:" in raw_q) or ("Subject:" in raw_q)
+            q_str = raw_q
+            if q_str.endswith("\nAnswer:"):
+                q_str = q_str[: -len("\nAnswer:")].strip()
+            elif q_str.endswith("Answer:"):
+                q_str = q_str[: -len("Answer:")].strip()
+            if q_str.startswith("Question:"):
+                q_str = q_str[len("Question:") :].strip()
+
+            opt_lines: list[str] = []
+            tot_opt_toks = 0
+            for k in range(num_opts):
+                if not bool(valid_options[b, k].item()):
+                    continue
+                o_len = int(option_lengths[b, k].item())
+                tot_opt_toks += o_len
+                o_str = bpe_tok.decode(option_ids[b, k, :o_len]).strip()
+                opt_lines.append(f"{letters[k]}. {o_str}")
+            opts_block = "\n".join(opt_lines)
+            mcqa_prompt = f"Question: {q_str}\n{opts_block}\nAnswer:"
+            row_tok_pairs.append([(letter_ids[k], sp_letter_ids[k]) for k in range(num_opts)])
+            avg_opt_len = tot_opt_toks / max(1, len(opt_lines))
+            row_scale.append(0.15 if (not is_q_task and avg_opt_len > 15.0) else 1.0)
+
+            p_ids = bpe_tok.encode(mcqa_prompt, add_bos=True, add_eos=False)
+            if len(p_ids) > 384:
+                p_ids = [bos_tok] + p_ids[-383:]
+            p_rows.append(p_ids)
+            p_last.append(len(p_ids) - 1)
+
+        max_p = max(len(r) for r in p_rows)
+        inp_t = torch.tensor(
+            [r + [bpe_tok.pad_id] * (max_p - len(r)) for r in p_rows],
+            dtype=torch.long,
+            device=trimmed_ctx_ids.device,
+        )
+        inf_out = self.forward_inference(
+            inp_t,
+            recurrence_steps=max(1, int(recurrence_steps)),
+            depth_ponder=bool(depth_ponder),
+            condition_on_prefix_gist=bool(depth_ponder or recurrence_steps > 1),
+            latent_prior_scale=0.05 if (depth_ponder or recurrence_steps > 1) else 0.0,
+        )
+        out_z = torch.zeros(
+            (batch_size, num_opts), dtype=torch.float32, device=trimmed_ctx_ids.device
+        )
+        for b in range(batch_size):
+            l_row = inf_out.logits[b, p_last[b]].float()
+            k_v = int(valid_options[b].sum().item())
+            if k_v < 2:
+                continue
+            t_pairs = row_tok_pairs[b]
+            scores = torch.tensor(
+                [
+                    max(float(l_row[t_pairs[k][0]].item()), float(l_row[t_pairs[k][1]].item()))
+                    for k in range(k_v)
+                ],
+                device=trimmed_ctx_ids.device,
+                dtype=torch.float32,
+            )
+            s_z = (scores - scores.mean()) / scores.std(unbiased=False).clamp_min(1e-4)
+            out_z[b, :k_v] = s_z * row_scale[b]
+        return out_z
 
     def forward_decision(
         self,
@@ -1005,7 +1130,7 @@ class CognitiveOperatorEnsemble(nn.Module):
                 canon_scores = (1.0 - prior_w) * canon_scores + prior_w * prior_score
 
         if lm_cont_score is not None:
-            w_lm = 0.15 if (whiteboard is not None and w_rule > 0.0) else 0.65
+            w_lm = 0.15 if (whiteboard is not None and w_rule > 0.0) else 0.78
             canon_scores = (1.0 - w_lm) * canon_scores + w_lm * lm_cont_score
             if similarities_step1 is not None:
                 lm_step1 = lm_cont_score.index_select(0, inv_perm)
@@ -1022,6 +1147,32 @@ class CognitiveOperatorEnsemble(nn.Module):
         similarities = valid_scores.new_zeros(valid_options.shape).masked_scatter(
             valid_options, valid_scores
         )
+        joint_mcqa_z = self._compute_joint_comparative_coe_score(
+            trimmed_ctx_ids,
+            context_lengths,
+            option_ids,
+            option_lengths,
+            valid_options,
+            recurrence_steps=steps,
+            depth_ponder=use_ponder,
+        )
+        if joint_mcqa_z is not None:
+            with torch.autocast(device_type=context_ids.device.type, enabled=False):
+                sims_f = similarities.float().masked_fill(~valid_options, 0.0)
+                v_cnt = valid_options.float().sum(dim=-1, keepdim=True).clamp_min(1.0)
+                sims_m = sims_f.sum(dim=-1, keepdim=True) / v_cnt
+                sims_var = (
+                    ((sims_f - sims_m).masked_fill(~valid_options, 0.0) ** 2).sum(
+                        dim=-1, keepdim=True
+                    )
+                    / v_cnt
+                ).clamp_min(1e-4)
+                sims_z = (sims_f - sims_m) / sims_var.sqrt()
+                similarities = (
+                    torch.tanh((0.70 * joint_mcqa_z + 0.30 * sims_z) * 0.65)
+                    .masked_fill(~valid_options, -1.0)
+                    .to(similarities.dtype)
+                )
 
         with torch.autocast(device_type=context_ids.device.type, enabled=False):
             scale = self._scale()
@@ -1251,7 +1402,7 @@ class CognitiveOperatorEnsemble(nn.Module):
             )
 
         if lm_cont_score is not None:
-            canon_scores = 0.35 * canon_scores + 0.65 * lm_cont_score
+            canon_scores = 0.22 * canon_scores + 0.78 * lm_cont_score
 
         valid_scores = canon_scores.index_select(0, inv_perm)
         state_proj = canon_state_proj.index_select(0, inv_perm)
@@ -1262,6 +1413,32 @@ class CognitiveOperatorEnsemble(nn.Module):
         similarities = valid_scores.new_zeros(valid_options.shape).masked_scatter(
             valid_options, valid_scores
         )
+        joint_mcqa_z = self._compute_joint_comparative_coe_score(
+            trimmed_ctx_ids,
+            context_lengths,
+            option_ids,
+            option_lengths,
+            valid_options,
+            recurrence_steps=steps,
+            depth_ponder=use_ponder,
+        )
+        if joint_mcqa_z is not None:
+            with torch.autocast(device_type=context_ids.device.type, enabled=False):
+                sims_f = similarities.float().masked_fill(~valid_options, 0.0)
+                v_cnt = valid_options.float().sum(dim=-1, keepdim=True).clamp_min(1.0)
+                sims_m = sims_f.sum(dim=-1, keepdim=True) / v_cnt
+                sims_var = (
+                    ((sims_f - sims_m).masked_fill(~valid_options, 0.0) ** 2).sum(
+                        dim=-1, keepdim=True
+                    )
+                    / v_cnt
+                ).clamp_min(1e-4)
+                sims_z = (sims_f - sims_m) / sims_var.sqrt()
+                similarities = (
+                    torch.tanh((0.70 * joint_mcqa_z + 0.30 * sims_z) * 0.65)
+                    .masked_fill(~valid_options, -1.0)
+                    .to(similarities.dtype)
+                )
 
         # Scatter [R, d_model] representations into [B, M, d_model] grids for multi-operator readout
         d_m = state_repr.shape[-1]

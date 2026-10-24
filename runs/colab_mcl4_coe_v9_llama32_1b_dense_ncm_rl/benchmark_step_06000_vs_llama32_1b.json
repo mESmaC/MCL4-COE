@@ -78,101 +78,90 @@
       "val_bpb_typed_decision": 0.2202,
       "TypedDecision_MCQA (N=128)": 58.59,
       "TypedDecision_MCQA_5Op (N=128)": 57.81,
+      "ARC-Challenge_Val (N=299, 4-way)": {
+        "coe_decision_acc": 49.16,
+        "coe_multi_op_acc": 49.16,
+        "coe_full_ens_acc": 49.16
+      },
       "ARC-Challenge (N=300, 4-way)": {
-        "acc": 30.67,
-        "acc_norm": 32.67,
-        "coe_decision_acc": 29.0,
-        "coe_multi_op_acc": 26.33,
-        "coe_adaptive_acc": 32.0,
-        "coe_full_ens_acc": 30.33,
-        "r4_acc": 29.0,
-        "r4_acc_norm": 32.67,
-        "r4_coe_adaptive_acc": 30.33,
-        "r4_coe_full_ens_acc": 30.67
+        "acc": 30.33,
+        "acc_norm": 33.33,
+        "coe_decision_acc": 45.67,
+        "coe_multi_op_acc": 44.67,
+        "coe_adaptive_acc": 45.0,
+        "coe_full_ens_acc": 45.33
       },
       "MMLU_57Subj (N=342, 4-way)": {
-        "acc": 29.24,
-        "acc_norm": 30.41,
-        "coe_decision_acc": 26.61,
-        "coe_multi_op_acc": 25.44,
-        "coe_adaptive_acc": 30.99,
-        "coe_full_ens_acc": 31.29
+        "acc": 28.95,
+        "acc_norm": 33.33,
+        "coe_decision_acc": 47.08,
+        "coe_multi_op_acc": 46.2,
+        "coe_adaptive_acc": 46.2,
+        "coe_full_ens_acc": 45.32
       },
       "HellaSwag (N=300, 4-way)": {
-        "acc": 40.0,
-        "acc_norm": 47.67,
-        "coe_decision_acc": 20.33,
-        "coe_multi_op_acc": 21.0,
-        "coe_adaptive_acc": 41.33,
-        "coe_full_ens_acc": 39.0
+        "acc": 42.0,
+        "acc_norm": 50.67,
+        "coe_decision_acc": 40.67,
+        "coe_multi_op_acc": 41.33,
+        "coe_adaptive_acc": 42.33,
+        "coe_full_ens_acc": 42.33
       },
       "OpenBookQA_MultiHop_Science (N=500, 4-way)": {
-        "acc": 26.2,
-        "acc_norm": 35.8,
-        "coe_decision_acc": 34.8,
-        "coe_multi_op_acc": 33.0,
-        "coe_adaptive_acc": 36.2,
-        "coe_full_ens_acc": 39.8,
-        "r4_acc": 26.6,
-        "r4_acc_norm": 35.6,
-        "r4_coe_adaptive_acc": 35.8,
-        "r4_coe_full_ens_acc": 39.6
+        "acc": 27.0,
+        "acc_norm": 36.6,
+        "coe_decision_acc": 56.2,
+        "coe_multi_op_acc": 56.2,
+        "coe_adaptive_acc": 55.0,
+        "coe_full_ens_acc": 55.0
       },
       "MuSR_Murder_Mysteries (N=250, 2-way)": {
-        "acc": 52.8,
-        "acc_norm": 51.6,
+        "acc": 53.6,
+        "acc_norm": 52.4,
         "coe_decision_acc": 53.6,
         "coe_multi_op_acc": 52.4,
         "coe_adaptive_acc": 52.8,
-        "coe_full_ens_acc": 51.6
+        "coe_full_ens_acc": 52.0
       },
       "MuSR_Object_Placements (N=256, 5-way)": {
-        "acc": 35.94,
-        "acc_norm": 25.78,
-        "coe_decision_acc": 26.95,
-        "coe_multi_op_acc": 28.12,
-        "coe_adaptive_acc": 29.3,
-        "coe_full_ens_acc": 26.95
+        "acc": 37.89,
+        "acc_norm": 23.83,
+        "coe_decision_acc": 32.81,
+        "coe_multi_op_acc": 32.03,
+        "coe_adaptive_acc": 30.86,
+        "coe_full_ens_acc": 31.25
       },
       "MuSR_Team_Allocation (N=250, 3-way)": {
         "acc": 38.0,
         "acc_norm": 38.0,
-        "coe_decision_acc": 35.2,
+        "coe_decision_acc": 36.0,
         "coe_multi_op_acc": 35.2,
-        "coe_adaptive_acc": 33.6,
+        "coe_adaptive_acc": 35.6,
         "coe_full_ens_acc": 34.8
       },
       "BBH_Logical_Deduction_3Obj (N=250, 3-way)": {
-        "acc": 38.0,
-        "acc_norm": 36.0,
-        "coe_decision_acc": 32.4,
-        "coe_multi_op_acc": 32.0,
-        "coe_adaptive_acc": 35.6,
-        "coe_full_ens_acc": 35.2,
-        "r4_acc": 36.8,
-        "r4_acc_norm": 36.8,
-        "r4_coe_adaptive_acc": 35.2,
-        "r4_coe_full_ens_acc": 35.2
+        "acc": 38.8,
+        "acc_norm": 37.6,
+        "coe_decision_acc": 37.6,
+        "coe_multi_op_acc": 37.2,
+        "coe_adaptive_acc": 36.4,
+        "coe_full_ens_acc": 36.8
       },
       "BBH_Logical_Deduction_5Obj (N=250, 5-way)": {
-        "acc": 21.6,
-        "acc_norm": 20.8,
-        "coe_decision_acc": 16.4,
-        "coe_multi_op_acc": 14.8,
-        "coe_adaptive_acc": 22.8,
-        "coe_full_ens_acc": 22.0
+        "acc": 28.0,
+        "acc_norm": 26.0,
+        "coe_decision_acc": 29.6,
+        "coe_multi_op_acc": 30.4,
+        "coe_adaptive_acc": 30.0,
+        "coe_full_ens_acc": 30.0
       },
       "BBH_Tracking_Shuffled_Objects (N=250, 3-way)": {
         "acc": 35.2,
-        "acc_norm": 34.0,
-        "coe_decision_acc": 31.2,
+        "acc_norm": 35.2,
+        "coe_decision_acc": 34.4,
         "coe_multi_op_acc": 35.2,
-        "coe_adaptive_acc": 32.8,
-        "coe_full_ens_acc": 34.0,
-        "r4_acc": 36.0,
-        "r4_acc_norm": 33.6,
-        "r4_coe_adaptive_acc": 34.0,
-        "r4_coe_full_ens_acc": 34.0
+        "coe_adaptive_acc": 34.0,
+        "coe_full_ens_acc": 34.8
       },
       "BBH_Web_of_Lies (N=250, 2-way)": {
         "acc": 54.8,
@@ -180,11 +169,7 @@
         "coe_decision_acc": 51.6,
         "coe_multi_op_acc": 51.6,
         "coe_adaptive_acc": 54.8,
-        "coe_full_ens_acc": 52.4,
-        "r4_acc": 52.0,
-        "r4_acc_norm": 53.6,
-        "r4_coe_adaptive_acc": 52.8,
-        "r4_coe_full_ens_acc": 53.6
+        "coe_full_ens_acc": 52.4
       },
       "BBH_Formal_Fallacies (N=250, 2-way)": {
         "acc": 46.8,

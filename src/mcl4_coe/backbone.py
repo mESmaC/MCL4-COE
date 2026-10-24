@@ -1961,13 +1961,16 @@ class MCL4CEDBackbone(nn.Module):
                     r_deep = (r_stack * w_decay).sum(dim=0)
                 if causal_cross:
                     with torch.no_grad():
-                        l1 = self.lm_head(s1).float()
-                        if self.config.logits_scaling != 1.0:
-                            l1 = l1 / float(self.config.logits_scaling)
-                        p1 = F.softmax(l1, dim=-1)
-                        del l1
-                        ent1 = torch.special.entr(p1).sum(dim=-1, keepdim=True)
-                        del p1
+                        ent_chunks: list[Tensor] = []
+                        for r_i in range(0, s1.shape[0], 4):
+                            l_c = self.lm_head(s1[r_i : r_i + 4]).float()
+                            if self.config.logits_scaling != 1.0:
+                                l_c = l_c / float(self.config.logits_scaling)
+                            p_c = F.softmax(l_c, dim=-1)
+                            del l_c
+                            ent_chunks.append(torch.special.entr(p_c).sum(dim=-1, keepdim=True))
+                            del p_c
+                        ent1 = torch.cat(ent_chunks, dim=0)
                         gate_ent = (0.50 + 0.35 * torch.sigmoid((ent1 - 1.5) / 0.6)).to(r1.dtype)
                     blended = self.final_norm(r1 + gate_ent * (r_deep - r1))
                 else:
@@ -1975,13 +1978,16 @@ class MCL4CEDBackbone(nn.Module):
                 state = blended.masked_fill(~work_valid.unsqueeze(-1), 0)
             elif causal_cross:
                 with torch.no_grad():
-                    l1 = self.lm_head(s1).float()
-                    if self.config.logits_scaling != 1.0:
-                        l1 = l1 / float(self.config.logits_scaling)
-                    p1 = F.softmax(l1, dim=-1)
-                    del l1
-                    ent1 = torch.special.entr(p1).sum(dim=-1, keepdim=True)
-                    del p1
+                    ent_chunks = []
+                    for r_i in range(0, s1.shape[0], 4):
+                        l_c = self.lm_head(s1[r_i : r_i + 4]).float()
+                        if self.config.logits_scaling != 1.0:
+                            l_c = l_c / float(self.config.logits_scaling)
+                        p_c = F.softmax(l_c, dim=-1)
+                        del l_c
+                        ent_chunks.append(torch.special.entr(p_c).sum(dim=-1, keepdim=True))
+                        del p_c
+                    ent1 = torch.cat(ent_chunks, dim=0)
                     gate_ent = (0.50 + 0.35 * torch.sigmoid((ent1 - 1.5) / 0.6)).to(s1.dtype)
                 blended = self.final_norm(s1 + gate_ent * (s_deep - s1))
                 state = blended.masked_fill(~work_valid.unsqueeze(-1), 0)

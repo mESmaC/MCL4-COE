@@ -1473,7 +1473,7 @@ class MCL4COETrainer:
         already_compact = (not self.config.save_optimizer_state) and (
             str(self.config.model_dtype).lower() in ("bfloat16", "bf16")
         )
-        tmp_cloud_pt = pt_path.with_name(f".hf_sync_{step_name}.pt")
+        tmp_cloud_pt = pt_path.with_name(f"hf_sync_{step_name}.pt")
         hardlinked = False
         if already_compact and pt_path.is_file():
             try:
@@ -1489,9 +1489,10 @@ class MCL4COETrainer:
         def _worker() -> None:
             with self._hf_upload_lock:
                 try:
-                    from huggingface_hub import HfApi
+                    from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi
 
                     api = HfApi(token=hf_token)
+                    ops: list[Any] = []
                     for rel_f in (
                         "run_manifest.json",
                         "metrics.jsonl",
@@ -1501,23 +1502,13 @@ class MCL4COETrainer:
                     ):
                         local_f = run_dir / rel_f
                         if local_f.is_file():
-                            api.upload_file(
-                                path_or_fileobj=str(local_f),
-                                path_in_repo=f"{run_id}/{rel_f}",
-                                repo_id=repo_id,
-                                repo_type="model",
-                                commit_message=f"[{run_id}] Sync {rel_f} ({step_name})",
+                            ops.append(
+                                CommitOperationAdd(
+                                    path_in_repo=f"{run_id}/{rel_f}",
+                                    path_or_fileobj=str(local_f),
+                                )
                             )
-                    if hardlinked and tmp_cloud_pt.is_file():
-                        api.upload_file(
-                            path_or_fileobj=str(tmp_cloud_pt),
-                            path_in_repo=f"{run_id}/checkpoints/{step_name}.pt",
-                            repo_id=repo_id,
-                            repo_type="model",
-                            commit_message=f"[{run_id}] Backup checkpoint {step_name}.pt (bf16)",
-                        )
-                        tmp_cloud_pt.unlink(missing_ok=True)
-                    elif pt_path.is_file():
+                    if not hardlinked and pt_path.is_file():
                         raw = torch.load(pt_path, map_location="cpu", weights_only=False)
                         raw.pop("optimizer_state", None)
                         if "model_state" in raw and isinstance(raw["model_state"], dict):
@@ -1532,31 +1523,35 @@ class MCL4COETrainer:
                         torch.save(raw, tmp_cloud_pt)
                         del raw
                         gc.collect()
-                        api.upload_file(
-                            path_or_fileobj=str(tmp_cloud_pt),
-                            path_in_repo=f"{run_id}/checkpoints/{step_name}.pt",
+                    if tmp_cloud_pt.is_file():
+                        ops.append(
+                            CommitOperationAdd(
+                                path_in_repo=f"{run_id}/checkpoints/{step_name}.pt",
+                                path_or_fileobj=str(tmp_cloud_pt),
+                            )
+                        )
+                    try:
+                        repo_files = api.list_repo_files(repo_id, repo_type="model")
+                        remote_pts = sorted(
+                            f
+                            for f in repo_files
+                            if f.startswith(f"{run_id}/checkpoints/step_")
+                            and f.endswith(".pt")
+                            and f != f"{run_id}/checkpoints/{step_name}.pt"
+                        )
+                        if len(remote_pts) >= keep_remote:
+                            for old_remote in remote_pts[: len(remote_pts) - keep_remote + 1]:
+                                ops.append(CommitOperationDelete(path_in_repo=old_remote))
+                    except Exception:
+                        pass
+                    if ops:
+                        api.create_commit(
                             repo_id=repo_id,
                             repo_type="model",
-                            commit_message=f"[{run_id}] Backup checkpoint {step_name}.pt (bf16)",
+                            operations=ops,
+                            commit_message=f"[{run_id}] Sync telemetry & checkpoint {step_name}",
                         )
-                        tmp_cloud_pt.unlink(missing_ok=True)
-                    repo_files = api.list_repo_files(repo_id, repo_type="model")
-                    remote_pts = sorted(
-                        f
-                        for f in repo_files
-                        if f.startswith(f"{run_id}/checkpoints/step_") and f.endswith(".pt")
-                    )
-                    if len(remote_pts) > keep_remote:
-                        for old_remote in remote_pts[:-keep_remote]:
-                            try:
-                                api.delete_file(
-                                    path_in_repo=old_remote,
-                                    repo_id=repo_id,
-                                    repo_type="model",
-                                    commit_message=f"[{run_id}] Prune old remote checkpoint {old_remote}",
-                                )
-                            except Exception:
-                                pass
+                    tmp_cloud_pt.unlink(missing_ok=True)
                 except Exception as exc:
                     print('hf_backup warning:', step_name, repo_id, exc, flush=True)
                     try:

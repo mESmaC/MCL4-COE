@@ -1760,15 +1760,60 @@ class MCL4CEDBackbone(nn.Module):
             if not candidate_valid.any(dim=-1).all():
                 raise ValueError("Every decoded candidate row must have at least one valid token")
 
-        original_inputs = self.token_embedding(candidate_ids.long())
+        # For donor-grafted models (`preserve_residual_across_stacks=True`) decoding candidate options
+        # against a context (`owner_rows is not None`), prepend the right-aligned valid question tail
+        # before running `encoder_layers[0..7]` and `decoder_layers[0..7]` so all 16 layers share
+        # consistent RoPE positions and native causal self-attention across `[question -> candidate]`.
+        k_ctx_prefix = 0
+        strip_cand_bos = False
+        work_ids = candidate_ids
+        work_valid = candidate_valid
+        if (
+            candidate_encoded is None
+            and owner_rows is not None
+            and causal_local
+            and self.config.preserve_residual_across_stacks
+            and encoded_state.state_ids is not None
+        ):
+            s_ids = encoded_state.state_ids
+            s_val = encoded_state.valid
+            s_content_val = s_val & (s_ids != self.eos_id)
+            s_content_val = torch.where(
+                s_content_val.any(dim=-1, keepdim=True), s_content_val, s_val
+            )
+            max_ctx_len = int(s_content_val.sum(dim=-1).max().item())
+            if max_ctx_len >= 1:
+                k_ctx_prefix = min(96, max_ctx_len)
+                _, right_perm = torch.sort(s_content_val.to(torch.int32), dim=-1, stable=True)
+                tail_perm = right_perm[:, -k_ctx_prefix:]
+                tail_ids_b = s_ids.gather(1, tail_perm)
+                tail_val_b = s_content_val.gather(1, tail_perm)
+                tail_ids = tail_ids_b.index_select(0, owner_rows)
+                tail_val = tail_val_b.index_select(0, owner_rows)
+                if (
+                    candidate_ids.shape[1] >= 2
+                    and bool(candidate_valid[:, 1:].any(dim=-1).all())
+                    and (
+                        (self.config.vocab_size == 128256 and bool((candidate_ids[:, 0] == 128000).all()))
+                        or bool((candidate_ids[:, 0] == self.config.pad_id + 1).all())
+                    )
+                ):
+                    strip_cand_bos = True
+                    work_ids = torch.cat([tail_ids, candidate_ids[:, 1:]], dim=1)
+                    work_valid = torch.cat([tail_val, candidate_valid[:, 1:]], dim=1)
+                else:
+                    work_ids = torch.cat([tail_ids, candidate_ids], dim=1)
+                    work_valid = torch.cat([tail_val, candidate_valid], dim=1)
+
+        work_orig = self.token_embedding(work_ids.long())
         if self.config.embedding_multiplier != 1.0:
-            original_inputs = original_inputs * float(self.config.embedding_multiplier)
-        original_inputs = original_inputs.masked_fill(~candidate_valid.unsqueeze(-1), 0)
+            work_orig = work_orig * float(self.config.embedding_multiplier)
+        work_orig = work_orig.masked_fill(~work_valid.unsqueeze(-1), 0)
         if candidate_encoded is None:
             candidate_encoded = self.encode_state(
-                candidate_ids, candidate_valid, causal=causal_local
+                work_ids, work_valid, causal=causal_local
             )
-        anchor = (
+        work_anchor = (
             candidate_encoded.raw_hidden
             if (
                 self.config.preserve_residual_across_stacks
@@ -1776,60 +1821,15 @@ class MCL4CEDBackbone(nn.Module):
             )
             else candidate_encoded.hidden
         )
-
-        # For donor-grafted models (`preserve_residual_across_stacks=True`) decoding candidate options
-        # against a context (`owner_rows is not None`), prepend the right-aligned valid question tail
-        # from `encoded_state.raw_hidden` so Layers 8..15 native RoPE self-attention (`local_attention`)
-        # directly attends across the `[question_tail -> candidate_option]` boundary.
-        k_ctx_prefix = 0
-        work_anchor = anchor
-        work_orig = original_inputs
-        work_ids = candidate_ids
-        work_valid = candidate_valid
-        if (
-            owner_rows is not None
-            and causal_local
-            and self.config.preserve_residual_across_stacks
-            and encoded_state.raw_hidden is not None
-            and encoded_state.state_ids is not None
-        ):
-            s_ids = encoded_state.state_ids
-            s_val = encoded_state.valid
-            s_raw = encoded_state.raw_hidden
-            s_content_val = s_val & (s_ids != self.eos_id)
-            s_content_val = torch.where(
-                s_content_val.any(dim=-1, keepdim=True), s_content_val, s_val
+        if k_ctx_prefix > 0:
+            anc_slice = (
+                work_anchor[:, k_ctx_prefix - 1 :, :]
+                if strip_cand_bos
+                else work_anchor[:, k_ctx_prefix:, :]
             )
-            max_ctx_len = int(s_content_val.sum(dim=-1).max().item())
-            if max_ctx_len >= 1:
-                k_ctx_prefix = min(64, max_ctx_len)
-                _, right_perm = torch.sort(s_content_val.to(torch.int32), dim=-1, stable=True)
-                tail_perm = right_perm[:, -k_ctx_prefix:]
-                tail_ids_b = s_ids.gather(1, tail_perm)
-                tail_val_b = s_content_val.gather(1, tail_perm)
-                tail_raw_b = s_raw.gather(
-                    1, tail_perm.unsqueeze(-1).expand(-1, -1, s_raw.shape[-1])
-                )
-                tail_ids = tail_ids_b.index_select(0, owner_rows)
-                tail_val = tail_val_b.index_select(0, owner_rows)
-                tail_raw = tail_raw_b.index_select(0, owner_rows)
-                tail_orig = self.token_embedding(tail_ids.long())
-                if self.config.embedding_multiplier != 1.0:
-                    tail_orig = tail_orig * float(self.config.embedding_multiplier)
-                tail_orig = tail_orig.masked_fill(~tail_val.unsqueeze(-1), 0)
-                cand_val_eff = candidate_valid
-                if (
-                    self.config.vocab_size == 128256
-                    and candidate_ids.shape[1] >= 2
-                    and bool((candidate_ids[:, 0] == 128000).all())
-                    and bool(candidate_valid[:, 1:].any(dim=-1).all())
-                ):
-                    cand_val_eff = candidate_valid.clone()
-                    cand_val_eff[:, 0] = False
-                work_anchor = torch.cat([tail_raw, anchor], dim=1)
-                work_orig = torch.cat([tail_orig, original_inputs], dim=1)
-                work_ids = torch.cat([tail_ids, candidate_ids], dim=1)
-                work_valid = torch.cat([tail_val, cand_val_eff], dim=1)
+            anchor = anc_slice.masked_fill(~candidate_valid.unsqueeze(-1), 0)
+        else:
+            anchor = work_anchor
 
         n_prefix_kv = (
             max(0, int(encoded_state.hidden.shape[1] - candidate_ids.shape[1]))
@@ -1974,9 +1974,10 @@ class MCL4CEDBackbone(nn.Module):
         ctx_last_hidden: Tensor | None = None
         if k_ctx_prefix > 0:
             ctx_last_hidden = state[:, k_ctx_prefix - 1, :]
-            state = state[:, k_ctx_prefix:, :].masked_fill(~candidate_valid.unsqueeze(-1), 0)
+            s_start = (k_ctx_prefix - 1) if strip_cand_bos else k_ctx_prefix
+            state = state[:, s_start:, :].masked_fill(~candidate_valid.unsqueeze(-1), 0)
             step_states = [
-                s[:, k_ctx_prefix:, :].masked_fill(~candidate_valid.unsqueeze(-1), 0)
+                s[:, s_start:, :].masked_fill(~candidate_valid.unsqueeze(-1), 0)
                 for s in step_states
             ]
 

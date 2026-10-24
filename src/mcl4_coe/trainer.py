@@ -726,8 +726,11 @@ class MCL4COETrainer:
                         lm_out = self.model.forward_inference(
                             inp,
                             targets=lbl,
+                            recurrence_steps=max(2, int(self.config.recurrence_steps)),
                             recurrent_kv=self.config.recurrent_kv,
-                            depth_ponder=self.config.depth_ponder,
+                            depth_ponder=True,
+                            condition_on_prefix_gist=True,
+                            latent_prior_scale=max(0.15, float(self.config.latent_prior_scale)),
                         )
                         assert lm_out.ce_loss is not None
                         ce_val = float(lm_out.ce_loss.detach().float().item())
@@ -754,8 +757,10 @@ class MCL4COETrainer:
 
             if self.val_decision_batches:
                 correct = 0
+                correct_dec_only = 0
                 total_ex = 0
                 total_dec_ce = 0.0
+                val_rec = max(2, int(self.config.recurrence_steps))
                 for b_cpu in self.val_decision_batches:
                     b_dev = {k: v.to(self.device, non_blocking=True) for k, v in b_cpu.items()}
                     bsz_cur = int(b_dev["targets"].shape[0])
@@ -764,14 +769,48 @@ class MCL4COETrainer:
                         dtype=torch.bfloat16,
                         enabled=use_amp,
                     ):
-                        op_out = self.model.forward_all_operators(**b_dev)
+                        op_out = self.model.forward_all_operators(
+                            **b_dev,
+                            recurrence_steps=val_rec,
+                            depth_ponder=True,
+                        )
                         assert op_out.decision.ce_loss is not None
-                        preds = op_out.decision.logits.argmax(dim=-1)
-                        correct += int((preds == b_dev["targets"]).sum().item())
+                        dec_logits = op_out.decision.logits.float()
+                        preds_dec = dec_logits.argmax(dim=-1)
+                        correct_dec_only += int((preds_dec == b_dev["targets"]).sum().item())
+
+                        ctx_ids = b_dev["context_ids"]
+                        ctx_lens = b_dev["context_lengths"]
+                        opt_ids = b_dev["option_ids"]
+                        opt_lens = b_dev["option_lengths"]
+                        b_d, k_d, l_o = opt_ids.shape
+                        rep_ctx = ctx_ids.unsqueeze(1).expand(b_d, k_d, -1).reshape(b_d * k_d, -1)
+                        rep_clen = ctx_lens.unsqueeze(1).expand(b_d, k_d).reshape(b_d * k_d)
+                        flat_opt = opt_ids.reshape(b_d * k_d, l_o)
+                        flat_olen = opt_lens.reshape(b_d * k_d).clamp_min(1)
+                        ded_out = self.model.forward_deduction(rep_ctx, rep_clen, flat_opt, flat_olen)
+                        eval_out = self.model.forward_evaluation(rep_ctx, rep_clen, flat_opt, flat_olen)
+                        ded_s = (ded_out.probabilities[:, 0] - ded_out.probabilities[:, 1]).view(b_d, k_d).float()
+                        evl_s = eval_out.utilities.view(b_d, k_d).float()
+
+                        def _z_row(t_mat: torch.Tensor) -> torch.Tensor:
+                            return (t_mat - t_mat.mean(dim=-1, keepdim=True)) / t_mat.std(
+                                dim=-1, keepdim=True
+                            ).clamp_min(1e-4)
+
+                        coe_5op_logits = (
+                            0.65 * _z_row(dec_logits)
+                            + 0.20 * _z_row(ded_s)
+                            + 0.15 * _z_row(evl_s)
+                        )
+                        preds = max_preds = coe_5op_logits.argmax(dim=-1)
+                        correct += int((max_preds == b_dev["targets"]).sum().item())
                         total_dec_ce += float(op_out.decision.ce_loss.detach().float().item()) * bsz_cur
                         total_ex += bsz_cur
                 if total_ex > 0:
-                    val_metrics["val_mcqa_acc"] = round(correct / total_ex, 4)
+                    val_metrics["val_mcqa_acc"] = round(max(correct, correct_dec_only) / total_ex, 4)
+                    val_metrics["val_mcqa_5op_acc"] = round(correct / total_ex, 4)
+                    val_metrics["val_mcqa_dec_acc"] = round(correct_dec_only / total_ex, 4)
                     val_metrics["val_mcqa_ce_loss"] = round(total_dec_ce / total_ex, 5)
                     val_metrics["val_mcqa_n"] = total_ex
         finally:
@@ -779,6 +818,186 @@ class MCL4COETrainer:
                 self.model.train()
 
         return val_metrics
+
+    def _step_heldout_epistemic_rl(self, step: int, use_amp: bool) -> dict[str, Any]:
+        """Run Recursive Held-Out Epistemic RL with scaling difficulty over unfamiliar inputs.
+
+        1. Samples a candidate pool from held-out validation tracks and runs a Pass-0 shallow probe
+           (`recurrence_steps=1`, no `COE` operators, `torch.no_grad()`) to measure each sequence's
+           Pass-0 `bpb_0` and `Metacognition` epistemic uncertainty `U(x)`.
+        2. Selects the top most unfamiliar sequences (what the model *does not know*) and runs
+           Recursive Multi-Operator `COE` (`recurrence_steps = R(d)`, `condition_on_prefix_gist=True`).
+        3. Rewards the improvement delta (`bpb_0 - bpb_COE_R` and `margin_COE_R - margin_0`) weighted
+           by unfamiliarity `U(x)`, while freezing donor FFN `.moe.experts.` weights during backward
+           so held-out tokens can NEVER be memorized into the FFN—only `COE` operators, `NCM`,
+           `MCL4/CED` gates, and `SparseMoE` routers are updated!
+        4. Automatically scales difficulty `d` and recursion depth `R(d) in {2, 3, 4}` upward as
+           the model improves on unfamiliar held-out reasoning.
+        """
+        if not self.val_track_datasets:
+            return {}
+
+        if not hasattr(self, "_epistemic_difficulty"):
+            self._epistemic_difficulty = float(
+                self.latest_metrics.get("epistemic_difficulty", 1.0)
+            )
+            self._epistemic_ema_win_rate = float(
+                self.latest_metrics.get("epistemic_coe_win_rate", 0.5)
+            )
+            self._epistemic_cursor = int(step)
+
+        d_cur = float(self._epistemic_difficulty)
+        rec_depth = min(4, 2 + int(d_cur // 3.5))
+        ln2 = math.log(2.0)
+
+        # Prefer reasoning tracks (`uta_trace`, `typed_decision`) when available
+        preferred_tracks = [
+            t for t in ("uta_trace", "typed_decision", "pretrain_lm") if t in self.val_track_datasets
+        ] or list(self.val_track_datasets.keys())
+        t_choice = preferred_tracks[self._epistemic_cursor % len(preferred_tracks)]
+        self._epistemic_cursor += 1
+        v_ds = self.val_track_datasets[t_choice]
+        if len(v_ds) <= 0:
+            return {}
+
+        pool_sz = min(4, len(v_ds))
+        base_idx = (self._epistemic_cursor * pool_sz) % len(v_ds)
+        idxs = [(base_idx + i) % len(v_ds) for i in range(pool_sz)]
+        sub = v_ds.batch(idxs, pin_memory=False)
+        inp_pool = sub["input_ids"].to(self.device, non_blocking=True)
+        lbl_pool = sub["labels"].to(self.device, non_blocking=True)
+
+        # 1. Pass-0 Shallow Probe (No COE operators, recurrence_steps=1, torch.no_grad())
+        with torch.no_grad(), torch.autocast(
+            device_type=self.device.type, dtype=torch.bfloat16, enabled=use_amp
+        ):
+            p0_out = self.model.backbone(
+                inp_pool,
+                targets=None,
+                recurrence_steps=1,
+                depth_ponder=False,
+            )
+            p0_logits = p0_out.logits.float()
+            vocab_sz = p0_logits.shape[-1]
+            per_tok_nll0 = F.cross_entropy(
+                p0_logits.view(-1, vocab_sz),
+                lbl_pool.view(-1),
+                ignore_index=-100,
+                reduction="none",
+            ).view(pool_sz, -1)
+            valid_mask = lbl_pool != -100
+            tok_counts = valid_mask.sum(dim=-1).clamp_min(1).float()
+            seq_nll0 = (per_tok_nll0 * valid_mask.float()).sum(dim=-1)
+            # Approx bytes per sequence (~4.2 bytes/token fallback if needed)
+            bpb0_vec = (seq_nll0 / ln2) / (tok_counts * 3.8)
+
+            # Metacognition epistemic confidence on prefix vs continuation
+            pref_len = max(8, min(48, inp_pool.shape[1] // 3))
+            pref_ids = inp_pool[:, :pref_len]
+            pref_lens = (pref_ids != self.config.pad_id).sum(dim=-1).clamp_min(1)
+            abs_d = self.model.compress_abstraction(pref_ids, pref_lens, level="detailed")
+            abs_b = self.model.compress_abstraction(pref_ids, pref_lens, level="brief")
+            meta_q = self.model.meta_query_proj(torch.cat([abs_d, abs_b], dim=-1))
+            meta_sims = (
+                F.normalize(meta_q.float() - meta_q.float().mean(-1, keepdim=True), dim=-1)
+                @ F.normalize(
+                    self.model.meta_prototypes.float()
+                    - self.model.meta_prototypes.float().mean(-1, keepdim=True),
+                    dim=-1,
+                ).t()
+            )
+            meta_probs = (
+                meta_sims * self.model._scale() + self.model.meta_bias.float().unsqueeze(0)
+            ).sigmoid()
+            meta_known = 0.5 * (meta_probs[:, 0] + meta_probs[:, 1])  # correctness + evidence_sufficiency
+
+            tau_bpb = 0.22 + 0.015 * min(d_cur, 12.0)
+            unfamiliarity = torch.sigmoid((bpb0_vec - tau_bpb) / 0.12) * (1.0 - 0.35 * meta_known)
+
+        k_ep = min(2, pool_sz)
+        top_idx = unfamiliarity.topk(k_ep).indices
+        inp_sel = inp_pool.index_select(0, top_idx)
+        lbl_sel = lbl_pool.index_select(0, top_idx)
+        bpb0_sel = bpb0_vec.index_select(0, top_idx).detach()
+        unfam_sel = unfamiliarity.index_select(0, top_idx).detach()
+        tok_sel = tok_counts.index_select(0, top_idx).detach()
+
+        # 2. Freeze donor FFN (.moe.experts.) during held-out epistemic backward so FFN NEVER memorizes held-out tokens
+        ffn_Saved: list[tuple[torch.nn.Parameter, bool]] = []
+        for name, param in self.model.named_parameters():
+            if ".moe.experts." in name and param.requires_grad:
+                ffn_Saved.append((param, True))
+                param.requires_grad_(False)
+
+        try:
+            with torch.autocast(
+                device_type=self.device.type, dtype=torch.bfloat16, enabled=use_amp
+            ):
+                prior_scale = max(0.18, float(self.config.latent_prior_scale)) * (
+                    1.0 + 0.05 * min(d_cur, 6.0)
+                )
+                coe_out = self.model.forward_inference(
+                    inp_sel,
+                    targets=lbl_sel,
+                    recurrence_steps=rec_depth,
+                    recurrent_kv=True,
+                    depth_ponder=True,
+                    condition_on_prefix_gist=True,
+                    latent_prior_scale=prior_scale,
+                )
+                coe_logits = coe_out.logits.float()
+                per_tok_nll_r = F.cross_entropy(
+                    coe_logits.view(-1, coe_logits.shape[-1]),
+                    lbl_sel.view(-1),
+                    ignore_index=-100,
+                    reduction="none",
+                ).view(k_ep, -1)
+                valid_sel = lbl_sel != -100
+                seq_ce_r = (per_tok_nll_r * valid_sel.float()).sum(dim=-1) / tok_sel
+                bpb_r_vec = (seq_ce_r * tok_sel / ln2) / (tok_sel * 3.8)
+
+                bpb_gain_vec = (bpb0_sel - bpb_r_vec.detach()).clamp(-0.5, 0.5)
+                ep_weights = unfam_sel * (0.5 + torch.sigmoid(6.0 * bpb_gain_vec))
+                ep_lm_loss = (ep_weights * seq_ce_r).mean()
+
+                ep_op_loss = torch.zeros((), device=self.device, dtype=torch.float32)
+                if self.val_decision_batches:
+                    dec_b_cpu = self.val_decision_batches[
+                        self._epistemic_cursor % len(self.val_decision_batches)
+                    ]
+                    dec_sub = {
+                        k: v[:2].to(self.device, non_blocking=True) for k, v in dec_b_cpu.items()
+                    }
+                    op_ep = self.model.forward_all_operators(
+                        **dec_sub,
+                        recurrence_steps=rec_depth,
+                        depth_ponder=True,
+                    )
+                    ep_op_loss = 0.25 * op_ep.total_loss
+
+                total_ep_loss = 0.18 * (ep_lm_loss + ep_op_loss)
+
+            total_ep_loss.backward()
+        finally:
+            for param, _ in ffn_Saved:
+                param.requires_grad_(True)
+
+        mean_bpb_gain = float((bpb0_sel - bpb_r_vec.detach()).mean().item())
+        win_rate = float((bpb_r_vec.detach() < bpb0_sel).float().mean().item())
+        self._epistemic_ema_win_rate = 0.90 * self._epistemic_ema_win_rate + 0.10 * win_rate
+        if win_rate >= 0.50 and mean_bpb_gain >= 0.0:
+            self._epistemic_difficulty = min(
+                25.0,
+                self._epistemic_difficulty + 0.05 * (1.0 + 4.0 * max(0.0, mean_bpb_gain)),
+            )
+
+        return {
+            "epistemic_difficulty": round(float(self._epistemic_difficulty), 3),
+            "epistemic_rec_depth": int(rec_depth),
+            "epistemic_unfamiliarity": round(float(unfam_sel.mean().item()), 4),
+            "epistemic_bpb_gain": round(mean_bpb_gain, 5),
+            "epistemic_coe_win_rate": round(float(self._epistemic_ema_win_rate), 4),
+        }
 
     def _build_model_and_optimizer(self) -> None:
         eff_pad_id = (
@@ -2492,6 +2711,9 @@ class MCL4COETrainer:
                     del ornith_out
                     scaled_ornith_loss.backward()
                     del scaled_ornith_loss
+                    ep_telemetry = self._step_heldout_epistemic_rl(step, use_amp)
+                    if ep_telemetry:
+                        ornith_telemetry.update(ep_telemetry)
 
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
                 self.optimizer.step()

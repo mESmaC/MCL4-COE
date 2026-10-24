@@ -1883,19 +1883,43 @@ class CognitiveOperatorEnsemble(nn.Module):
                 pref_lengths = pref_valid.sum(dim=-1).clamp_min(1)
                 cached_enc = getattr(self, "_last_gist_encoded_hidden", None)
                 self._last_gist_encoded_hidden = None
-                eff_prior = self.compress_abstraction(
+                enc_arg = (
+                    cached_enc
+                    if (cached_enc is not None and cached_enc.shape[1] == pref_len)
+                    else None
+                )
+                abs_detailed = self.compress_abstraction(
                     pref_ids,
                     pref_lengths,
                     level="detailed",
-                    encoded_hidden=(
-                        cached_enc
-                        if (cached_enc is not None and cached_enc.shape[1] == pref_len)
-                        else None
-                    ),
+                    encoded_hidden=enc_arg,
+                )
+                abs_brief = self.compress_abstraction(
+                    pref_ids,
+                    pref_lengths,
+                    level="brief",
+                    encoded_hidden=enc_arg,
                 )
                 del cached_enc
+                joint_pair = torch.cat([abs_detailed, abs_brief], dim=-1)
+                ded_q = self.deduction_query_proj(joint_pair)
+                ded_sims = pearson_similarity(
+                    ded_q.unsqueeze(1), self.deduction_prototypes.unsqueeze(0), eps=self.config.eps
+                )
+                ded_probs = (ded_sims * self._scale()).softmax(dim=-1)
+                meta_q = self.meta_query_proj(joint_pair)
+                meta_sims = pearson_similarity(
+                    meta_q.unsqueeze(1), self.meta_prototypes.unsqueeze(0), eps=self.config.eps
+                )
+                meta_probs = (
+                    meta_sims * self._scale() + self.meta_bias.float().unsqueeze(0)
+                ).sigmoid()
+                ded_entail_gain = (ded_probs[:, 0:1] - 0.5 * ded_probs[:, 1:2]).clamp(0.0, 1.0)
+                meta_ctx_gain = 0.5 * (meta_probs[:, 1:2] + meta_probs[:, 2:3])
+                coe_gate = (0.5 * ded_entail_gain + 0.5 * meta_ctx_gain).to(abs_detailed.dtype)
+                eff_prior = abs_detailed + 0.30 * coe_gate * (abs_brief - abs_detailed)
                 if eff_scale == 0.0:
-                    eff_scale = 0.12
+                    eff_scale = 0.15
             eff_start = pref_len
 
         return self.backbone.forward(

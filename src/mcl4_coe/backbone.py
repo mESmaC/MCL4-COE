@@ -1766,6 +1766,8 @@ class MCL4CEDBackbone(nn.Module):
         # consistent RoPE positions and native causal self-attention across `[question -> candidate]`.
         k_ctx_prefix = 0
         strip_cand_bos = False
+        q_row_lens: Tensor | None = None
+        cand_gather_idx: Tensor | None = None
         work_ids = candidate_ids
         work_valid = candidate_valid
         if (
@@ -1783,13 +1785,14 @@ class MCL4CEDBackbone(nn.Module):
             )
             max_ctx_len = int(s_content_val.sum(dim=-1).max().item())
             if max_ctx_len >= 1:
-                k_ctx_prefix = min(96, max_ctx_len)
+                k_ctx_prefix = min(384, max_ctx_len)
                 _, right_perm = torch.sort(s_content_val.to(torch.int32), dim=-1, stable=True)
                 tail_perm = right_perm[:, -k_ctx_prefix:]
                 tail_ids_b = s_ids.gather(1, tail_perm)
                 tail_val_b = s_content_val.gather(1, tail_perm)
                 tail_ids = tail_ids_b.index_select(0, owner_rows)
                 tail_val = tail_val_b.index_select(0, owner_rows)
+                q_row_lens = tail_val.sum(dim=-1).clamp_min(1)
                 if (
                     candidate_ids.shape[1] >= 2
                     and bool(candidate_valid[:, 1:].any(dim=-1).all())
@@ -1799,11 +1802,20 @@ class MCL4CEDBackbone(nn.Module):
                     )
                 ):
                     strip_cand_bos = True
-                    work_ids = torch.cat([tail_ids, candidate_ids[:, 1:]], dim=1)
-                    work_valid = torch.cat([tail_val, candidate_valid[:, 1:]], dim=1)
+                    cat_ids = torch.cat([tail_ids, candidate_ids[:, 1:]], dim=1)
+                    cat_val = torch.cat([tail_val, candidate_valid[:, 1:]], dim=1)
                 else:
-                    work_ids = torch.cat([tail_ids, candidate_ids], dim=1)
-                    work_valid = torch.cat([tail_val, candidate_valid], dim=1)
+                    cat_ids = torch.cat([tail_ids, candidate_ids], dim=1)
+                    cat_val = torch.cat([tail_val, candidate_valid], dim=1)
+                _, left_perm = torch.sort((~cat_val).to(torch.int32), dim=-1, stable=True)
+                work_ids = cat_ids.gather(1, left_perm)
+                work_valid = cat_val.gather(1, left_perm)
+                start_pos = (q_row_lens - 1) if strip_cand_bos else q_row_lens
+                t_cand = int(candidate_ids.shape[1])
+                cand_gather_idx = (
+                    start_pos.unsqueeze(1)
+                    + torch.arange(t_cand, device=work_ids.device).unsqueeze(0)
+                ).clamp(0, work_ids.shape[1] - 1)
 
         work_orig = self.token_embedding(work_ids.long())
         if self.config.embedding_multiplier != 1.0:
@@ -1821,24 +1833,30 @@ class MCL4CEDBackbone(nn.Module):
             )
             else candidate_encoded.hidden
         )
-        if k_ctx_prefix > 0:
-            anc_slice = (
-                work_anchor[:, k_ctx_prefix - 1 :, :]
-                if strip_cand_bos
-                else work_anchor[:, k_ctx_prefix:, :]
+        if k_ctx_prefix > 0 and cand_gather_idx is not None:
+            gather_3d = cand_gather_idx.unsqueeze(-1).expand(-1, -1, work_anchor.shape[-1])
+            anchor = work_anchor.gather(1, gather_3d).masked_fill(
+                ~candidate_valid.unsqueeze(-1), 0
             )
-            anchor = anc_slice.masked_fill(~candidate_valid.unsqueeze(-1), 0)
+            eff_kv_state = candidate_encoded
+            eff_owner_rows: Tensor | None = None
+            eff_causal_cross = True
+            eff_cross_mask: Tensor | None = None
         else:
             anchor = work_anchor
+            eff_kv_state = encoded_state
+            eff_owner_rows = owner_rows
+            eff_causal_cross = causal_cross
+            eff_cross_mask = causal_cross_mask
 
         n_prefix_kv = (
-            max(0, int(encoded_state.hidden.shape[1] - candidate_ids.shape[1]))
-            if (causal_cross and owner_rows is None)
+            max(0, int(eff_kv_state.hidden.shape[1] - work_ids.shape[1]))
+            if (eff_causal_cross and eff_owner_rows is None)
             else 0
         )
-        # Precompute K_global, V_global per decoder layer once for the unique state rows.
+        # Precompute K_global, V_global per decoder layer once for the state rows.
         global_kv_cache = [
-            layer.project_global_kv(encoded_state.hidden, n_prefix=n_prefix_kv)
+            layer.project_global_kv(eff_kv_state.hidden, n_prefix=n_prefix_kv)
             for layer in self.decoder_layers
         ]
 
@@ -1855,24 +1873,24 @@ class MCL4CEDBackbone(nn.Module):
             if (
                 recurrent_kv
                 and step > 0
-                and owner_rows is None
-                and encoded_state.hidden.shape[0] == x.shape[0]
-                and encoded_state.hidden.shape[1] >= x.shape[1]
+                and eff_owner_rows is None
+                and eff_kv_state.hidden.shape[0] == x.shape[0]
+                and eff_kv_state.hidden.shape[1] >= x.shape[1]
             ):
                 t_seq = x.shape[1]
-                t_tot = encoded_state.hidden.shape[1]
+                t_tot = eff_kv_state.hidden.shape[1]
                 if t_tot == t_seq:
-                    kv_state = self.encoder_norm(0.70 * encoded_state.hidden + 0.30 * x).masked_fill(
-                        ~encoded_state.valid.unsqueeze(-1), 0
+                    kv_state = self.encoder_norm(0.70 * eff_kv_state.hidden + 0.30 * x).masked_fill(
+                        ~eff_kv_state.valid.unsqueeze(-1), 0
                     )
                 else:
                     n_prefix = t_tot - t_seq
                     seq_part = self.encoder_norm(
-                        0.70 * encoded_state.hidden[:, n_prefix:] + 0.30 * x
+                        0.70 * eff_kv_state.hidden[:, n_prefix:] + 0.30 * x
                     )
                     kv_state = torch.cat(
-                        (encoded_state.hidden[:, :n_prefix], seq_part), dim=1
-                    ).masked_fill(~encoded_state.valid.unsqueeze(-1), 0)
+                        (eff_kv_state.hidden[:, :n_prefix], seq_part), dim=1
+                    ).masked_fill(~eff_kv_state.valid.unsqueeze(-1), 0)
                 step_kv_cache = [
                     layer.project_global_kv(kv_state, n_prefix=n_prefix_kv)
                     for layer in self.decoder_layers
@@ -1887,11 +1905,11 @@ class MCL4CEDBackbone(nn.Module):
                     work_valid,
                     k_global,
                     v_global,
-                    encoded_state.valid,
-                    owner_rows=owner_rows,
+                    eff_kv_state.valid,
+                    owner_rows=eff_owner_rows,
                     causal_local=causal_local,
-                    causal_cross_mask=causal_cross_mask,
-                    causal_cross=causal_cross,
+                    causal_cross_mask=eff_cross_mask,
+                    causal_cross=eff_causal_cross,
                     prior_expert_mask=visited_expert_masks[l_idx],
                 )
                 if recurrence_steps > 1 and layer.moe.last_selected_mask is not None:
@@ -1972,12 +1990,21 @@ class MCL4CEDBackbone(nn.Module):
                 state = blended.masked_fill(~work_valid.unsqueeze(-1), 0)
 
         ctx_last_hidden: Tensor | None = None
-        if k_ctx_prefix > 0:
-            ctx_last_hidden = state[:, k_ctx_prefix - 1, :]
-            s_start = (k_ctx_prefix - 1) if strip_cand_bos else k_ctx_prefix
-            state = state[:, s_start:, :].masked_fill(~candidate_valid.unsqueeze(-1), 0)
+        if k_ctx_prefix > 0 and q_row_lens is not None and cand_gather_idx is not None:
+            s_for_cand = (0.85 * step_states[0] + 0.15 * state) if len(step_states) > 1 else state
+            q_last_idx = (
+                (q_row_lens - 1)
+                .clamp(0, s_for_cand.shape[1] - 1)
+                .view(-1, 1, 1)
+                .expand(-1, 1, s_for_cand.shape[-1])
+            )
+            ctx_last_hidden = s_for_cand.gather(1, q_last_idx).squeeze(1)
+            gather_3d_s = cand_gather_idx.unsqueeze(-1).expand(-1, -1, s_for_cand.shape[-1])
+            state = s_for_cand.gather(1, gather_3d_s).masked_fill(
+                ~candidate_valid.unsqueeze(-1), 0
+            )
             step_states = [
-                s[:, s_start:, :].masked_fill(~candidate_valid.unsqueeze(-1), 0)
+                s.gather(1, gather_3d_s).masked_fill(~candidate_valid.unsqueeze(-1), 0)
                 for s in step_states
             ]
 

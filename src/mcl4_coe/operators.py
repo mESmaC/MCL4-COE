@@ -511,6 +511,13 @@ class CognitiveOperatorEnsemble(nn.Module):
         self.backbone = backbone
         self.config = COEConfig() if config is None else config
         self.config.__post_init__()
+        if backbone.config.vocab_size > 1024 and self.config.eos_id == 258:
+            self.config.eos_id = int(backbone.config.eos_id)
+            self.config.bos_id = (
+                128000
+                if backbone.config.vocab_size == 128256
+                else int(backbone.config.pad_id + 1)
+            )
         d_model = backbone.config.d_model
         d_proj = self.config.projection_dim
 
@@ -628,21 +635,30 @@ class CognitiveOperatorEnsemble(nn.Module):
         ):
             return None
         target_tokens = canon_opt_ids[:, 1:].long()
-        tok_mask = canon_valid[:, 1:] & (target_tokens != self.config.eos_id)
+        eff_eos_id = int(self.backbone.config.eos_id)
+        tok_mask = (
+            canon_valid[:, 1:]
+            & (target_tokens != eff_eos_id)
+            & (target_tokens != self.config.eos_id)
+        )
         has_any = tok_mask.any(dim=-1, keepdim=True)
         tok_mask = torch.where(has_any, tok_mask, canon_valid[:, 1:])
 
         pred_h = torch.cat([ctx_last_hidden.unsqueeze(1), cand_hidden[:, 1:-1, :]], dim=1)
         lm_logits = self.backbone.lm_head(pred_h)
         with torch.autocast(device_type=pred_h.device.type, enabled=False):
+            logits_f = lm_logits.float()
+            if self.backbone.config.vocab_size == 128256 and logits_f.shape[-1] > 128000:
+                logits_f = logits_f.clone()
+                logits_f[:, :, 128000:] = -1e4
             token_nll = F.cross_entropy(
-                lm_logits.reshape(-1, lm_logits.shape[-1]).float(),
+                logits_f.reshape(-1, logits_f.shape[-1]),
                 target_tokens.reshape(-1),
                 reduction="none",
             ).view_as(target_tokens)
             tok_mask_f = tok_mask.float()
             tok_counts = tok_mask_f.sum(dim=-1).clamp_min(1.0)
-            seq_lp = -(token_nll * tok_mask_f).sum(dim=-1) / (tok_counts ** 0.70)
+            seq_lp = -(token_nll * tok_mask_f).sum(dim=-1) / tok_counts
 
             owner_counts = (
                 torch.zeros(batch_size, device=seq_lp.device, dtype=torch.float32)
@@ -788,6 +804,7 @@ class CognitiveOperatorEnsemble(nn.Module):
             owner_rows=canon_owners,
             recurrence_steps=steps,
             causal_local=True,
+            depth_ponder=use_ponder,
         )
         has_active_rule = (
             whiteboard is not None
@@ -1122,6 +1139,7 @@ class CognitiveOperatorEnsemble(nn.Module):
             recurrence_steps=steps,
             causal_local=True,
             candidate_encoded=candidate_encoded,
+            depth_ponder=use_ponder,
         )
         paired_state_repr, cand_repr = self.pooler.matched_pair_representations(
             encoded_state.hidden,

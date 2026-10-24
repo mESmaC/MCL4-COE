@@ -3715,7 +3715,7 @@ class OrnithSelfImprover:
                 if norm_raw in ("0", "") and gold_template:
                     norm_raw = f"{gold_template} alternative {i + 1}"
                 bare_opts.append(norm_raw)
-        return tuple(bare_opts)
+        return tuple(" " + o.strip() for o in bare_opts)
 
     def step_self_improvement(
         self,

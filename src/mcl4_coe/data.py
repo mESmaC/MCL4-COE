@@ -679,6 +679,31 @@ def parse_request(
     return examples
 
 
+def _clean_bpe_decision_context(ctx: str) -> str:
+    text = ctx.strip()
+    if text.startswith("#U$#"):
+        text = text[4:].strip()
+    if "\n#Q$#" in text:
+        u_part, q_part = text.split("\n#Q$#", 1)
+        q_part = q_part.strip()
+        if q_part.startswith("[") and "]" in q_part:
+            q_part = q_part.split("]", 1)[1].strip()
+        u_part = u_part.strip()
+        if not u_part or u_part == q_part:
+            return q_part or u_part or ctx
+        if not q_part:
+            return u_part
+        return f"{u_part}\n{q_part}"
+    return text or ctx
+
+
+def _clean_bpe_decision_option(desc: str) -> str:
+    stripped = desc.strip()
+    if not stripped or stripped.startswith("#"):
+        return desc
+    return " " + stripped
+
+
 def collate_decisions(
     examples: list[DecisionExample],
     max_length: int,
@@ -691,10 +716,25 @@ def collate_decisions(
         raise ValueError("At least one decision is required")
     if tokenizer is None:
         tokenizer = get_tokenizer(vocab_size)
-    contexts = [tokenizer.encode(item.context) for item in examples]
-    candidates = [
-        [tokenizer.encode(description) for description in item.descriptions] for item in examples
-    ]
+    is_donor_bpe = int(getattr(tokenizer, "vocab_size", vocab_size)) > 16384
+    if is_donor_bpe:
+        contexts = [
+            tokenizer.encode(_clean_bpe_decision_context(item.context))[-max_length:]
+            for item in examples
+        ]
+        candidates = [
+            [
+                tokenizer.encode(_clean_bpe_decision_option(description))[:max_length]
+                for description in item.descriptions
+            ]
+            for item in examples
+        ]
+    else:
+        contexts = [tokenizer.encode(item.context) for item in examples]
+        candidates = [
+            [tokenizer.encode(description) for description in item.descriptions]
+            for item in examples
+        ]
     if any(len(row) > max_length for row in contexts) or any(
         len(row) > max_length for options in candidates for row in options
     ):

@@ -425,12 +425,12 @@ def nvfp4_mm(
     kp = _round_up(k, 32)
     mp = _round_up(m, 32)
     np_ = _round_up(n, 32)
-    ap = F.pad(a.float(), (0, kp - k, 0, mp - m)) if (kp != k or mp != m) else a.float()
+    ap = F.pad(a, (0, kp - k, 0, mp - m)) if (kp != k or mp != m) else a
     qa, sa, ga = quantize_nvfp4(ap, stochastic=stochastic_a, causal_row_scale=causal_a)
     if prequantized_b is not None:
         qb, sb, gb = prequantized_b
     else:
-        bp = F.pad(b.float(), (0, kp - k, 0, np_ - n)) if (kp != k or np_ != n) else b.float()
+        bp = F.pad(b, (0, kp - k, 0, np_ - n)) if (kp != k or np_ != n) else b
         qb, sb, gb = quantize_nvfp4(bp, two_dimensional=weight_b, stochastic=stochastic_b)
     if has_native_nvfp4(a.device):
         recipe = [F.ScalingType.BlockWise1x16, F.ScalingType.TensorWise]
@@ -499,7 +499,7 @@ def _get_or_build_weight_nvfp4_cache(
             w_eff = w_eff * mask.to(w_eff.dtype)
         n, k = w_eff.shape
         np_, kp = _round_up(n, 32), _round_up(k, 32)
-        bp = F.pad(w_eff.float(), (0, kp - k, 0, np_ - n)) if (kp != k or np_ != n) else w_eff.float()
+        bp = F.pad(w_eff, (0, kp - k, 0, np_ - n)) if (kp != k or np_ != n) else w_eff
         fwd_q = quantize_nvfp4(bp, two_dimensional=True, stochastic=False)
         cache = [key, mask, w_eff, fwd_q, None]
         try:
@@ -510,7 +510,7 @@ def _get_or_build_weight_nvfp4_cache(
         w_t = cache[2].t().contiguous()
         kt, nt = w_t.shape
         ktp, ntp = _round_up(kt, 32), _round_up(nt, 32)
-        bpt = F.pad(w_t.float(), (0, ntp - nt, 0, ktp - kt)) if (ntp != nt or ktp != kt) else w_t.float()
+        bpt = F.pad(w_t, (0, ntp - nt, 0, ktp - kt)) if (ntp != nt or ktp != kt) else w_t
         cache[4] = quantize_nvfp4(bpt, two_dimensional=True, stochastic=False)
     return cache
 

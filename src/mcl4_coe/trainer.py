@@ -146,6 +146,12 @@ class TrainingRunConfig:
     model_dtype: str = "float32"
     plastic_experts_per_layer: int = 0
     freeze_donor_embeddings: bool = False
+    freeze_non_clone_experts: bool = False
+    mitotic_perturbation_scale: float = 1e-3
+    clone_expert_lr_scale: float = 1.0
+    clone_warmup_steps: int = 0
+    clone_warmup_tokens: int = 0
+    pure_rl_after_clone_warmup: bool = False
     enable_mitosis: bool = False
     release_mitotic_pairs: bool = False
     orthogonal_mitosis: bool = True
@@ -329,14 +335,16 @@ def upcycle_state_dict_experts(
     existing_pairs: list[tuple[int, int]] | None = None,
     seed: int = 42,
     orthogonal: bool = True,
+    preserve_parent_weights: bool = False,
+    perturbation_scale: float = 1e-3,
 ) -> dict[str, torch.Tensor]:
     """Upcycle a `SparseMoE` checkpoint from `old_num_experts` to `new_num_experts` via Exact-Ratio Twin-Gated Mitosis.
 
     Clones the highest-utilization parent experts into the new slots `[old_num_experts .. new_num_experts-1]`
     with symmetric $\\pm \\delta$ antithetic perturbations ($\\|\\delta\\| = 10^{-3} \\sigma_W$, Gram-Schmidt
     orthogonalized against each parent neuron/residual vector when `orthogonal=True`) on both the
-    router rows and SwiGLU FFN projections, while recording `mitotic_pairs_tensor` so `SparseMoE`
-    routes only the winning twin of each mitotic pair into `topk(2)`.
+    router rows and SwiGLU FFN projections (or clone-only $+\\delta$ perturbation when `preserve_parent_weights=True`),
+    while recording `mitotic_pairs_tensor` so `SparseMoE` routes only the winning twin of each mitotic pair into `topk(2)`.
     """
     if new_num_experts <= old_num_experts:
         return state_dict
@@ -364,10 +372,11 @@ def upcycle_state_dict_experts(
         for p, c in (existing_pairs or [])
         if p not in newly_split and c not in newly_split
     ]
-    all_pairs = active_existing + added_pairs
+    all_pairs = list(added_pairs) if preserve_parent_weights else (active_existing + added_pairs)
 
     gen = torch.Generator(device="cpu")
     gen.manual_seed(seed)
+    eff_scale = max(1e-5, float(perturbation_scale))
 
     for prefix in sorted(moe_prefixes):
         r_key = f"{prefix}.router.weight"
@@ -376,18 +385,22 @@ def upcycle_state_dict_experts(
         for parent_e, new_e in added_pairs:
             r_p = r_weight[parent_e : parent_e + 1].clone()
             r_delta = _orthogonal_antithetic_delta(
-                r_p, gen, scale=1e-3, ortho_dim=-1, orthogonal=orthogonal
+                r_p, gen, scale=eff_scale, ortho_dim=-1, orthogonal=orthogonal
             )
-            r_weight[parent_e : parent_e + 1] = r_p - r_delta
+            if not preserve_parent_weights:
+                r_weight[parent_e : parent_e + 1] = r_p - r_delta
             extra_rows.append(r_p + r_delta)
             for proj, o_dim in (("up_proj.weight", -1), ("down_proj.weight", 0)):
                 p_key = f"{prefix}.experts.{parent_e}.{proj}"
                 c_key = f"{prefix}.experts.{new_e}.{proj}"
                 w_p = out[p_key]
                 delta = _orthogonal_antithetic_delta(
-                    w_p, gen, scale=1e-3, ortho_dim=o_dim, orthogonal=orthogonal
+                    w_p, gen, scale=eff_scale, ortho_dim=o_dim, orthogonal=orthogonal
                 )
-                out[p_key] = w_p - delta
+                if preserve_parent_weights:
+                    out[p_key] = w_p.clone()
+                else:
+                    out[p_key] = w_p - delta
                 out[c_key] = w_p + delta
         out[r_key] = torch.cat([r_weight, *extra_rows], dim=0)
         if all_pairs:
@@ -1192,13 +1205,48 @@ class MCL4COETrainer:
 
     def _apply_plasticity_policy(self, expert_loads: list[float] | None = None) -> set[int]:
         """Configure `requires_grad` for Generation-Scoped Expert Plasticity and optional frozen donor embeddings."""
-        if self.config.freeze_donor_embeddings:
+        if self.config.freeze_donor_embeddings or self.config.freeze_non_clone_experts:
             self.model.backbone.token_embedding.weight.requires_grad_(False)
             self.model.backbone.token_embedding.weight.grad = None
             self.model.backbone.lm_head.weight.requires_grad_(False)
             self.model.backbone.lm_head.weight.grad = None
 
         n_exp = int(self.model.backbone.config.num_experts)
+        if self.config.freeze_non_clone_experts:
+            active_pairs = self._get_model_mitotic_pairs()
+            plastic_set: set[int] = {
+                int(c) for _, c in active_pairs if 0 <= int(c) < n_exp
+            }
+            for layer in list(self.model.backbone.encoder_layers) + list(
+                self.model.backbone.decoder_layers
+            ):
+                for idx, e in enumerate(layer.moe.experts):
+                    active = idx in plastic_set
+                    e.up_proj.weight.requires_grad_(active)
+                    e.down_proj.weight.requires_grad_(active)
+                    if not active:
+                        e.up_proj.weight.grad = None
+                        e.down_proj.weight.grad = None
+                for norm_attr in ("attn_norm", "moe_norm"):
+                    norm_mod = getattr(layer, norm_attr, None)
+                    if norm_mod is not None and hasattr(norm_mod, "weight"):
+                        norm_mod.weight.requires_grad_(False)
+                        norm_mod.weight.grad = None
+                attn_mod = getattr(layer, "attention", None) or getattr(layer, "local_attention", None)
+                if attn_mod is not None:
+                    for proj_attr in ("qkv", "out_proj"):
+                        proj_mod = getattr(attn_mod, proj_attr, None)
+                        if proj_mod is not None and hasattr(proj_mod, "weight"):
+                            proj_mod.weight.requires_grad_(False)
+                            proj_mod.weight.grad = None
+            for top_norm in ("encoder_norm", "final_norm"):
+                tn = getattr(self.model.backbone, top_norm, None)
+                if tn is not None and hasattr(tn, "weight"):
+                    tn.weight.requires_grad_(False)
+                    tn.weight.grad = None
+            self._plastic_expert_indices = sorted(plastic_set)
+            return plastic_set
+
         cap = int(self.config.plastic_experts_per_layer)
         if cap <= 0 or cap >= n_exp:
             for layer in list(self.model.backbone.encoder_layers) + list(
@@ -1207,10 +1255,11 @@ class MCL4COETrainer:
                 for e in layer.moe.experts:
                     e.up_proj.weight.requires_grad_(True)
                     e.down_proj.weight.requires_grad_(True)
+            self._plastic_expert_indices = list(range(n_exp))
             return set(range(n_exp))
 
         pairs = self._get_model_mitotic_pairs() or getattr(self, "_released_mitotic_pairs", [])
-        plastic_set: set[int] = {
+        plastic_set = {
             int(idx) for p in pairs for idx in p if 0 <= int(idx) < n_exp
         }
         if len(plastic_set) < cap:
@@ -1234,6 +1283,7 @@ class MCL4COETrainer:
                 if not active:
                     e.up_proj.weight.grad = None
                     e.down_proj.weight.grad = None
+        self._plastic_expert_indices = sorted(plastic_set)
         return plastic_set
 
     def _create_optimizer(self) -> None:
@@ -1248,11 +1298,17 @@ class MCL4COETrainer:
             )
             if str(self.config.qk_norm_mode).lower() != "full":
                 base_markers = (*base_markers, ".q_norm.", ".k_norm.")
-            if float(self.config.routed_scaling_factor) > 1.0:
+            if float(self.config.routed_scaling_factor) > 1.0 or self.config.freeze_non_clone_experts:
                 base_markers = (*base_markers, ".moe.router.")
             new_adapter_markers = base_markers
+            active_clone_markers = (
+                tuple(f".moe.experts.{int(c)}." for _, c in self._get_model_mitotic_pairs())
+                if self.config.freeze_non_clone_experts
+                else ()
+            )
             ncm_decay, ncm_nodecay = [], []
             adapter_decay, adapter_nodecay = [], []
+            clone_decay, clone_nodecay = [], []
             donor_decay, donor_nodecay = [], []
             embed_params = []
             for name, p in self.model.named_parameters():
@@ -1260,6 +1316,9 @@ class MCL4COETrainer:
                     continue
                 if name.startswith("ncm_system."):
                     (ncm_decay if p.ndim >= 2 else ncm_nodecay).append(p)
+                    continue
+                if active_clone_markers and any(cm in name for cm in active_clone_markers):
+                    (clone_decay if p.ndim >= 2 else clone_nodecay).append(p)
                     continue
                 is_new_adapter = (not name.startswith("backbone.")) or any(
                     m in name for m in new_adapter_markers
@@ -1271,6 +1330,7 @@ class MCL4COETrainer:
                 else:
                     (donor_decay if p.ndim >= 2 else donor_nodecay).append(p)
             d_scale = float(self.config.donor_backbone_lr_scale)
+            c_scale = float(self.config.clone_expert_lr_scale)
             ncm_scale = 5.0 if d_scale < 0.1 else 1.0
             emb_scale = d_scale / max(1.0, float(self.config.embedding_multiplier) * 0.5)
             param_groups = [
@@ -1278,6 +1338,8 @@ class MCL4COETrainer:
                 {"params": ncm_nodecay, "weight_decay": 0.0, "lr_scale": ncm_scale},
                 {"params": adapter_decay, "weight_decay": self.config.weight_decay, "lr_scale": 1.0},
                 {"params": adapter_nodecay, "weight_decay": 0.0, "lr_scale": 1.0},
+                {"params": clone_decay, "weight_decay": self.config.weight_decay, "lr_scale": c_scale},
+                {"params": clone_nodecay, "weight_decay": 0.0, "lr_scale": c_scale},
                 {"params": donor_decay, "weight_decay": self.config.weight_decay, "lr_scale": d_scale},
                 {"params": donor_nodecay, "weight_decay": 0.0, "lr_scale": d_scale},
                 {"params": embed_params, "weight_decay": self.config.weight_decay, "lr_scale": emb_scale},
@@ -1578,30 +1640,36 @@ class MCL4COETrainer:
     def _ordered_trainable_param_names(self) -> list[str]:
         """Return trainable parameter names in the exact order they appear across `optimizer.param_groups`."""
         if self.config.preserve_residual_across_stacks and float(self.config.donor_backbone_lr_scale) != 1.0:
-            new_adapter_markers = (
-                (
-                    ".ple.",
-                    ".markov_router.",
-                    ".markov_gate",
-                    ".global_",
-                    ".feedback.",
-                )
-                if str(self.config.qk_norm_mode).lower() == "full"
-                else (
-                    ".ple.",
-                    ".markov_router.",
-                    ".markov_gate",
-                    ".global_",
-                    ".feedback.",
-                    ".q_norm.",
-                    ".k_norm.",
-                )
+            base_markers = (
+                ".ple.",
+                ".markov_router.",
+                ".markov_gate",
+                ".global_",
+                ".feedback.",
             )
+            if str(self.config.qk_norm_mode).lower() != "full":
+                base_markers = (*base_markers, ".q_norm.", ".k_norm.")
+            if float(self.config.routed_scaling_factor) > 1.0 or self.config.freeze_non_clone_experts:
+                base_markers = (*base_markers, ".moe.router.")
+            new_adapter_markers = base_markers
+            active_clone_markers = (
+                tuple(f".moe.experts.{int(c)}." for _, c in self._get_model_mitotic_pairs())
+                if self.config.freeze_non_clone_experts
+                else ()
+            )
+            ncm_decay, ncm_nodecay = [], []
             adapter_decay, adapter_nodecay = [], []
+            clone_decay, clone_nodecay = [], []
             donor_decay, donor_nodecay = [], []
             embed_params = []
             for name, p in self.model.named_parameters():
                 if not p.requires_grad:
+                    continue
+                if name.startswith("ncm_system."):
+                    (ncm_decay if p.ndim >= 2 else ncm_nodecay).append(name)
+                    continue
+                if active_clone_markers and any(cm in name for cm in active_clone_markers):
+                    (clone_decay if p.ndim >= 2 else clone_nodecay).append(name)
                     continue
                 is_new_adapter = (not name.startswith("backbone.")) or any(
                     m in name for m in new_adapter_markers
@@ -1612,7 +1680,17 @@ class MCL4COETrainer:
                     embed_params.append(name)
                 else:
                     (donor_decay if p.ndim >= 2 else donor_nodecay).append(name)
-            return adapter_decay + adapter_nodecay + donor_decay + donor_nodecay + embed_params
+            return (
+                ncm_decay
+                + ncm_nodecay
+                + adapter_decay
+                + adapter_nodecay
+                + clone_decay
+                + clone_nodecay
+                + donor_decay
+                + donor_nodecay
+                + embed_params
+            )
         new_decay_names = [
             name for name, p in self.model.named_parameters() if p.requires_grad and p.ndim >= 2
         ]
@@ -1835,6 +1913,8 @@ class MCL4COETrainer:
                     existing_pairs=pairs_for_schedule,
                     seed=self.config.seed + step,
                     orthogonal=self.config.orthogonal_mitosis,
+                    preserve_parent_weights=bool(self.config.freeze_non_clone_experts),
+                    perturbation_scale=float(self.config.mitotic_perturbation_scale),
                 )
                 del cur_model_state
                 saved_ornith = self.ornith_improver
@@ -1853,7 +1933,17 @@ class MCL4COETrainer:
                     for p, c in pairs_for_schedule
                     if p not in newly_split and c not in newly_split
                 ]
-                self._set_model_mitotic_pairs(active_existing + added_pairs)
+                if self.config.freeze_non_clone_experts:
+                    prev_rel = list(getattr(self, "_released_mitotic_pairs", []))
+                    for pr in pairs_for_schedule:
+                        if pr not in prev_rel:
+                            prev_rel.append(pr)
+                    self._released_mitotic_pairs = prev_rel
+                    self._set_model_mitotic_pairs(list(added_pairs))
+                    self._apply_plasticity_policy(loads_for_split)
+                    self._create_optimizer()
+                else:
+                    self._set_model_mitotic_pairs(active_existing + added_pairs)
                 if self.config.cpu_offload_optimizer:
                     prepare_model(
                         self.model,
@@ -1931,6 +2021,8 @@ class MCL4COETrainer:
         self.optimizer.state.clear()
 
         gen = torch.Generator(device="cpu").manual_seed(self.config.seed + step)
+        eff_scale = max(1e-5, float(self.config.mitotic_perturbation_scale))
+        preserve_parent = bool(self.config.freeze_non_clone_experts)
         d_model = int(self.backbone_cfg.d_model)
         expert_hidden_dim = int(self.backbone_cfg.expert_hidden_dim)
         all_layers = list(self.model.backbone.encoder_layers) + list(
@@ -1954,26 +2046,45 @@ class MCL4COETrainer:
                         delta_up = _orthogonal_antithetic_delta(
                             p_up.detach().cpu().float(),
                             gen,
-                            scale=1e-3,
+                            scale=eff_scale,
                             ortho_dim=1,
                             orthogonal=self.config.orthogonal_mitosis,
                         ).to(device=p_up.device, dtype=p_up.dtype)
-                        child_exp.up_proj.weight.data.copy_(p_up - delta_up)
-                        p_up.add_(delta_up)
+                        if preserve_parent:
+                            child_exp.up_proj.weight.data.copy_(p_up + delta_up)
+                        else:
+                            child_exp.up_proj.weight.data.copy_(p_up - delta_up)
+                            p_up.add_(delta_up)
 
                         delta_down = _orthogonal_antithetic_delta(
                             p_down.detach().cpu().float(),
                             gen,
-                            scale=1e-3,
+                            scale=eff_scale,
                             ortho_dim=0,
                             orthogonal=self.config.orthogonal_mitosis,
                         ).to(device=p_down.device, dtype=p_down.dtype)
-                        child_exp.down_proj.weight.data.copy_(p_down - delta_down)
-                        p_down.add_(delta_down)
+                        if preserve_parent:
+                            child_exp.down_proj.weight.data.copy_(p_down + delta_down)
+                        else:
+                            child_exp.down_proj.weight.data.copy_(p_down - delta_down)
+                            p_down.add_(delta_down)
                         moe.experts.append(child_exp)
 
                     old_rw = moe.router.weight.data
-                    extra_rows = [old_rw[p_e : p_e + 1].clone() for p_e, _ in added_pairs]
+                    extra_rows = []
+                    for p_e, _ in added_pairs:
+                        r_p = old_rw[p_e : p_e + 1].clone()
+                        if preserve_parent:
+                            r_delta = _orthogonal_antithetic_delta(
+                                r_p.detach().cpu().float(),
+                                gen,
+                                scale=eff_scale,
+                                ortho_dim=-1,
+                                orthogonal=self.config.orthogonal_mitosis,
+                            ).to(device=r_p.device, dtype=r_p.dtype)
+                            extra_rows.append(r_p + r_delta)
+                        else:
+                            extra_rows.append(r_p)
                     new_rw = torch.cat([old_rw, *extra_rows], dim=0)
                     new_router = torch.nn.Linear(
                         d_model, new_e, bias=False, device=old_rw.device, dtype=old_rw.dtype
@@ -2010,7 +2121,16 @@ class MCL4COETrainer:
             for p, c in pairs_for_schedule
             if p not in newly_split and c not in newly_split
         ]
-        self._set_model_mitotic_pairs(active_existing + added_pairs)
+        if preserve_parent:
+            prev_rel = list(getattr(self, "_released_mitotic_pairs", []))
+            for pr in pairs_for_schedule:
+                if pr not in prev_rel:
+                    prev_rel.append(pr)
+            self._released_mitotic_pairs = prev_rel
+            self._set_model_mitotic_pairs(list(added_pairs))
+            self._clone_warmup_tokens_seen = 0
+        else:
+            self._set_model_mitotic_pairs(active_existing + added_pairs)
 
         new_ema = list(loads_for_split) + [0.0] * (new_e - old_e)
         for p_e, c_e in added_pairs:
@@ -2121,13 +2241,15 @@ class MCL4COETrainer:
                 existing_pairs=all_prior_pairs,
                 seed=self.config.seed,
                 orthogonal=self.config.orthogonal_mitosis,
+                preserve_parent_weights=bool(self.config.freeze_non_clone_experts),
+                perturbation_scale=float(self.config.mitotic_perturbation_scale),
             )
 
         self.model.load_state_dict(model_state, strict=False)
         del model_state
         with torch.no_grad():
             self.model.log_scale.data.clamp_(math.log(0.5), math.log(3.5))
-        if self.config.release_mitotic_pairs:
+        if self.config.release_mitotic_pairs and not (self.config.freeze_non_clone_experts and added_pairs):
             self._released_mitotic_pairs = list(all_prior_pairs) + list(added_pairs)
             self._set_model_mitotic_pairs([])
         elif added_pairs:
@@ -2150,7 +2272,11 @@ class MCL4COETrainer:
         if init_loads and len(init_loads) == self.config.num_experts:
             self._ema_expert_loads = [float(x) for x in init_loads]
 
-        if int(self.config.plastic_experts_per_layer) > 0 or self.config.freeze_donor_embeddings:
+        if (
+            int(self.config.plastic_experts_per_layer) > 0
+            or self.config.freeze_donor_embeddings
+            or self.config.freeze_non_clone_experts
+        ):
             self._apply_plasticity_policy(getattr(self, "_ema_expert_loads", None))
             self._create_optimizer()
 
@@ -2379,6 +2505,8 @@ class MCL4COETrainer:
 
             base_step = getattr(self, "initial_step", 0)
             stage_steps = max(1, self.config.total_steps - base_step)
+            self._clone_warmup_tokens_seen = int(getattr(self, "_clone_warmup_tokens_seen", 0))
+            self._logged_clone_pure_rl_transition = False
             warm_continuation = bool(getattr(self, "_optimizer_restored", False) and base_step > 0)
             if warm_continuation:
                 progress0 = min(1.0, max(0.0, (start_step - 1) / max(1, self.config.total_steps)))
@@ -2478,11 +2606,43 @@ class MCL4COETrainer:
                 if step < self.config.total_steps:
                     self.prefetcher.schedule(next_indices)
 
+                local_step = max(1, step - base_step)
+                has_clone_warmup_cfg = bool(
+                    int(self.config.clone_warmup_steps) > 0 or int(self.config.clone_warmup_tokens) > 0
+                )
+                in_clone_warmup = bool(
+                    (int(self.config.clone_warmup_steps) > 0 and local_step <= int(self.config.clone_warmup_steps))
+                    or (
+                        int(self.config.clone_warmup_tokens) > 0
+                        and self._clone_warmup_tokens_seen < int(self.config.clone_warmup_tokens)
+                    )
+                )
+                in_clone_pure_rl = bool(
+                    not in_clone_warmup
+                    and self.config.pure_rl_after_clone_warmup
+                    and (has_clone_warmup_cfg or self.config.freeze_non_clone_experts)
+                )
+                if in_clone_pure_rl and not getattr(self, "_logged_clone_pure_rl_transition", False):
+                    self._logged_clone_pure_rl_transition = True
+                    print(
+                        f"  [mitosis-phase2 @ step {step}] Clone token warmup complete "
+                        f"({self._clone_warmup_tokens_seen:,} warmup tokens) -> "
+                        f"Switching to Pure RL on mitotic clones {getattr(self, '_plastic_expert_indices', [])} "
+                        f"(non-clones frozen)",
+                        flush=True,
+                    )
+                if in_clone_pure_rl and len(micro_batches) > 1:
+                    micro_batches = micro_batches[:1]
+
                 run_operators = bool(
-                    step == 1
-                    or step == start_step
-                    or step == self.config.total_steps
-                    or (step % max(1, int(self.config.operator_every)) == 0)
+                    not in_clone_warmup
+                    and (
+                        step == 1
+                        or step == start_step
+                        or step == self.config.total_steps
+                        or in_clone_pure_rl
+                        or (step % max(1, int(self.config.operator_every)) == 0)
+                    )
                 )
                 dec_batch = self._next_decision_batch() if run_operators else None
                 if dec_batch is not None and (
@@ -2536,10 +2696,12 @@ class MCL4COETrainer:
                         progress >= float(self.config.ornith_warmup_ratio)
                     ) or parent_reached_ornith
                 run_ornith = bool(
-                    self.config.enable_ornith_rl
-                    and ornith_active
+                    not in_clone_warmup
+                    and self.config.enable_ornith_rl
+                    and (ornith_active or in_clone_pure_rl)
                     and (
-                        step % max(1, self.config.ornith_every) == 0
+                        in_clone_pure_rl
+                        or step % max(1, self.config.ornith_every) == 0
                         or (step == 1 and ornith_active and float(self.config.ornith_warmup_ratio) <= 0.0)
                     )
                 )
@@ -2565,6 +2727,8 @@ class MCL4COETrainer:
                 ]
                 total_mb_tokens = max(1, sum(mb_token_counts))
                 total_valid_tokens = max(total_mb_tokens, sum(mb_valid_counts))
+                if in_clone_warmup:
+                    self._clone_warmup_tokens_seen += total_valid_tokens
                 if log_detail or not hasattr(self, "_cached_bpt_ratio"):
                     raw_bytes = sum(
                         self.tokenizer.count_utf8_bytes(mb["labels"]) for mb in micro_batches
@@ -2578,65 +2742,85 @@ class MCL4COETrainer:
                     )
 
                 fast_low_param_step = bool(
-                    self.config.mitosis_milestones
-                    and ((cur_e <= 32 and not run_operators) or cur_e >= 128)
+                    in_clone_warmup
+                    or (
+                        self.config.mitosis_milestones
+                        and ((cur_e <= 32 and not run_operators) or cur_e >= 128)
+                    )
                 )
                 step_rec = 1 if fast_low_param_step else self.config.recurrence_steps
                 step_ponder = False if fast_low_param_step else self.config.depth_ponder
 
-                for mb_idx, (mb, mb_toks) in enumerate(zip(micro_batches, mb_token_counts)):
-                    inp = mb["input_ids"].to(self.device, non_blocking=True)
-                    lbl = mb["labels"].to(self.device, non_blocking=True)
-                    t_ids = mb["track_ids"].to(self.device, non_blocking=True)
-                    step_tokens_gpu = step_tokens_gpu + mb_toks
-                    mb_frac = float(mb_toks) / float(total_mb_tokens)
-                    use_gist_mb = bool(
-                        not fast_low_param_step
-                        and self.config.enable_gist_conditioning
-                        and self.config.gist_conditioning_prob > 0.0
-                        and (((step + mb_idx) * 2654435761) % 1000)
-                        < int(self.config.gist_conditioning_prob * 1000)
+                saved_warmup_frozen: list[torch.nn.Parameter] = []
+                if in_clone_warmup and self.config.freeze_non_clone_experts:
+                    active_clone_tags = tuple(
+                        f".moe.experts.{int(c)}." for _, c in self._get_model_mitotic_pairs()
                     )
+                    for name, param in self.model.named_parameters():
+                        if param.requires_grad and not (
+                            any(tag in name for tag in active_clone_tags) or ".moe.router." in name
+                        ):
+                            saved_warmup_frozen.append(param)
+                            param.requires_grad_(False)
 
-                    with torch.autocast(
-                        device_type=self.device.type,
-                        dtype=torch.bfloat16,
-                        enabled=use_amp,
-                    ):
-                        lm_out = self.model.forward_inference(
-                            inp,
-                            targets=lbl,
-                            recurrence_steps=step_rec,
-                            recurrent_kv=self.config.recurrent_kv,
-                            depth_ponder=step_ponder,
-                            deep_supervision_weight=(
-                                0.0 if fast_low_param_step else self.config.deep_supervision_weight
-                            ),
-                            condition_on_prefix_gist=use_gist_mb,
-                            latent_prior_scale=(
-                                self.config.latent_prior_scale if use_gist_mb else 0.0
-                            ),
+                try:
+                    lm_phase_scale = 0.10 if in_clone_pure_rl else 1.0
+                    for mb_idx, (mb, mb_toks) in enumerate(zip(micro_batches, mb_token_counts)):
+                        inp = mb["input_ids"].to(self.device, non_blocking=True)
+                        lbl = mb["labels"].to(self.device, non_blocking=True)
+                        t_ids = mb["track_ids"].to(self.device, non_blocking=True)
+                        step_tokens_gpu = step_tokens_gpu + mb_toks
+                        mb_frac = float(mb_toks) / float(total_mb_tokens)
+                        use_gist_mb = bool(
+                            not fast_low_param_step
+                            and self.config.enable_gist_conditioning
+                            and self.config.gist_conditioning_prob > 0.0
+                            and (((step + mb_idx) * 2654435761) % 1000)
+                            < int(self.config.gist_conditioning_prob * 1000)
                         )
-                        assert lm_out.loss is not None and lm_out.ce_loss is not None
-                        lm_scale = mb_frac
-                        scaled_lm_loss = lm_out.loss * lm_scale
 
-                    step_lm_gpu = step_lm_gpu + (lm_out.ce_loss.detach().float() * mb_frac)
-                    step_total_gpu = step_total_gpu + scaled_lm_loss.detach().float()
-                    step_expert_load_gpu = step_expert_load_gpu + (
-                        lm_out.expert_load.detach().float().mean(dim=0) / num_mb
-                    )
-                    if log_detail:
-                        self._accumulate_per_track_losses_gpu(
-                            lm_out.logits.detach(),
-                            lbl,
-                            t_ids,
-                            track_sums_gpu,
-                            track_counts_gpu,
+                        with torch.autocast(
+                            device_type=self.device.type,
+                            dtype=torch.bfloat16,
+                            enabled=use_amp,
+                        ):
+                            lm_out = self.model.forward_inference(
+                                inp,
+                                targets=lbl,
+                                recurrence_steps=step_rec,
+                                recurrent_kv=self.config.recurrent_kv,
+                                depth_ponder=step_ponder,
+                                deep_supervision_weight=(
+                                    0.0 if fast_low_param_step else self.config.deep_supervision_weight
+                                ),
+                                condition_on_prefix_gist=use_gist_mb,
+                                latent_prior_scale=(
+                                    self.config.latent_prior_scale if use_gist_mb else 0.0
+                                ),
+                            )
+                            assert lm_out.loss is not None and lm_out.ce_loss is not None
+                            lm_scale = mb_frac * lm_phase_scale
+                            scaled_lm_loss = lm_out.loss * lm_scale
+
+                        step_lm_gpu = step_lm_gpu + (lm_out.ce_loss.detach().float() * mb_frac)
+                        step_total_gpu = step_total_gpu + scaled_lm_loss.detach().float()
+                        step_expert_load_gpu = step_expert_load_gpu + (
+                            lm_out.expert_load.detach().float().mean(dim=0) / num_mb
                         )
-                    del lm_out
-                    scaled_lm_loss.backward()
-                    del scaled_lm_loss
+                        if log_detail:
+                            self._accumulate_per_track_losses_gpu(
+                                lm_out.logits.detach(),
+                                lbl,
+                                t_ids,
+                                track_sums_gpu,
+                                track_counts_gpu,
+                            )
+                        del lm_out
+                        scaled_lm_loss.backward()
+                        del scaled_lm_loss
+                finally:
+                    for param in saved_warmup_frozen:
+                        param.requires_grad_(True)
 
                 if dec_batch is not None:
                     eff_w_dec = w_dec if w_dec > 0.0 else 0.12
@@ -2664,7 +2848,8 @@ class MCL4COETrainer:
 
                 ncm_telemetry: dict[str, Any] = {}
                 if (
-                    self.config.enable_ncm
+                    not in_clone_warmup
+                    and self.config.enable_ncm
                     and self.ncm_system is not None
                     and micro_batches
                     and step % max(1, int(self.config.ncm_every)) == 0
@@ -2845,6 +3030,13 @@ class MCL4COETrainer:
                 )
 
                 active_pairs = self._get_model_mitotic_pairs()
+                released_pairs = list(getattr(self, "_released_mitotic_pairs", []))
+                plastic_experts = list(getattr(self, "_plastic_expert_indices", []))
+                mitosis_phase = (
+                    "clone_token_warmup"
+                    if in_clone_warmup
+                    else ("clone_pure_rl" if in_clone_pure_rl else "joint")
+                )
                 record: dict[str, Any] = {
                     "step": step,
                     "total_steps": self.config.total_steps,
@@ -2877,7 +3069,15 @@ class MCL4COETrainer:
                     "weights": {k: round(v, 4) for k, v in cur_weights.items()},
                     "nvfp4_gemms": gemm_counts["forward"] + gemm_counts["dgrad"] + gemm_counts["wgrad"],
                     "nvfp4_sparse_2to4_gemms": gemm_counts.get("sparse_2to4", 0),
+                    "mitosis_phase": mitosis_phase,
+                    "clone_warmup_tokens_seen": int(self._clone_warmup_tokens_seen),
+                    **({"plastic_experts": plastic_experts} if plastic_experts else {}),
                     **({"mitotic_pairs": [list(p) for p in active_pairs]} if active_pairs else {}),
+                    **(
+                        {"released_mitotic_pairs": [list(p) for p in released_pairs]}
+                        if released_pairs
+                        else {}
+                    ),
                     **({"mitosis_event": mitosis_event} if mitosis_event is not None else {}),
                     **ornith_telemetry,
                     **ncm_telemetry,

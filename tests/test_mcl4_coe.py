@@ -2797,3 +2797,209 @@ def test_ornith_pp_weighting_granular_skills_and_infinite_recursion() -> None:
     assert step_out.star_difficulty >= 1.0
     assert step_out.active_skill != ""
 
+
+def test_multi_round_clone_only_mitosis_warmup_and_pure_rl(tmp_path: Path) -> None:
+    """Verify multi-round clone-only mitosis (`4 -> 6 -> 8`):
+    1. Freezes the original RL'd experts (`0..3`) and preserves their exact weights (`0.0` diff).
+    2. Warms up only the newly spawned mitotic clones (`4, 5`) on tokens (`clone_token_warmup`) to shift
+       their weights away from their donor parents while keeping COE heads frozen.
+    3. Transitions automatically to Pure RL (`clone_pure_rl`) on the mitotic clones while keeping all
+       non-clone experts frozen (`0.0` diff).
+    4. When starting a second mitosis round (`6 -> 8`), releases the Round-1 pairs (`(0,4), (1,5)`),
+       freezes both original experts and Round-1 clones (`0..5`), and repeats the warmup -> pure RL
+       lifecycle exclusively on the new Round-2 mitotic clones (`6, 7`).
+    """
+    import json
+
+    from mcl4_coe import BlockAlignedShardWriter, MCL4COETrainer, TrainingRunConfig
+
+    shards_dir = tmp_path / "shards"
+    runs_dir = tmp_path / "runs"
+    for t_name in ("pretrain_lm", "uta_trace", "typed_decision"):
+        w = BlockAlignedShardWriter(
+            shards_dir / t_name,
+            track=t_name,
+            split="train",
+            seq_len=64,
+            max_blocks_per_shard=4,
+        )
+        for i in range(4):
+            if t_name == "pretrain_lm":
+                w.add_pretrain_document(f"Axiom {i}: capillary flow balances surface tension against gravity.")
+            else:
+                w.add_uta_episode(f"Solve {i}+3", f"{i}+3={i+3}", str(i + 3))
+        w.flush_shard()
+
+    # Base RL'd checkpoint with E=4 experts
+    base_cfg = TrainingRunConfig(
+        run_id="base_4e",
+        runs_root=str(runs_dir),
+        shards_root=str(shards_dir),
+        corpora_root=str(tmp_path / "no_corpora"),
+        d_model=32,
+        n_heads=4,
+        n_encoder_layers=1,
+        n_decoder_layers=1,
+        ple_dim=8,
+        expert_hidden_dim=64,
+        num_experts=4,
+        max_experts=4,
+        top_k=4,
+        max_seq_len=64,
+        projection_dim=8,
+        total_steps=1,
+        batch_size=2,
+        micro_batch_size=2,
+        checkpoint_every=1,
+        sample_every=10,
+        eval_every=0,
+    )
+    base_trainer = MCL4COETrainer(base_cfg)
+    base_trainer.train()
+    base_ckpt = runs_dir / "base_4e" / "checkpoints" / "step_00001.meta.json"
+    base_exp_weights = {
+        e: base_trainer.model.backbone.encoder_layers[0].moe.experts[e].up_proj.weight.detach().clone()
+        for e in range(4)
+    }
+
+    # Mitosis Round 1: E=4 -> 6 (1 step token warmup on clones [4, 5], then 1 step pure RL on clones [4, 5])
+    r1_cfg = TrainingRunConfig(
+        run_id="mitosis_r1_6e",
+        runs_root=str(runs_dir),
+        shards_root=str(shards_dir),
+        corpora_root=str(tmp_path / "no_corpora"),
+        resume_checkpoint=str(base_ckpt),
+        d_model=32,
+        n_heads=4,
+        n_encoder_layers=1,
+        n_decoder_layers=1,
+        ple_dim=8,
+        expert_hidden_dim=64,
+        num_experts=6,
+        max_experts=6,
+        top_k=4,
+        max_seq_len=64,
+        projection_dim=8,
+        preserve_residual_across_stacks=True,
+        donor_backbone_lr_scale=0.001,
+        freeze_donor_embeddings=True,
+        freeze_non_clone_experts=True,
+        mitotic_perturbation_scale=5e-3,
+        clone_expert_lr_scale=1.0,
+        clone_warmup_steps=1,
+        pure_rl_after_clone_warmup=True,
+        release_mitotic_pairs=True,
+        mitotic_ortho_coef=0.04,
+        enable_ornith_rl=True,
+        ornith_every=1,
+        ornith_weight=0.25,
+        lr=1e-3,
+        total_steps=3,
+        batch_size=2,
+        micro_batch_size=2,
+        checkpoint_every=2,
+        sample_every=10,
+        eval_every=0,
+    )
+    r1_trainer = MCL4COETrainer(r1_cfg)
+    assert r1_trainer._get_model_mitotic_pairs() == [(0, 4), (1, 5)]
+    assert r1_trainer._plastic_expert_indices == [4, 5]
+    # Verify non-clone experts 0..3 preserved exact donor weights at birth and have requires_grad=False
+    for e in range(4):
+        exp_mod = r1_trainer.model.backbone.encoder_layers[0].moe.experts[e]
+        assert not exp_mod.up_proj.weight.requires_grad
+        assert torch.equal(exp_mod.up_proj.weight.detach(), base_exp_weights[e])
+    for c in (4, 5):
+        exp_mod = r1_trainer.model.backbone.encoder_layers[0].moe.experts[c]
+        assert exp_mod.up_proj.weight.requires_grad
+    clone_Birth_4 = r1_trainer.model.backbone.encoder_layers[0].moe.experts[4].up_proj.weight.detach().clone()
+
+    r1_summary = r1_trainer.train()
+    assert r1_summary["step"] == 3
+    # Non-clone experts 0..3 must remain 100% frozen across both Phase 1 (token warmup) and Phase 2 (pure RL)
+    for e in range(4):
+        exp_mod = r1_trainer.model.backbone.encoder_layers[0].moe.experts[e]
+        assert torch.equal(exp_mod.up_proj.weight.detach(), base_exp_weights[e])
+    # Clone experts 4, 5 must have updated weights
+    assert not torch.equal(
+        r1_trainer.model.backbone.encoder_layers[0].moe.experts[4].up_proj.weight.detach(),
+        clone_Birth_4,
+    )
+    r1_lines = [
+        json.loads(line)
+        for line in (runs_dir / "mitosis_r1_6e" / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    step2_rec = next(r for r in r1_lines if r["step"] == 2)
+    step3_rec = next(r for r in r1_lines if r["step"] == 3)
+    assert step2_rec["mitosis_phase"] == "clone_token_warmup"
+    assert step3_rec["mitosis_phase"] == "clone_pure_rl"
+
+    r1_ckpt = runs_dir / "mitosis_r1_6e" / "checkpoints" / "step_00003.meta.json"
+    r1_exp_weights = {
+        e: r1_trainer.model.backbone.encoder_layers[0].moe.experts[e].up_proj.weight.detach().clone()
+        for e in range(6)
+    }
+
+    # Mitosis Round 2: E=6 -> 8 (releases Round-1 pairs [(0,4), (1,5)], freezes 0..5, trains only new clones [6, 7])
+    r2_cfg = TrainingRunConfig(
+        run_id="mitosis_r2_8e",
+        runs_root=str(runs_dir),
+        shards_root=str(shards_dir),
+        corpora_root=str(tmp_path / "no_corpora"),
+        resume_checkpoint=str(r1_ckpt),
+        d_model=32,
+        n_heads=4,
+        n_encoder_layers=1,
+        n_decoder_layers=1,
+        ple_dim=8,
+        expert_hidden_dim=64,
+        num_experts=8,
+        max_experts=8,
+        top_k=4,
+        max_seq_len=64,
+        projection_dim=8,
+        preserve_residual_across_stacks=True,
+        donor_backbone_lr_scale=0.001,
+        freeze_donor_embeddings=True,
+        freeze_non_clone_experts=True,
+        mitotic_perturbation_scale=5e-3,
+        clone_expert_lr_scale=1.0,
+        clone_warmup_steps=1,
+        pure_rl_after_clone_warmup=True,
+        release_mitotic_pairs=True,
+        mitotic_ortho_coef=0.04,
+        enable_ornith_rl=True,
+        ornith_every=1,
+        ornith_weight=0.25,
+        lr=1e-3,
+        total_steps=5,
+        batch_size=2,
+        micro_batch_size=2,
+        checkpoint_every=2,
+        sample_every=10,
+        eval_every=0,
+    )
+    r2_trainer = MCL4COETrainer(r2_cfg)
+    assert r2_trainer._released_mitotic_pairs == [(0, 4), (1, 5)]
+    assert r2_trainer._get_model_mitotic_pairs() == [(2, 6), (3, 7)]
+    assert r2_trainer._plastic_expert_indices == [6, 7]
+    for e in range(6):
+        assert not r2_trainer.model.backbone.encoder_layers[0].moe.experts[e].up_proj.weight.requires_grad
+    for c in (6, 7):
+        assert r2_trainer.model.backbone.encoder_layers[0].moe.experts[c].up_proj.weight.requires_grad
+    clone_Birth_6 = r2_trainer.model.backbone.encoder_layers[0].moe.experts[6].up_proj.weight.detach().clone()
+
+    r2_summary = r2_trainer.train()
+    assert r2_summary["step"] == 5
+    for e in range(6):
+        exp_mod = r2_trainer.model.backbone.encoder_layers[0].moe.experts[e]
+        assert torch.equal(exp_mod.up_proj.weight.detach(), r1_exp_weights[e])
+    assert not torch.equal(
+        r2_trainer.model.backbone.encoder_layers[0].moe.experts[6].up_proj.weight.detach(),
+        clone_Birth_6,
+    )
+    assert r2_summary["released_mitotic_pairs"] == [[0, 4], [1, 5]]
+    assert r2_summary["mitotic_pairs"] == [[2, 6], [3, 7]]
+
+

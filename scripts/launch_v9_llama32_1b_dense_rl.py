@@ -530,6 +530,13 @@ def build_v9_llama32_1b_dense_rl_config(
     top_k: int = 8,
     enable_mitosis: bool = False,
     release_mitotic_pairs: bool = True,
+    freeze_non_clone_experts: bool = False,
+    mitotic_perturbation_scale: float = 5.0e-3,
+    clone_expert_lr_scale: float = 1.0,
+    clone_warmup_steps: int = 0,
+    clone_warmup_tokens: int = 0,
+    pure_rl_after_clone_warmup: bool = False,
+    mitotic_ortho_coef: float | None = None,
     mitosis_milestones: tuple[tuple[int, int], ...] = (),
     batch_size: int = 8,
     micro_batch_size: int = 4,
@@ -546,6 +553,11 @@ def build_v9_llama32_1b_dense_rl_config(
 ) -> TrainingRunConfig:
     """Construct `TrainingRunConfig` for `Llama-3.2-1B-Instruct` Co-Active Sliced Dense (`E=8, top_k=8`) + `NVFP4` + `NCM`."""
     expert_hidden_dim = 8192 // 8
+    ortho_coef = (
+        float(mitotic_ortho_coef)
+        if mitotic_ortho_coef is not None
+        else (0.04 if (enable_mitosis or freeze_non_clone_experts) else 0.0)
+    )
     return TrainingRunConfig(
         run_id=run_id,
         runs_root=runs_root,
@@ -578,6 +590,12 @@ def build_v9_llama32_1b_dense_rl_config(
         model_dtype="bfloat16",
         plastic_experts_per_layer=plastic_experts_per_layer,
         freeze_donor_embeddings=True,
+        freeze_non_clone_experts=freeze_non_clone_experts,
+        mitotic_perturbation_scale=mitotic_perturbation_scale,
+        clone_expert_lr_scale=clone_expert_lr_scale,
+        clone_warmup_steps=clone_warmup_steps,
+        clone_warmup_tokens=clone_warmup_tokens,
+        pure_rl_after_clone_warmup=pure_rl_after_clone_warmup,
         enable_mitosis=enable_mitosis,
         release_mitotic_pairs=release_mitotic_pairs,
         orthogonal_mitosis=True,
@@ -585,7 +603,7 @@ def build_v9_llama32_1b_dense_rl_config(
         mitosis_step_size=4 if enable_mitosis else 0,
         mitosis_milestones=mitosis_milestones,
         clear_consumed_shards=False,
-        mitotic_ortho_coef=0.02 if enable_mitosis else 0.0,
+        mitotic_ortho_coef=ortho_coef,
         sequence_diversity_coef=0.02,
         recurrent_coverage_penalty=0.20,
         projection_dim=256,
@@ -694,6 +712,12 @@ def main() -> None:
     parser.add_argument("--max-experts", type=int, default=8)
     parser.add_argument("--top-k", type=int, default=8)
     parser.add_argument("--enable-mitosis", action="store_true")
+    parser.add_argument("--freeze-non-clone-experts", action="store_true")
+    parser.add_argument("--mitotic-perturbation-scale", type=float, default=5.0e-3)
+    parser.add_argument("--clone-expert-lr-scale", type=float, default=1.0)
+    parser.add_argument("--clone-warmup-steps", type=int, default=0)
+    parser.add_argument("--clone-warmup-tokens", type=int, default=0)
+    parser.add_argument("--pure-rl-after-clone-warmup", action="store_true")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--micro-batch-size", type=int, default=4)
     parser.add_argument("--max-seq-len", type=int, default=512)
@@ -737,6 +761,12 @@ def main() -> None:
         max_experts=max(args.num_experts, args.max_experts),
         top_k=args.top_k,
         enable_mitosis=args.enable_mitosis,
+        freeze_non_clone_experts=args.freeze_non_clone_experts,
+        mitotic_perturbation_scale=args.mitotic_perturbation_scale,
+        clone_expert_lr_scale=args.clone_expert_lr_scale,
+        clone_warmup_steps=args.clone_warmup_steps,
+        clone_warmup_tokens=args.clone_warmup_tokens,
+        pure_rl_after_clone_warmup=args.pure_rl_after_clone_warmup,
         batch_size=args.batch_size,
         micro_batch_size=args.micro_batch_size,
         max_seq_len=args.max_seq_len,

@@ -131,6 +131,7 @@ class EncodedState:
     expert_load: Tensor
     gist_prefix_len: int = 0
     raw_hidden: Tensor | None = None
+    state_ids: Tensor | None = None
 
 
 @dataclass
@@ -144,6 +145,7 @@ class BackboneOutput:
     expert_load: Tensor
     anchor: Tensor | None = None
     step_states: tuple[Tensor, ...] = ()
+    ctx_last_hidden: Tensor | None = None
 
 
 @dataclass
@@ -1724,6 +1726,7 @@ class MCL4CEDBackbone(nn.Module):
             router_z_loss=torch.stack(z_losses).mean(),
             expert_load=torch.stack(loads),
             raw_hidden=x,
+            state_ids=state_ids,
         )
 
     def decode_candidates(
@@ -1773,6 +1776,61 @@ class MCL4CEDBackbone(nn.Module):
             )
             else candidate_encoded.hidden
         )
+
+        # For donor-grafted models (`preserve_residual_across_stacks=True`) decoding candidate options
+        # against a context (`owner_rows is not None`), prepend the right-aligned valid question tail
+        # from `encoded_state.raw_hidden` so Layers 8..15 native RoPE self-attention (`local_attention`)
+        # directly attends across the `[question_tail -> candidate_option]` boundary.
+        k_ctx_prefix = 0
+        work_anchor = anchor
+        work_orig = original_inputs
+        work_ids = candidate_ids
+        work_valid = candidate_valid
+        if (
+            owner_rows is not None
+            and causal_local
+            and self.config.preserve_residual_across_stacks
+            and encoded_state.raw_hidden is not None
+            and encoded_state.state_ids is not None
+        ):
+            s_ids = encoded_state.state_ids
+            s_val = encoded_state.valid
+            s_raw = encoded_state.raw_hidden
+            s_content_val = s_val & (s_ids != self.eos_id)
+            s_content_val = torch.where(
+                s_content_val.any(dim=-1, keepdim=True), s_content_val, s_val
+            )
+            max_ctx_len = int(s_content_val.sum(dim=-1).max().item())
+            if max_ctx_len >= 1:
+                k_ctx_prefix = min(64, max_ctx_len)
+                _, right_perm = torch.sort(s_content_val.to(torch.int32), dim=-1, stable=True)
+                tail_perm = right_perm[:, -k_ctx_prefix:]
+                tail_ids_b = s_ids.gather(1, tail_perm)
+                tail_val_b = s_content_val.gather(1, tail_perm)
+                tail_raw_b = s_raw.gather(
+                    1, tail_perm.unsqueeze(-1).expand(-1, -1, s_raw.shape[-1])
+                )
+                tail_ids = tail_ids_b.index_select(0, owner_rows)
+                tail_val = tail_val_b.index_select(0, owner_rows)
+                tail_raw = tail_raw_b.index_select(0, owner_rows)
+                tail_orig = self.token_embedding(tail_ids.long())
+                if self.config.embedding_multiplier != 1.0:
+                    tail_orig = tail_orig * float(self.config.embedding_multiplier)
+                tail_orig = tail_orig.masked_fill(~tail_val.unsqueeze(-1), 0)
+                cand_val_eff = candidate_valid
+                if (
+                    self.config.vocab_size == 128256
+                    and candidate_ids.shape[1] >= 2
+                    and bool((candidate_ids[:, 0] == 128000).all())
+                    and bool(candidate_valid[:, 1:].any(dim=-1).all())
+                ):
+                    cand_val_eff = candidate_valid.clone()
+                    cand_val_eff[:, 0] = False
+                work_anchor = torch.cat([tail_raw, anchor], dim=1)
+                work_orig = torch.cat([tail_orig, original_inputs], dim=1)
+                work_ids = torch.cat([tail_ids, candidate_ids], dim=1)
+                work_valid = torch.cat([tail_val, cand_val_eff], dim=1)
+
         n_prefix_kv = (
             max(0, int(encoded_state.hidden.shape[1] - candidate_ids.shape[1]))
             if (causal_cross and owner_rows is None)
@@ -1784,7 +1842,7 @@ class MCL4CEDBackbone(nn.Module):
             for layer in self.decoder_layers
         ]
 
-        state = anchor
+        state = work_anchor
         step_states: list[Tensor] = []
         raw_step_states: list[Tensor] = []
         aux_losses = [candidate_encoded.aux_loss]
@@ -1792,7 +1850,7 @@ class MCL4CEDBackbone(nn.Module):
         loads = [candidate_encoded.expert_load]
         visited_expert_masks: list[Tensor | None] = [None] * len(self.decoder_layers)
         for step in range(recurrence_steps):
-            x = anchor if step == 0 else self.feedback(anchor, state, valid=candidate_valid)
+            x = work_anchor if step == 0 else self.feedback(work_anchor, state, valid=work_valid)
             step_kv_cache = global_kv_cache
             if (
                 recurrent_kv
@@ -1824,9 +1882,9 @@ class MCL4CEDBackbone(nn.Module):
             ):
                 x, aux, z, load = layer(
                     x,
-                    original_inputs,
-                    candidate_ids,
-                    candidate_valid,
+                    work_orig,
+                    work_ids,
+                    work_valid,
                     k_global,
                     v_global,
                     encoded_state.valid,
@@ -1847,7 +1905,7 @@ class MCL4CEDBackbone(nn.Module):
                 z_losses.append(z)
                 loads.append(load.unsqueeze(0))
             raw_step_states.append(x)
-            state = self.final_norm(x).masked_fill(~candidate_valid.unsqueeze(-1), 0)
+            state = self.final_norm(x).masked_fill(~work_valid.unsqueeze(-1), 0)
             step_states.append(state)
 
         if depth_ponder and len(step_states) > 1:
@@ -1896,7 +1954,7 @@ class MCL4CEDBackbone(nn.Module):
                     blended = self.final_norm(r1 + gate_ent * (r_deep - r1))
                 else:
                     blended = self.final_norm(0.40 * r1 + 0.60 * r_deep)
-                state = blended.masked_fill(~candidate_valid.unsqueeze(-1), 0)
+                state = blended.masked_fill(~work_valid.unsqueeze(-1), 0)
             elif causal_cross:
                 with torch.no_grad():
                     l1 = self.lm_head(s1).float()
@@ -1908,10 +1966,19 @@ class MCL4CEDBackbone(nn.Module):
                     del p1
                     gate_ent = (0.50 + 0.35 * torch.sigmoid((ent1 - 1.5) / 0.6)).to(s1.dtype)
                 blended = self.final_norm(s1 + gate_ent * (s_deep - s1))
-                state = blended.masked_fill(~candidate_valid.unsqueeze(-1), 0)
+                state = blended.masked_fill(~work_valid.unsqueeze(-1), 0)
             else:
                 blended = self.final_norm(0.40 * s1 + 0.60 * s_deep)
-                state = blended.masked_fill(~candidate_valid.unsqueeze(-1), 0)
+                state = blended.masked_fill(~work_valid.unsqueeze(-1), 0)
+
+        ctx_last_hidden: Tensor | None = None
+        if k_ctx_prefix > 0:
+            ctx_last_hidden = state[:, k_ctx_prefix - 1, :]
+            state = state[:, k_ctx_prefix:, :].masked_fill(~candidate_valid.unsqueeze(-1), 0)
+            step_states = [
+                s[:, k_ctx_prefix:, :].masked_fill(~candidate_valid.unsqueeze(-1), 0)
+                for s in step_states
+            ]
 
         return BackboneOutput(
             hidden=state,
@@ -1921,6 +1988,7 @@ class MCL4CEDBackbone(nn.Module):
             expert_load=torch.cat(loads, dim=0),
             anchor=anchor,
             step_states=tuple(step_states),
+            ctx_last_hidden=ctx_last_hidden,
         )
 
     def encode(

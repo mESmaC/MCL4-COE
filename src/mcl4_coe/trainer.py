@@ -596,6 +596,7 @@ class MCL4COETrainer:
                 continue
 
         self.val_decision_batches: list[dict[str, torch.Tensor]] = []
+        self.epistemic_decision_batches: list[dict[str, torch.Tensor]] = []
         self.val_decision_count = 0
         val_dec_cache = shards_root / "typed_decision" / "decision_examples_val_cache.pt"
         if val_dec_cache.is_file():
@@ -611,11 +612,13 @@ class MCL4COETrainer:
                         and all(len(self.tokenizer.encode(d)) <= dec_seq_len for d in ex.descriptions)
                     ):
                         val_filtered.append(ex)
-                        if len(val_filtered) >= 128:
+                        if len(val_filtered) >= 512:
                             break
                 bsz_val = max(4, self.config.decision_batch_size * 2)
-                for i in range(0, len(val_filtered), bsz_val):
-                    chunk = val_filtered[i : i + bsz_val]
+                blind_val_slice = val_filtered[:128]
+                epistemic_slice = val_filtered[128:512]
+                for i in range(0, len(blind_val_slice), bsz_val):
+                    chunk = blind_val_slice[i : i + bsz_val]
                     if chunk:
                         self.val_decision_batches.append(
                             collate_decisions(
@@ -626,6 +629,17 @@ class MCL4COETrainer:
                             )
                         )
                         self.val_decision_count += len(chunk)
+                for i in range(0, len(epistemic_slice), bsz_val):
+                    chunk = epistemic_slice[i : i + bsz_val]
+                    if chunk:
+                        self.epistemic_decision_batches.append(
+                            collate_decisions(
+                                chunk,
+                                dec_seq_len,
+                                device="cpu",
+                                tokenizer=self.tokenizer,
+                            )
+                        )
             except Exception:
                 pass
 
@@ -861,8 +875,25 @@ class MCL4COETrainer:
             return {}
 
         pool_sz = min(4, len(v_ds))
-        base_idx = (self._epistemic_cursor * pool_sz) % len(v_ds)
-        idxs = [(base_idx + i) % len(v_ds) for i in range(pool_sz)]
+        mb_sz_val = max(1, min(self.config.micro_batch_size, self.config.batch_size))
+        if self.model.backbone.config.num_experts >= 200:
+            mb_sz_val = min(mb_sz_val, 4)
+        n_val_blind = mb_sz_val * max(1, self.config.val_max_batches_per_track)
+        if len(v_ds) > n_val_blind + pool_sz:
+            avail_span = len(v_ds) - n_val_blind
+            base_idx = n_val_blind + ((self._epistemic_cursor * pool_sz) % avail_span)
+            idxs = [n_val_blind + ((base_idx - n_val_blind + i) % avail_span) for i in range(pool_sz)]
+        else:
+            # Fallback if val split is small: sample from train dataset tail so blind val is untouched
+            t_ds_Map = getattr(self, "track_datasets", None)
+            if isinstance(t_ds_Map, dict) and t_choice in t_ds_Map and len(t_ds_Map[t_choice]) >= pool_sz:
+                v_ds = t_ds_Map[t_choice]
+                half_start = len(v_ds) // 2
+                avail_span = max(1, len(v_ds) - half_start)
+                base_idx = half_start + ((self._epistemic_cursor * pool_sz) % avail_span)
+                idxs = [half_start + ((base_idx - half_start + i) % avail_span) for i in range(pool_sz)]
+            else:
+                return {}
         sub = v_ds.batch(idxs, pin_memory=False)
         inp_pool = sub["input_ids"].to(self.device, non_blocking=True)
         lbl_pool = sub["labels"].to(self.device, non_blocking=True)
@@ -922,10 +953,14 @@ class MCL4COETrainer:
         unfam_sel = unfamiliarity.index_select(0, top_idx).detach()
         tok_sel = tok_counts.index_select(0, top_idx).detach()
 
-        # 2. Freeze donor FFN (.moe.experts.) during held-out epistemic backward so FFN NEVER memorizes held-out tokens
+        # 2. Freeze donor FFN (.moe.experts.), token_embedding, and lm_head during epistemic backward
         ffn_Saved: list[tuple[torch.nn.Parameter, bool]] = []
         for name, param in self.model.named_parameters():
-            if ".moe.experts." in name and param.requires_grad:
+            if (
+                ".moe.experts." in name
+                or "token_embedding" in name
+                or "lm_head" in name
+            ) and param.requires_grad:
                 ffn_Saved.append((param, True))
                 param.requires_grad_(False)
 
@@ -961,9 +996,10 @@ class MCL4COETrainer:
                 ep_lm_loss = (ep_weights * seq_ce_r).mean()
 
                 ep_op_loss = torch.zeros((), device=self.device, dtype=torch.float32)
-                if self.val_decision_batches:
-                    dec_b_cpu = self.val_decision_batches[
-                        self._epistemic_cursor % len(self.val_decision_batches)
+                ep_dec_pool = getattr(self, "epistemic_decision_batches", None)
+                if ep_dec_pool:
+                    dec_b_cpu = ep_dec_pool[
+                        self._epistemic_cursor % len(ep_dec_pool)
                     ]
                     dec_sub = {
                         k: v[:2].to(self.device, non_blocking=True) for k, v in dec_b_cpu.items()

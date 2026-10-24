@@ -611,6 +611,61 @@ class CognitiveOperatorEnsemble(nn.Module):
             return None
         return getattr(ncm, "coe_bridge", None)
 
+    def _compute_candidate_lm_continuation_score(
+        self,
+        ctx_last_hidden: Tensor | None,
+        cand_hidden: Tensor,
+        canon_opt_ids: Tensor,
+        canon_valid: Tensor,
+        canon_owners: Tensor,
+        batch_size: int,
+    ) -> Tensor | None:
+        """Compute standardized 16-layer causal continuation log-likelihood across options."""
+        if (
+            not self.backbone.config.preserve_residual_across_stacks
+            or ctx_last_hidden is None
+            or canon_opt_ids.shape[1] < 2
+        ):
+            return None
+        target_tokens = canon_opt_ids[:, 1:].long()
+        tok_mask = canon_valid[:, 1:] & (target_tokens != self.config.eos_id)
+        has_any = tok_mask.any(dim=-1, keepdim=True)
+        tok_mask = torch.where(has_any, tok_mask, canon_valid[:, 1:])
+
+        pred_h = torch.cat([ctx_last_hidden.unsqueeze(1), cand_hidden[:, 1:-1, :]], dim=1)
+        lm_logits = self.backbone.lm_head(pred_h)
+        with torch.autocast(device_type=pred_h.device.type, enabled=False):
+            token_nll = F.cross_entropy(
+                lm_logits.reshape(-1, lm_logits.shape[-1]).float(),
+                target_tokens.reshape(-1),
+                reduction="none",
+            ).view_as(target_tokens)
+            tok_mask_f = tok_mask.float()
+            tok_counts = tok_mask_f.sum(dim=-1).clamp_min(1.0)
+            seq_lp = -(token_nll * tok_mask_f).sum(dim=-1) / (tok_counts ** 0.70)
+
+            owner_counts = (
+                torch.zeros(batch_size, device=seq_lp.device, dtype=torch.float32)
+                .scatter_add_(0, canon_owners, torch.ones_like(seq_lp))
+                .clamp_min(1.0)
+            )
+            owner_mean = (
+                torch.zeros(batch_size, device=seq_lp.device, dtype=torch.float32).scatter_add_(
+                    0, canon_owners, seq_lp
+                )
+                / owner_counts
+            )
+            centered_lp = seq_lp - owner_mean.index_select(0, canon_owners)
+            owner_var = (
+                torch.zeros(batch_size, device=seq_lp.device, dtype=torch.float32).scatter_add_(
+                    0, canon_owners, centered_lp.square()
+                )
+                / owner_counts
+            )
+            owner_std = owner_var.sqrt().clamp_min(0.25).index_select(0, canon_owners)
+            lm_rel_score = torch.tanh((centered_lp / owner_std) * 0.65)
+        return lm_rel_score.to(cand_hidden.dtype)
+
     def forward_decision(
         self,
         context_ids: Tensor,
@@ -689,6 +744,8 @@ class CognitiveOperatorEnsemble(nn.Module):
                 router_z_loss=encoded_state.router_z_loss,
                 expert_load=encoded_state.expert_load,
                 gist_prefix_len=0,
+                raw_hidden=encoded_state.raw_hidden,
+                state_ids=encoded_state.state_ids,
             )
             s_ev_mask = self.pooler._state_evidence_mask(
                 trimmed_ctx_ids,
@@ -760,6 +817,20 @@ class CognitiveOperatorEnsemble(nn.Module):
             strip_boundary=self.config.strip_boundary_tokens_in_pool,
             bos_id=self.config.bos_id,
             eos_id=self.config.eos_id,
+        )
+        ctx_l15_norm: Tensor | None = None
+        if decoded_options.ctx_last_hidden is not None:
+            ctx_l15_norm = self.pooler.state_norm(
+                decoded_options.ctx_last_hidden.float()
+            ).to(paired_state_repr.dtype)
+            paired_state_repr = 0.55 * paired_state_repr + 0.45 * ctx_l15_norm
+        lm_cont_score = self._compute_candidate_lm_continuation_score(
+            decoded_options.ctx_last_hidden,
+            dec_opt_hidden,
+            canon_opt_ids,
+            canon_valid,
+            canon_owners,
+            batch,
         )
         rule_state_proj_rows: Tensor | None = None
         rule_cand_proj: Tensor | None = None
@@ -916,6 +987,16 @@ class CognitiveOperatorEnsemble(nn.Module):
                 prior_score = torch.tanh(hier_lp / 10.0).to(canon_scores.dtype)
                 canon_scores = (1.0 - prior_w) * canon_scores + prior_w * prior_score
 
+        if lm_cont_score is not None:
+            w_lm = 0.15 if (whiteboard is not None and w_rule > 0.0) else 0.65
+            canon_scores = (1.0 - w_lm) * canon_scores + w_lm * lm_cont_score
+            if similarities_step1 is not None:
+                lm_step1 = lm_cont_score.index_select(0, inv_perm)
+                lm_grid = lm_step1.new_zeros(valid_options.shape).masked_scatter(
+                    valid_options, lm_step1
+                )
+                similarities_step1 = (1.0 - w_lm) * similarities_step1 + w_lm * lm_grid
+
         # Restore original caller option order via inv_perm
         valid_scores = canon_scores.index_select(0, inv_perm)
         state_proj = canon_state_proj.index_select(0, inv_perm)
@@ -1055,6 +1136,19 @@ class CognitiveOperatorEnsemble(nn.Module):
             bos_id=self.config.bos_id,
             eos_id=self.config.eos_id,
         )
+        if decoded_options.ctx_last_hidden is not None:
+            ctx_l15_norm = self.pooler.state_norm(
+                decoded_options.ctx_last_hidden.float()
+            ).to(paired_state_repr.dtype)
+            paired_state_repr = 0.55 * paired_state_repr + 0.45 * ctx_l15_norm
+        lm_cont_score = self._compute_candidate_lm_continuation_score(
+            decoded_options.ctx_last_hidden,
+            decoded_options.hidden,
+            canon_opt_ids,
+            canon_valid,
+            canon_owners,
+            batch,
+        )
 
         state_in = F.dropout(paired_state_repr, p=0.10, training=self.training)
         cand_in = F.dropout(cand_repr, p=0.10, training=self.training)
@@ -1137,6 +1231,9 @@ class CognitiveOperatorEnsemble(nn.Module):
                     self._similarity,
                 )
             )
+
+        if lm_cont_score is not None:
+            canon_scores = 0.35 * canon_scores + 0.65 * lm_cont_score
 
         valid_scores = canon_scores.index_select(0, inv_perm)
         state_proj = canon_state_proj.index_select(0, inv_perm)
@@ -1858,21 +1955,29 @@ class CognitiveOperatorEnsemble(nn.Module):
                 eos_hits[:, 0] = False
             first_ep_mask = eos_hits.cumsum(dim=1) == 0
             min_ep_len = int(first_ep_mask.sum(dim=1).min().item())
-            pref_len = max(
-                4,
-                min(
-                    max(12, min_ep_len) // 3,
-                    48,
-                    input_ids.shape[1] // 3,
-                    int(self.config.gist_chunk_size),
-                ),
-            )
+            first_unmasked = 0
+            if targets is not None and targets.shape == input_ids.shape:
+                unmasked = targets != -100
+                if unmasked.any(dim=1).all():
+                    first_unmasked = int(unmasked.int().argmax(dim=1).min().item())
+            if first_unmasked >= 12:
+                pref_len = min(first_unmasked, int(input_ids.shape[1] * 0.85), 384)
+            else:
+                pref_len = max(
+                    4,
+                    min(
+                        max(12, min_ep_len) // 3,
+                        64,
+                        input_ids.shape[1] // 3,
+                        max(64, int(self.config.gist_chunk_size)),
+                    ),
+                )
             pref_ids = input_ids[:, :pref_len]
             pref_valid = pref_ids != self.backbone.config.pad_id
             if not pref_valid.any(dim=-1).all():
                 pref_valid = pref_valid.clone()
                 pref_valid[:, 0] = True
-            eff_chunk_sz = pref_len if pref_len >= 64 else max(4, pref_len // 2)
+            eff_chunk_sz = max(16, (pref_len + 1) // 2) if pref_len >= 32 else max(4, pref_len // 2)
             eff_gist = self.compress_gist_context(
                 pref_ids,
                 pref_valid,
@@ -1900,7 +2005,6 @@ class CognitiveOperatorEnsemble(nn.Module):
                     level="brief",
                     encoded_hidden=enc_arg,
                 )
-                del cached_enc
                 joint_pair = torch.cat([abs_detailed, abs_brief], dim=-1)
                 ded_q = self.deduction_query_proj(joint_pair)
                 ded_sims = pearson_similarity(
@@ -1918,6 +2022,45 @@ class CognitiveOperatorEnsemble(nn.Module):
                 meta_ctx_gain = 0.5 * (meta_probs[:, 1:2] + meta_probs[:, 2:3])
                 coe_gate = (0.5 * ded_entail_gain + 0.5 * meta_ctx_gain).to(abs_detailed.dtype)
                 eff_prior = abs_detailed + 0.30 * coe_gate * (abs_brief - abs_detailed)
+                if enc_arg is not None and eff_gist is not None:
+                    with torch.autocast(device_type=input_ids.device.type, enabled=False):
+                        enc_f = F.normalize(enc_arg.float(), dim=-1, eps=1e-6)
+                        q_hop1 = F.normalize(abs_detailed.float(), dim=-1, eps=1e-6).unsqueeze(1)
+                        attn1_logits = (q_hop1 @ enc_f.transpose(1, 2)).squeeze(1) * 8.0
+                        attn1_logits = attn1_logits.masked_fill(~pref_valid, -1e9)
+                        attn1_w = attn1_logits.softmax(dim=-1)
+                        z_hop1 = (attn1_w.unsqueeze(1) @ enc_arg.float()).squeeze(1)
+
+                        q_hop2 = F.normalize(
+                            (z_hop1 + 0.5 * eff_prior.float()), dim=-1, eps=1e-6
+                        ).unsqueeze(1)
+                        attn2_logits = (
+                            (q_hop2 @ enc_f.transpose(1, 2)).squeeze(1) * 8.0
+                            - 2.5 * attn1_w
+                        )
+                        attn2_logits = attn2_logits.masked_fill(~pref_valid, -1e9)
+                        attn2_w = attn2_logits.softmax(dim=-1)
+                        z_hop2 = (attn2_w.unsqueeze(1) @ enc_arg.float()).squeeze(1)
+                    z_hop1_t = z_hop1.to(eff_prior.dtype)
+                    z_hop2_t = z_hop2.to(eff_prior.dtype)
+                    eff_prior = 0.80 * eff_prior + 0.20 * (0.60 * z_hop1_t + 0.40 * z_hop2_t)
+                    scratch_slots = torch.stack(
+                        [eff_prior, z_hop1_t, z_hop2_t], dim=1
+                    ).to(eff_gist.hidden.dtype)
+                    scratch_valid = torch.ones(
+                        (eff_gist.valid.shape[0], 3),
+                        dtype=torch.bool,
+                        device=eff_gist.valid.device,
+                    )
+                    eff_gist = EncodedState(
+                        hidden=torch.cat([eff_gist.hidden, scratch_slots], dim=1),
+                        valid=torch.cat([eff_gist.valid, scratch_valid], dim=1),
+                        aux_loss=eff_gist.aux_loss,
+                        router_z_loss=eff_gist.router_z_loss,
+                        expert_load=eff_gist.expert_load,
+                        gist_prefix_len=eff_gist.gist_prefix_len,
+                    )
+                del cached_enc
                 if eff_scale == 0.0:
                     eff_scale = 0.15
             eff_start = pref_len

@@ -753,7 +753,7 @@ def ingest_cybersec_and_cybergym_into_llama128k(
                     prompt_q=(
                         f"#U$# [CyberGym {task_id} | {proj} ({lang})] {vuln_desc[:220]} "
                         f"Buffer reserves `slots = {slots_n}` of `elem_size = {elem_b}` bytes and requires a mandatory `{guard_b}`-byte sanitizer guard header.\n"
-                        f"#Q$# [code] Trace the root-cause bounds fix in `#T$#` and implement `def solve(slots, elem_size):` returning `slots * elem_size + {guard_b}`."
+                        f"#Q$# [code] Trace the root-cause bounds fix in `#T$#` and implement `def solve(slots, elem_size):` returning the total guarded allocation in bytes."
                     ),
                     harness_h=f"assert solve({slots_n}, {elem_b}) == {safe_alloc} and solve(0, {elem_b}) == {guard_b}",
                     scaffold_s="abduction -> deduction -> decision -> evaluation -> metacognition",

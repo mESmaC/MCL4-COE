@@ -1182,7 +1182,14 @@ def _verify_thought_equations(t_body: str) -> float:
 
 
 def _verify_ifeval_constraints(a_body: str, spec: str, gold_answer: str = "") -> float:
-    """Deterministically verify semicolon-separated `ifeval:` instruction-following & math constraints."""
+    """Deterministically verify semicolon-separated `ifeval:` instruction-following & math constraints.
+
+    Crucially separates semantic correctness (`exact_int:`, `exact_answer:`) from surface formatting
+    constraints (`lowercase`, `no_comma`, `min_words`, `keyword`, `json_valid`):
+    - If a semantic rule (`exact_int` or `exact_answer`) is present and FAILS, total reward is strictly
+      capped at `<= 0.20` (preventing 0.80 reward hacking from well-formatted wrong answers).
+    - Prevents number-spraying on `exact_int:` by rejecting plain-text answers that dump multiple unrelated integers.
+    """
     import json
     import re
 
@@ -1190,49 +1197,91 @@ def _verify_ifeval_constraints(a_body: str, spec: str, gold_answer: str = "") ->
     if not rules:
         return 1.0 if (gold_answer and a_body.strip() == gold_answer.strip()) else 0.0
 
-    passed = 0
+    is_json_spec = "json_valid" in rules
+    parsed_json: Any = None
+    if is_json_spec:
+        try:
+            parsed_json = json.loads(a_body)
+        except Exception:
+            parsed_json = None
+
+    format_total = 0
+    format_passed = 0
+    semantic_total = 0
+    semantic_passed = 0
+
     for rule in rules:
         if rule == "lowercase":
+            format_total += 1
             if a_body == a_body.lower():
-                passed += 1
+                format_passed += 1
         elif rule == "uppercase":
+            format_total += 1
             if a_body == a_body.upper():
-                passed += 1
+                format_passed += 1
         elif rule == "no_comma":
+            format_total += 1
             if "," not in a_body:
-                passed += 1
+                format_passed += 1
         elif rule == "json_valid":
-            try:
-                json.loads(a_body)
-                passed += 1
-            except Exception:
-                pass
+            format_total += 1
+            if parsed_json is not None:
+                format_passed += 1
         elif rule.startswith("min_words:"):
+            format_total += 1
             n_w = int(rule.split(":", 1)[1])
             if len(a_body.split()) >= n_w:
-                passed += 1
+                format_passed += 1
         elif rule.startswith("max_words:"):
+            format_total += 1
             n_w = int(rule.split(":", 1)[1])
             if 0 < len(a_body.split()) <= n_w:
-                passed += 1
+                format_passed += 1
         elif rule.startswith("keyword:"):
+            format_total += 1
             kw = rule.split(":", 1)[1].strip().lower()
             if kw and kw in a_body.lower():
-                passed += 1
+                format_passed += 1
         elif rule.startswith("forbidden:"):
+            format_total += 1
             fw = rule.split(":", 1)[1].strip().lower()
             if fw and fw not in a_body.lower():
-                passed += 1
+                format_passed += 1
         elif rule.startswith("exact_int:"):
+            semantic_total += 1
             target_int = int(rule.split(":", 1)[1].strip())
             nums = [int(x) for x in re.findall(r"-?\d+", a_body)]
-            if nums and target_int in nums:
-                passed += 1
+            if is_json_spec and isinstance(parsed_json, dict):
+                # For JSON tool calls, check primary quota/result field or bounded numeric values (<= 2 ints)
+                if "verified_quota" in parsed_json:
+                    if isinstance(parsed_json["verified_quota"], int) and int(parsed_json["verified_quota"]) == target_int:
+                        semantic_passed += 1
+                elif 0 < len(nums) <= 2 and target_int in nums:
+                    semantic_passed += 1
+            else:
+                # For plain-text answers, disallow number-spraying (allow at most 1 unique integer in #A$#)
+                unique_nums = list(dict.fromkeys(nums))
+                if len(unique_nums) == 1 and unique_nums[0] == target_int:
+                    semantic_passed += 1
         elif rule.startswith("exact_answer:"):
+            semantic_total += 1
             target_str = rule.split(":", 1)[1].strip()
             if target_str and target_str.lower() in a_body.lower():
-                passed += 1
-    return float(passed) / float(len(rules))
+                semantic_passed += 1
+
+    fmt_ratio = (float(format_passed) / float(format_total)) if format_total > 0 else 1.0
+    if semantic_total > 0:
+        if semantic_passed < semantic_total:
+            # Semantic answer is wrong: grant at most 0.20 partial credit for following formatting constraints
+            return round(0.20 * fmt_ratio, 4)
+        if format_passed < format_total:
+            # Semantic answer is right, partial credit proportional to satisfied rules
+            return round(
+                float(format_passed + semantic_passed) / float(format_total + semantic_total),
+                4,
+            )
+        return 1.0
+    return round(fmt_ratio, 4)
 
 
 def verify_python_rollout(
@@ -1293,6 +1342,33 @@ def verify_python_rollout(
             # Require top-level statements in #A$# to be FunctionDef or constant Assign
             if not all(isinstance(stmt, (ast.FunctionDef, ast.Assign)) for stmt in code_tree.body):
                 return 0.0
+            # Anti-cheat: reject hardcoded lookup tables (`if n == 8: return 738 elif n == 2: return 71`)
+            # when the function has no loop/comprehension and no recursive call but branches on >= 2 test literals
+            defined_fn_names = {f.name for f in func_defs}
+            has_loop_or_comp = any(
+                isinstance(n, (ast.For, ast.While, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp))
+                for n in ast.walk(code_tree)
+            )
+            has_self_call = any(
+                isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Name)
+                and n.func.id in defined_fn_names
+                for f in func_defs
+                for n in ast.walk(f)
+            )
+            if not has_loop_or_comp and not has_self_call:
+                if_cmp_consts = {
+                    int(c.value)
+                    for n in ast.walk(code_tree)
+                    if isinstance(n, (ast.If, ast.IfExp))
+                    for c in ast.walk(n.test)
+                    if isinstance(c, ast.Constant) and isinstance(c.value, int) and abs(int(c.value)) > 1
+                }
+                harness_consts = {
+                    int(x) for x in re.findall(r"solve\(\s*(-?\d+)", harness_clean) if abs(int(x)) > 1
+                }
+                if len(if_cmp_consts & harness_consts) >= 2 or len(if_cmp_consts) >= 3:
+                    return 0.0
             tree = ast.parse(program_src, mode="exec")
             for node in ast.walk(tree):
                 if not isinstance(node, _SAFE_AST_NODES):
@@ -1358,7 +1434,7 @@ def verify_python_rollout(
 
     # Case 2: Algebraic / invariant assertion expression (`expected == 30`, `dp[3] == 19`, etc.)
     nums = [int(m) for m in re.findall(r"-?\d+", a_body)]
-    if nums:
+    if nums and len(nums) <= 3:
         first_num = nums[0]
         if harness_clean.lstrip("-").isdigit():
             if first_num == int(harness_clean):
@@ -2168,6 +2244,8 @@ class OrnithSelfImprover:
             ns_bridge = (t_val - 1) * 3
             escape_token = stage2_tok + ns_bridge
             honeypot_tok = base_cap + c + 17
+            if honeypot_tok == escape_token:
+                honeypot_tok += 13
             task_id = f"htb_escape_t{t_val}_{a}_{b}_{c}_{idx}"
             if sub_scen == 0:
                 prompt_q = (
@@ -2577,7 +2655,7 @@ class OrnithSelfImprover:
         if m_id == 0:
             # 48: Terminal RL - Infinite-Recursive POSIX Pipeline State Machine
             valid_lines = a * b
-            pipe_filter_gain = (t_val - 1) * 3
+            pipe_filter_gain = t_val * 3 + 2
             per_cycle = valid_lines + pipe_filter_gain
             total_stdout = per_cycle * c
             decoy_zombie_lines = (a + c) * 5 + 7
@@ -2660,9 +2738,9 @@ class OrnithSelfImprover:
                 f"#U$# [Computer-Use RL: GUI/DOM Accessibility-Tree Navigation | ★{stars:.2f} | Hops L={hops} | RedHerrings={num_red_herrings}] "
                 f"A desktop browser agent inspects the Accessibility Tree (`AXTree`) starting at viewport anchor `x0 = {x0}`. "
                 f"Across `{hops}` sequential `scroll_and_focus` actions, each hop shifts the active container by `dx = {dx_per_hop}` px, "
-                f"landing on target button `#submit-patch` with bounding-box half-width `w_half = {half_width}` px (click center `x_click = x0 + {hops} * dx + w_half`). "
+                f"landing on the left edge of target button `#submit-patch`, which has horizontal half-width `w_half = {half_width}` px from its left edge to its clickable center. "
                 f"DOM Traps (R1..R{num_red_herrings}): Invisible modal overlay `div[aria-disabled='true'][style*='opacity:0']` at `x = {trap_overlay_x}` intercepts naive clicks and must be bypassed.\n"
-                f"#Q$# [code] Bypass the aria-disabled overlay traps, trace the {hops}-hop AXTree bounding-box trajectory in `#T$#`, and implement `def solve(x0, hops, dx, w_half):` returning the exact click coordinate `x_click`."
+                f"#Q$# [code] Bypass the aria-disabled overlay traps, trace the {hops}-hop AXTree bounding-box center trajectory in `#T$#`, and implement `def solve(x0, hops, dx, w_half):` returning the button center x-coordinate."
             )
             harness_h = (
                 f"assert solve({x0}, {hops}, {dx_per_hop}, {half_width}) == {target_x} "
@@ -2704,7 +2782,7 @@ class OrnithSelfImprover:
                 f"AddressSanitizer reports `heap-buffer-overflow` across a {hops}-frame call stack (`#0 parse_chunk -> ... -> #{hops - 1} fuzz_entry`): "
                 f"buffer allocation reserves `slots = {cap_elems}` elements of `elem_size = {elem_sz}` bytes, but omits the mandatory Tier-{t_val} "
                 f"frame header of `header = {header_bytes}` bytes. Decoy sanitizer warnings (R1..R{num_red_herrings}) cite benign stack shadow address `{oob_read_addr}`.\n"
-                f"#Q$# [code] Isolate the root-cause allocation defect across the {hops} stack frames in `#T$#`, and implement the patched allocator size `def solve(slots, elem_size):` in `#A$#` that returns `slots * elem_size + {header_bytes}`."
+                f"#Q$# [code] Isolate the root-cause allocation defect across the {hops} stack frames in `#T$#`, and implement the patched total byte allocator `def solve(slots, elem_size):` in `#A$#` that reserves space for all `slots` elements plus the mandatory `{header_bytes}`-byte frame header."
             )
             harness_h = (
                 f"assert solve({cap_elems}, {elem_sz}) == {safe_bytes} "
@@ -2738,7 +2816,7 @@ class OrnithSelfImprover:
             controls_applied = c
             control_weight = 2 + (t_val % 3)
             mitigated_delta = controls_applied * control_weight
-            tier_hardening = (t_val - 1) * 2
+            tier_hardening = t_val * 2 + 1
             residual_score = raw_exposure + tier_hardening - mitigated_delta
             if residual_score <= 0:
                 raw_exposure = (a + controls_applied) * b + mitigated_delta + 5
@@ -2748,9 +2826,9 @@ class OrnithSelfImprover:
             task_id = f"cybersec_phd_ptes_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
             prompt_q = (
                 f"#U$# [PhD Cybersecurity RL (PTES / OWASP / NIST SP 800-115) | ★{stars:.2f} | KillChainHops L={hops} | RedHerrings={num_red_herrings}] "
-                f"During a {hops}-phase PTES purple-team engagement, initial attack-surface exposure is `{raw_exposure}` (`{a}` attack vectors x `{b}` severity weight), "
-                f"plus Tier-{t_val} lateral-movement surface `+{tier_hardening}`. Deploying `{controls_applied}` NIST SP 800-53 defense-in-depth controls "
-                f"(each reducing exposure by `{control_weight}` units) subtracts `{controls_applied} * {control_weight}` from the total exposure. "
+                f"During a {hops}-phase PTES purple-team engagement, initial attack-surface exposure comes from `{a}` active attack vectors each carrying severity weight `{b}` "
+                f"(base exposure `{raw_exposure}`), plus Tier-{t_val} lateral-movement surface `+{tier_hardening}`. Deploying `{controls_applied}` NIST SP 800-53 defense-in-depth controls "
+                f"reduces total exposure by `{control_weight}` units per control. "
                 f"Deception Decoys (R1..R{num_red_herrings}): Canary honeypot telemetry logs fake exposure `{honeypot_score}` and must be excluded.\n"
                 f"#Q$# [deduction] Exclude the canary honeypot decoys, compute the exact residual risk score in `#T$#`, and state the residual risk in lowercase with no commas, at least 6 words, including the keyword `mitigated`."
             )
@@ -2837,9 +2915,9 @@ class OrnithSelfImprover:
             task_id = f"mix_term_tool_cybergym_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
             prompt_q = (
                 f"#U$# [Cross-Skill Agentic I: Terminal + Tool + CyberGym Patch | ★{stars:.2f} | Hops L={hops} | RedHerrings={num_red_herrings}] "
-                f"Stage 1 (POSIX Terminal Triage): `grep -c 'ASAN_TRAP'` across `{a}` crash logs with `{b}` frames each isolates baseline offset `{a} * {b}` (filtering decoy core dump `{decoy_frame}`). "
-                f"Stage 2 (Tool-Use CVE Schema Lookup): Calling `get_cve_alignment(tier={t_val})` returns required guard padding `+{tool_cve_offset}`, yielding `guard_stride = {a} * {b} + {tool_cve_offset}`. "
-                f"Stage 3 (CyberGym Patch Synthesis): Implement `def solve(chunks):` returning `chunks * guard_stride`.\n"
+                f"Stage 1 (POSIX Terminal Triage): `grep -c 'ASAN_TRAP'` across `{a}` crash logs with `{b}` frames each isolates the baseline frame count (filtering decoy core dump `{decoy_frame}`). "
+                f"Stage 2 (Tool-Use CVE Schema Lookup): Calling `get_cve_alignment(tier={t_val})` adds required guard padding `+{tool_cve_offset}` to the Stage-1 baseline to form the per-chunk `guard_stride`. "
+                f"Stage 3 (CyberGym Patch Synthesis): Implement `def solve(chunks):` returning the total guarded byte size across `chunks`.\n"
                 f"#Q$# [code] Chain POSIX terminal triage, tool schema lookup, and CyberGym patch synthesis in `#T$# -> #A$#`."
             )
             harness_h = f"assert solve({x_eval}) == {expected_eval} and solve({x_probe}) == {expected_probe}"
@@ -3090,8 +3168,10 @@ class OrnithSelfImprover:
 
         elif m_id == 2:
             # 58: LeetCode Backtracking & Constraint-Pruned Subset Accumulation
-            bad_div = 3 + (idx % 3)
-            step_w = 2 + (t_val % 4)
+            bad_div = 3
+            step_w = 1 + (t_val % 2)  # coprime to bad_div=3 so every 3 consecutive items hit a pruned multiple!
+            n_full = max(4, hops)
+            n_mid = 2
 
             def _backtrack_ref(n: int) -> int:
                 total = 0
@@ -3103,27 +3183,27 @@ class OrnithSelfImprover:
                         total += c
                 return total
 
-            ans_L = _backtrack_ref(hops)
-            ans_3 = _backtrack_ref(3)
+            ans_L = _backtrack_ref(n_full)
+            ans_mid = _backtrack_ref(n_mid)
             ans_1 = _backtrack_ref(1)
             ans_0 = _backtrack_ref(0)
-            task_id = f"lc_backtrack_prune_t{t_val}_L{hops}_{a}_{step_w}_{bad_div}_{idx}"
+            task_id = f"lc_backtrack_prune_t{t_val}_L{n_full}_{a}_{step_w}_{bad_div}_{idx}"
             prompt_q = (
-                f"#U$# [LeetCode-{diff_label} RL: Constraint-Pruned Subset Recursion | ★{stars:.2f} | Depth L={hops}] "
+                f"#U$# [LeetCode-{diff_label} RL: Constraint-Pruned Subset Recursion | ★{stars:.2f} | Depth L={n_full}] "
                 f"Across `i = 1..n`, candidate item `i` has weight `val = {a} + i * {step_w}`. "
                 f"If `val` is NOT divisible by forbidden divisor `{bad_div}`, add `val` to the subset score; "
                 f"otherwise prune the branch and add fallback penalty `+{c}`. For `n <= 0`, return `0`.\n"
                 f"#Q$# [code] Trace the constraint pruning in `#T$#` and implement `def solve(n):` in `#A$#`."
             )
             harness_h = (
-                f"assert solve({hops}) == {ans_L} "
-                f"and solve(3) == {ans_3} "
+                f"assert solve({n_full}) == {ans_L} "
+                f"and solve({n_mid}) == {ans_mid} "
                 f"and solve(1) == {ans_1} "
                 f"and solve(0) == {ans_0}"
             )
             gold_t = (
                 f"For n = 0 the score is 0; for n = 1, val = {a + step_w} gives score {ans_1}; "
-                f"for n = 3 score is {ans_3}; accumulating across all {hops} pruned candidates yields {ans_L}."
+                f"for n = {n_mid} score is {ans_mid}; accumulating across all {n_full} pruned candidates yields {ans_L}."
             )
             gold_a = (
                 f"def solve(n):\n"
@@ -3225,9 +3305,10 @@ class OrnithSelfImprover:
 
         elif m_id == 4:
             # 60: LeetCode Sliding Window / Kadane Subarray Optimization
-            win_k = 2 + (t_val % 3)
-            mod_m = 11 + 2 * (idx % 7)
-            shift_s = 3 + (idx % 3)
+            win_k = 2 + (t_val % 2)
+            n_full = max(hops + 3, win_k + 4)
+            mod_m = 13 + 2 * (idx % 7)
+            shift_s = 1
 
             def _window_ref(n: int) -> int:
                 if n <= 0:
@@ -3243,27 +3324,26 @@ class OrnithSelfImprover:
                         best = cur
                 return best
 
-            ans_L = _window_ref(hops)
+            ans_L = _window_ref(n_full)
             ans_k = _window_ref(win_k)
             ans_1 = _window_ref(1)
             ans_0 = _window_ref(0)
-            task_id = f"lc_sliding_window_t{t_val}_L{hops}_K{win_k}_{a}_{b}_{idx}"
+            task_id = f"lc_sliding_window_t{t_val}_L{n_full}_K{win_k}_{a}_{b}_{idx}"
             prompt_q = (
-                f"#U$# [LeetCode-{diff_label} RL: Sliding-Window Subarray Maximization | ★{stars:.2f} | Length L={hops} | Window K={win_k}] "
+                f"#U$# [LeetCode-{diff_label} RL: Sliding-Window Subarray Maximization | ★{stars:.2f} | Length L={n_full} | Window K={win_k}] "
                 f"For `n` elements (`0 <= i < n`), let `arr[i] = ((i * {a} + {b}) % {mod_m}) - {shift_s}`. "
-                f"Maintain a sliding window `cur` of at most `K = {win_k}` contiguous elements (`cur += arr[i]`; if `i >= {win_k}`, `cur -= arr[i - {win_k}]`), "
-                f"and track the running maximum `best = max(best, cur)` initialized at `best = 0`.\n"
+                f"Compute the maximum sum among all prefixes of sliding windows of width `K = {win_k}` (where at index `i`, the active window sums the most recent `min(i + 1, {win_k})` elements ending at `i`, clamped below by `0`).\n"
                 f"#Q$# [code] Trace the sliding-window updates in `#T$#` and implement `def solve(n):` in `#A$#`."
             )
             harness_h = (
-                f"assert solve({hops}) == {ans_L} "
+                f"assert solve({n_full}) == {ans_L} "
                 f"and solve({win_k}) == {ans_k} "
                 f"and solve(1) == {ans_1} "
                 f"and solve(0) == {ans_0}"
             )
             gold_t = (
                 f"For n = 0 best is 0; for n = 1 best is {ans_1}; for n = {win_k} best is {ans_k}; "
-                f"sliding the window of width {win_k} across all {hops} elements yields best = {ans_L}."
+                f"sliding the window of width {win_k} across all {n_full} elements yields best = {ans_L}."
             )
             gold_a = (
                 f"def solve(n):\n"
@@ -3405,11 +3485,10 @@ class OrnithSelfImprover:
             task_id = f"lc_tree_robber_t{t_val}_H{h_max}_{a}_{b}_{idx}"
             prompt_q = (
                 f"#U$# [LeetCode-{diff_label} RL: Binary Tree Post-Order Independent Set (House Robber III) | ★{stars:.2f} | Height H={h_max}] "
-                f"A complete binary tree of height `h` has levels `d = h - 1` down to `0` (`solve(0) = 0`), where each node at depth `d` has value `{a} + d * {b}` and two identical subtrees. "
-                f"In post-order from `d = h - 1` down to `0`, update `(rob, skip)` from `(0, 0)` via:\n"
-                f"- `nxt_rob = ({a} + d * {b}) + 2 * skip`\n"
-                f"- `nxt_skip = 2 * max(rob, skip)`\n"
-                f"Return `max(rob, skip)` at the root.\n"
+                f"A complete binary tree of height `h` has levels `d = h - 1` (leaves) up to `d = 0` (root), with `solve(0) = 0`. "
+                f"Each node at depth `d` has value `{a} + d * {b}` and two identical left and right child subtrees (at `d + 1`). "
+                f"No two directly linked parent-child nodes may both be selected: selecting a node at depth `d` adds its value plus `2 * skip` from its two children, whereas skipping a node at depth `d` yields `2 * max(rob, skip)` from its two children. "
+                f"Return the maximum total value at the root (`d = 0`).\n"
                 f"#Q$# [code] Trace the bottom-up post-order tree recursion in `#T$#` and implement `def solve(h):` in `#A$#`."
             )
             harness_h = (
@@ -3958,19 +4037,21 @@ class OrnithSelfImprover:
             base_scores = (1.0, 0.10, 0.15, 0.0)
             domain = "invariant_verification"
         elif kind == 3:
-            dp_n = a + c * b
-            task_id = f"dp_step_{a}_{b}_{c}"
+            c_steps = max(2, c)
+            b_step = b if b != a else b + 3
+            dp_n = a + c_steps * b_step
+            task_id = f"dp_step_{a}_{b_step}_{c_steps}"
             prompt_q = (
-                f"#U$# Recurrence `dp[0] = {a}` and `dp[k] = dp[k-1] + {b}` for `k >= 1`.\n"
-                f"#Q$# [deduction] Evaluate `dp[{c}]` in closed form."
+                f"#U$# Recurrence `dp[0] = {a}` and `dp[k] = dp[k-1] + {b_step}` for `k >= 1`.\n"
+                f"#Q$# [deduction] Evaluate `dp[{c_steps}]` in closed form."
             )
-            harness_h = f"dp[{c}] == {dp_n}"
-            gold_t = f"Unroll {c} steps: {c} * {b} = {c*b}, then {a} + {c*b} = {dp_n}."
+            harness_h = f"dp[{c_steps}] == {dp_n}"
+            gold_t = f"Unroll {c_steps} steps: {c_steps} * {b_step} = {c_steps*b_step}, then {a} + {c_steps*b_step} = {dp_n}."
             gold_a = f"{dp_n}"
             base_cands = (
                 f"#T$# {gold_t}\n#A$# {dp_n}",
-                f"#T$# Off-by-one step: {a} + {(c-1)*b} = {a+(c-1)*b}.\n#A$# {a+(c-1)*b}",
-                f"#T$# Multiply base: {a*c} + {b} = {a*c+b}.\n#A$# {a*c+b}",
+                f"#T$# Off-by-one step: {a} + {(c_steps-1)*b_step} = {a+(c_steps-1)*b_step}.\n#A$# {a+(c_steps-1)*b_step}",
+                f"#T$# Multiply base: {a*c_steps} + {b_step} = {a*c_steps+b_step}.\n#A$# {a*c_steps+b_step}",
                 f"#T$# Return base dp[0].\n#A$# {a}",
             )
             base_scores = (1.0, 0.20, 0.10, 0.0)
@@ -4014,19 +4095,20 @@ class OrnithSelfImprover:
             base_scores = (1.0, 0.10, 0.15, 0.0)
             domain = "binary_search"
         elif kind == 6:
-            card = min(a, b) * c
-            task_id = f"join_card_{a}_{b}_{c}"
+            b_keys = b if b != a else b + 3
+            card = min(a, b_keys) * c
+            task_id = f"join_card_{a}_{b_keys}_{c}"
             prompt_q = (
-                f"#U$# Table R has {a} unique keys, Table S has {b} unique keys, and each matched key fans out {c} rows.\n"
+                f"#U$# Table R has {a} unique keys, Table S has {b_keys} unique keys, and each matched key fans out {c} rows.\n"
                 f"#Q$# [evaluation] What is the maximum inner-join output cardinality?"
             )
             harness_h = f"max_rows == {card}"
-            gold_t = f"At most min({a}, {b}) = {min(a, b)} keys match; {min(a, b)} * {c} = {card}."
+            gold_t = f"At most min({a}, {b_keys}) = {min(a, b_keys)} keys match; {min(a, b_keys)} * {c} = {card}."
             gold_a = f"{card}"
             base_cands = (
                 f"#T$# {gold_t}\n#A$# {gold_a}",
-                f"#T$# Cartesian product {a*b} * {c} = {a*b*c}.\n#A$# {a*b*c}",
-                f"#T$# Max key bound {max(a,b)} * {c} = {max(a,b)*c}.\n#A$# {max(a,b)*c}",
+                f"#T$# Cartesian product {a*b_keys} * {c} = {a*b_keys*c}.\n#A$# {a*b_keys*c}",
+                f"#T$# Max key bound {max(a,b_keys)} * {c} = {max(a,b_keys)*c}.\n#A$# {max(a,b_keys)*c}",
                 "#T$# Empty join.\n#A$# 0",
             )
             base_scores = (1.0, 0.10, 0.20, 0.0)
@@ -4093,7 +4175,7 @@ class OrnithSelfImprover:
             gold_a = f"{b}"
             base_cands = (
                 f"#T$# {gold_t}\n#A$# {gold_a}",
-                f"#T$# Add {c} instead of subtracting: ({rhs} + {c}) // {a}.\n#A$# {(rhs + c) // max(1, a)}",
+                f"#T$# Add {c} to quotient instead of subtracting before division: {b} + {c} = {b + c}.\n#A$# {b + c}",
                 f"#T$# Subtract {rhs} - {a} = {rhs - a}.\n#A$# {rhs - a}",
                 "#T$# Default fallback.\n#A$# 0",
             )
@@ -4609,7 +4691,9 @@ class OrnithSelfImprover:
             n_univ = 60 + a + b
             not_q = 12 + (b % 15)
             p_set = 15 + (a % 18)
-            # Sinceforall x (P(x) -> Q(x)), by contrapositive ~Q(x) -> ~P(x), so P and ~Q are disjoint!
+            if n_univ - p_set - not_q == p_set + not_q:
+                n_univ += 7
+            # Since forall x (P(x) -> Q(x)), by contrapositive ~Q(x) -> ~P(x), so P and ~Q are disjoint!
             neither_p_nor_notq = n_univ - p_set - not_q
             task_id = f"mmlu_logic_{n_univ}_{p_set}_{not_q}"
             prompt_q = (

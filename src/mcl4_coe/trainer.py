@@ -1554,7 +1554,7 @@ class MCL4COETrainer:
                     from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi
 
                     api = HfApi(token=hf_token)
-                    ops: list[Any] = []
+                    telemetry_ops: list[Any] = []
                     for rel_f in (
                         "run_manifest.json",
                         "metrics.jsonl",
@@ -1564,55 +1564,69 @@ class MCL4COETrainer:
                     ):
                         local_f = run_dir / rel_f
                         if local_f.is_file():
-                            ops.append(
+                            telemetry_ops.append(
                                 CommitOperationAdd(
                                     path_in_repo=f"{run_id}/{rel_f}",
                                     path_or_fileobj=str(local_f),
                                 )
                             )
-                    if not hardlinked and pt_path.is_file():
-                        raw = torch.load(pt_path, map_location="cpu", weights_only=False)
-                        raw.pop("optimizer_state", None)
-                        if "model_state" in raw and isinstance(raw["model_state"], dict):
-                            raw["model_state"] = {
-                                k: (
-                                    v.to(dtype=torch.bfloat16)
-                                    if torch.is_tensor(v) and torch.is_floating_point(v)
-                                    else v
+                    ops: list[Any] = list(telemetry_ops)
+                    if not getattr(self, "_hf_pt_quota_reached", False):
+                        if not hardlinked and pt_path.is_file():
+                            raw = torch.load(pt_path, map_location="cpu", weights_only=False)
+                            raw.pop("optimizer_state", None)
+                            if "model_state" in raw and isinstance(raw["model_state"], dict):
+                                raw["model_state"] = {
+                                    k: (
+                                        v.to(dtype=torch.bfloat16)
+                                        if torch.is_tensor(v) and torch.is_floating_point(v)
+                                        else v
+                                    )
+                                    for k, v in raw["model_state"].items()
+                                }
+                            torch.save(raw, tmp_cloud_pt)
+                            del raw
+                            gc.collect()
+                        if tmp_cloud_pt.is_file():
+                            ops.append(
+                                CommitOperationAdd(
+                                    path_in_repo=f"{run_id}/checkpoints/{step_name}.pt",
+                                    path_or_fileobj=str(tmp_cloud_pt),
                                 )
-                                for k, v in raw["model_state"].items()
-                            }
-                        torch.save(raw, tmp_cloud_pt)
-                        del raw
-                        gc.collect()
-                    if tmp_cloud_pt.is_file():
-                        ops.append(
-                            CommitOperationAdd(
-                                path_in_repo=f"{run_id}/checkpoints/{step_name}.pt",
-                                path_or_fileobj=str(tmp_cloud_pt),
                             )
-                        )
-                    try:
-                        repo_files = api.list_repo_files(repo_id, repo_type="model")
-                        remote_pts = sorted(
-                            f
-                            for f in repo_files
-                            if f.startswith(f"{run_id}/checkpoints/step_")
-                            and f.endswith(".pt")
-                            and f != f"{run_id}/checkpoints/{step_name}.pt"
-                        )
-                        if len(remote_pts) >= keep_remote:
-                            for old_remote in remote_pts[: len(remote_pts) - keep_remote + 1]:
-                                ops.append(CommitOperationDelete(path_in_repo=old_remote))
-                    except Exception:
-                        pass
+                        try:
+                            repo_files = api.list_repo_files(repo_id, repo_type="model")
+                            remote_pts = sorted(
+                                f
+                                for f in repo_files
+                                if f.startswith(f"{run_id}/checkpoints/step_")
+                                and f.endswith(".pt")
+                                and f != f"{run_id}/checkpoints/{step_name}.pt"
+                            )
+                            if len(remote_pts) >= keep_remote:
+                                for old_remote in remote_pts[: len(remote_pts) - keep_remote + 1]:
+                                    ops.append(CommitOperationDelete(path_in_repo=old_remote))
+                        except Exception:
+                            pass
                     if ops:
-                        api.create_commit(
-                            repo_id=repo_id,
-                            repo_type="model",
-                            operations=ops,
-                            commit_message=f"[{run_id}] Sync telemetry & checkpoint {step_name}",
-                        )
+                        try:
+                            api.create_commit(
+                                repo_id=repo_id,
+                                repo_type="model",
+                                operations=ops,
+                                commit_message=f"[{run_id}] Sync telemetry & checkpoint {step_name}",
+                            )
+                        except Exception as commit_exc:
+                            if "storage" in str(commit_exc).lower() and telemetry_ops:
+                                self._hf_pt_quota_reached = True
+                                api.create_commit(
+                                    repo_id=repo_id,
+                                    repo_type="model",
+                                    operations=telemetry_ops,
+                                    commit_message=f"[{run_id}] Sync telemetry {step_name}",
+                                )
+                            else:
+                                raise
                     tmp_cloud_pt.unlink(missing_ok=True)
                 except Exception as exc:
                     print('hf_backup warning:', step_name, repo_id, exc, flush=True)

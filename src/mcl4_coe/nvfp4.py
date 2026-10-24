@@ -75,6 +75,37 @@ def _transposable_2to4_catalog(device_str: str) -> Tensor:
     return torch.tensor(valid_tiles, dtype=torch.float32, device=torch.device(device_str))
 
 
+@lru_cache(maxsize=8)
+def _transposable_2to4_triton_tables(device_str: str) -> tuple[Tensor, Tensor]:
+    """Return `(cat_16x128_bf16, cat_90x16_bool)` cached on `device_str` for Triton TensorCore 2:4 masking."""
+    cat_90x16 = _transposable_2to4_catalog(device_str)
+    cat_16x128 = torch.full(
+        (16, 128), -100.0, dtype=torch.bfloat16, device=torch.device(device_str)
+    )
+    cat_16x128[:, :90] = cat_90x16.t().to(torch.bfloat16)
+    return cat_16x128.contiguous(), cat_90x16.bool().contiguous()
+
+
+@lru_cache(maxsize=8)
+def _unit_scale_f32(device_str: str) -> Tensor:
+    return torch.ones(1, dtype=torch.float32, device=torch.device(device_str))
+
+
+def _compute_global_scale_core(values: Tensor, one_f32: Tensor) -> Tensor:
+    amax = values.abs().amax().float()
+    return (
+        torch.where(amax > 0, amax * (1.0 / 2688.0), one_f32)
+        .clamp_min(1.17549435e-38)
+        .reshape(1)
+    )
+
+
+try:
+    _compute_global_scale_compiled = torch.compile(_compute_global_scale_core, dynamic=True)
+except Exception:
+    _compute_global_scale_compiled = _compute_global_scale_core
+
+
 @torch.no_grad()
 def compute_2to4_mask(weight: Tensor, mode: str = "2to4_transposable") -> Tensor:
     """Compute a 50%-sparse 2:4 boolean mask for a 2D weight matrix `[out_features, in_features]`.
@@ -98,6 +129,37 @@ def compute_2to4_mask(weight: Tensor, mode: str = "2to4_transposable") -> Tensor
         top2 = grouped.topk(2, dim=-1).indices
         mask = torch.zeros_like(grouped, dtype=torch.bool).scatter_(-1, top2, True).view(rows, -1)
         return mask[:, :cols]
+
+    if (
+        _HAS_TRITON_DOT_SCALED
+        and weight.device.type == "cuda"
+        and rows >= 64
+        and cols >= 64
+        and (cols // 4) % 4 == 0
+    ):
+        cat_16x128, cat_bool = _transposable_2to4_triton_tables(str(weight.device))
+        w_c = weight.detach().contiguous()
+        mask_out = torch.empty((rows, cols), dtype=torch.bool, device=weight.device)
+        n_tile4 = rows // 4
+        k_tile4 = cols // 4
+        grid_2to4 = (triton.cdiv(n_tile4, 32), triton.cdiv(k_tile4, 4))
+        _triton_2to4_direct_2d_kernel[grid_2to4](
+            w_c,
+            cat_16x128,
+            cat_bool,
+            w_c,
+            mask_out,
+            w_c,
+            0.0,
+            n_tile4,
+            K_TILE4=k_tile4,
+            K=cols,
+            BLOCK_R=128,
+            WRITE_MASKED_W=False,
+            WRITE_SR_STE=False,
+            num_warps=4,
+        )
+        return mask_out
 
     catalog = _transposable_2to4_catalog(str(weight.device))
     tiles = (
@@ -255,11 +317,61 @@ def quantize_nvfp4(
     rows, columns = matrix.shape
     if columns % 16 or (two_dimensional and rows % 16):
         raise ValueError("NVFP4 blocks require aligned dimensions divisible by 16")
+    fp4_dtype = getattr(torch, "float4_e2m1fn_x2", torch.uint8)
+    if _HAS_TRITON_DOT_SCALED and rows * columns >= 4096:
+        mat_c = matrix.detach().contiguous()
+        one_f32 = _unit_scale_f32(str(matrix.device))
+        scale_cols = columns // 16
+        padded_rows = _round_up(rows, 128)
+        padded_cols = _round_up(scale_cols, 4)
+        packed = torch.empty((rows, columns // 2), dtype=torch.uint8, device=matrix.device)
+        if padded_rows == rows and padded_cols == scale_cols:
+            swizzled = torch.empty(
+                (padded_rows, padded_cols), dtype=torch.float8_e4m3fn, device=matrix.device
+            )
+        else:
+            swizzled = torch.zeros(
+                (padded_rows, padded_cols), dtype=torch.float8_e4m3fn, device=matrix.device
+            )
+        if two_dimensional and not stochastic:
+            global_scale = _compute_global_scale_compiled(mat_c, one_f32)
+            _nvfp4_quantize_2d_swizzled_kernel[(rows // 16, scale_cols)](
+                mat_c,
+                global_scale,
+                packed,
+                swizzled,
+                rows,
+                K=columns,
+                PADDED_SCALE_COLS=padded_cols,
+                num_warps=1,
+            )
+            return packed.view(fp4_dtype), swizzled, global_scale
+        if not two_dimensional and columns % 128 == 0:
+            unit_g = bool(causal_row_scale)
+            global_scale = one_f32 if unit_g else _compute_global_scale_compiled(mat_c, one_f32)
+            seed = random.getrandbits(31) if stochastic else 0
+            grid_1d = (triton.cdiv(rows, 64), columns // 128)
+            _nvfp4_quantize_1d_swizzled_kernel[grid_1d](
+                mat_c,
+                global_scale,
+                packed,
+                swizzled,
+                rows,
+                K=columns,
+                PADDED_SCALE_COLS=padded_cols,
+                seed=seed,
+                BLOCK_M=64,
+                BLOCK_K=128,
+                STOCHASTIC=stochastic,
+                UNIT_GLOBAL_SCALE=unit_g,
+                num_warps=4,
+            )
+            return packed.view(fp4_dtype), swizzled, global_scale
+
     values = matrix.detach().float().contiguous()
     packed, block_scales, global_scale = _quantize_nvfp4_compiled(
         values, two_dimensional, stochastic, causal_row_scale
     )
-    fp4_dtype = getattr(torch, "float4_e2m1fn_x2", torch.uint8)
     return (
         packed.view(fp4_dtype),
         _swizzle_scales(block_scales),
@@ -723,21 +835,254 @@ if _HAS_TRITON_DOT_SCALED:
     @triton.jit
     def _e2m1_nibble_triton(x, noise, STOCHASTIC: tl.constexpr):
         m = tl.minimum(tl.abs(x), 6.0)
+        u = tl.where(m <= 2.0, m * 2.0, tl.where(m <= 4.0, m + 2.0, m * 0.5 + 4.0))
         if STOCHASTIC:
-            u = tl.where(m <= 2.0, m * 2.0, tl.where(m <= 4.0, m + 2.0, m * 0.5 + 4.0))
             code = tl.minimum((u + noise).to(tl.uint8), 7)
         else:
-            code = (
-                tl.where(m > 0.25, 1, 0)
-                + tl.where(m >= 0.75, 1, 0)
-                + tl.where(m > 1.25, 1, 0)
-                + tl.where(m >= 1.75, 1, 0)
-                + tl.where(m > 2.5, 1, 0)
-                + tl.where(m >= 3.5, 1, 0)
-                + tl.where(m > 5.0, 1, 0)
-            ).to(tl.uint8)
+            code = tl.extra.cuda.libdevice.rint(u).to(tl.uint8)
         sign = tl.where(x < 0.0, 8, 0).to(tl.uint8)
         return code | sign
+
+    @triton.jit
+    def _nvfp4_quantize_1d_swizzled_kernel(
+        X_ptr,
+        GlobalScale_ptr,
+        Packed_ptr,
+        SwizzledScale_ptr,
+        M,
+        K: tl.constexpr,
+        PADDED_SCALE_COLS: tl.constexpr,
+        seed,
+        BLOCK_M: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+        STOCHASTIC: tl.constexpr,
+        UNIT_GLOBAL_SCALE: tl.constexpr,
+    ):
+        """DeepGEMM-inspired single-pass 1D NVFP4 quantizer + in-register `SWIZZLE_32_4_4` scale layout."""
+        pid_m = tl.program_id(0)
+        pid_k = tl.program_id(1)
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        mask_m = offs_m < M
+
+        N_BLOCKS: tl.constexpr = BLOCK_K // 16
+        k_block_start = pid_k * N_BLOCKS
+        offs_b = k_block_start + tl.arange(0, N_BLOCKS)
+        mask_b = offs_b < (K // 16)
+        offs_pair = tl.arange(0, 8)
+
+        col_even = offs_b[None, :, None] * 16 + offs_pair[None, None, :] * 2
+        col_odd = col_even + 1
+        row_base = offs_m[:, None, None] * K
+        mask_load = mask_m[:, None, None] & mask_b[None, :, None]
+
+        v0 = tl.load(X_ptr + row_base + col_even, mask=mask_load, other=0.0).to(tl.float32)
+        v1 = tl.load(X_ptr + row_base + col_odd, mask=mask_load, other=0.0).to(tl.float32)
+
+        amax = tl.maximum(tl.max(tl.abs(v0), axis=2), tl.max(tl.abs(v1), axis=2))
+        if UNIT_GLOBAL_SCALE:
+            scale_f8 = tl.minimum(amax / 6.0, 448.0).to(tl.float8e4nv)
+            decoding = scale_f8.to(tl.float32)
+        else:
+            g_a = tl.load(GlobalScale_ptr).to(tl.float32)
+            scale_f8 = tl.minimum(amax / (6.0 * g_a), 448.0).to(tl.float8e4nv)
+            decoding = scale_f8.to(tl.float32) * g_a
+        inv = tl.where(decoding > 0.0, 1.0 / decoding, 0.0)[:, :, None]
+
+        if STOCHASTIC:
+            n0 = tl.rand(seed, row_base + col_even)
+            n1 = tl.rand(seed, row_base + col_odd)
+        else:
+            n0 = 0.0
+            n1 = 0.0
+
+        c0 = _e2m1_nibble_triton(v0 * inv, n0, STOCHASTIC)
+        c1 = _e2m1_nibble_triton(v1 * inv, n1, STOCHASTIC)
+        packed = (c0 | (c1 << 4)).reshape(BLOCK_M, BLOCK_K // 2)
+
+        offs_kp = pid_k * (BLOCK_K // 2) + tl.arange(0, BLOCK_K // 2)
+        mask_kp = offs_kp < (K // 2)
+        tl.store(
+            Packed_ptr + offs_m[:, None] * (K // 2) + offs_kp[None, :],
+            packed,
+            mask=mask_m[:, None] & mask_kp[None, :],
+        )
+
+        r = offs_m[:, None]
+        c = offs_b[None, :]
+        i0 = r // 128
+        i1 = (r // 32) % 4
+        i2 = r % 32
+        i3 = c // 4
+        i4 = c % 4
+        swizzled_idx = (i0 * (PADDED_SCALE_COLS // 4) + i3) * 512 + i2 * 16 + i1 * 4 + i4
+        tl.store(
+            SwizzledScale_ptr + swizzled_idx,
+            scale_f8,
+            mask=mask_m[:, None] & mask_b[None, :],
+        )
+
+    @triton.jit
+    def _nvfp4_quantize_2d_swizzled_kernel(
+        W_ptr,
+        GlobalScale_ptr,
+        Packed_ptr,
+        SwizzledScale_ptr,
+        M,
+        K: tl.constexpr,
+        PADDED_SCALE_COLS: tl.constexpr,
+    ):
+        """DeepGEMM-inspired single-pass 2D weight quantizer + in-register `SWIZZLE_32_4_4` scale layout."""
+        bn = tl.program_id(0)
+        bk = tl.program_id(1)
+
+        offs_m = bn * 16 + tl.arange(0, 16)
+        mask_m = offs_m < M
+        offs_pair = tl.arange(0, 8)
+        offs_k_even = bk * 16 + offs_pair * 2
+        offs_k_odd = offs_k_even + 1
+
+        v_even = tl.load(
+            W_ptr + offs_m[:, None] * K + offs_k_even[None, :], mask=mask_m[:, None], other=0.0
+        ).to(tl.float32)
+        v_odd = tl.load(
+            W_ptr + offs_m[:, None] * K + offs_k_odd[None, :], mask=mask_m[:, None], other=0.0
+        ).to(tl.float32)
+
+        g_b = tl.load(GlobalScale_ptr).to(tl.float32)
+        block_amax = tl.maximum(tl.max(tl.abs(v_even)), tl.max(tl.abs(v_odd)))
+        scale_f8 = tl.minimum(block_amax / (6.0 * g_b), 448.0).to(tl.float8e4nv)
+        dec = scale_f8.to(tl.float32) * g_b
+        inv = tl.where(dec > 0.0, 1.0 / dec, 0.0)
+
+        c_even = _e2m1_nibble_triton(v_even * inv, 0.0, False)
+        c_odd = _e2m1_nibble_triton(v_odd * inv, 0.0, False)
+        packed = c_even | (c_odd << 4)
+
+        offs_kp = bk * 8 + offs_pair
+        tl.store(
+            Packed_ptr + offs_m[:, None] * (K // 2) + offs_kp[None, :],
+            packed,
+            mask=mask_m[:, None],
+        )
+
+        r = offs_m
+        c = bk
+        i0 = r // 128
+        i1 = (r // 32) % 4
+        i2 = r % 32
+        i3 = c // 4
+        i4 = c % 4
+        swizzled_idx = (i0 * (PADDED_SCALE_COLS // 4) + i3) * 512 + i2 * 16 + i1 * 4 + i4
+        tl.store(SwizzledScale_ptr + swizzled_idx, scale_f8, mask=mask_m)
+
+    @triton.jit
+    def _triton_2to4_direct_2d_kernel(
+        W_ptr,
+        Cat_ptr,
+        CatBool_ptr,
+        WMasked_ptr,
+        Mask_ptr,
+        SR_ptr,
+        sr_decay,
+        N_TILE4,
+        K_TILE4: tl.constexpr,
+        K: tl.constexpr,
+        BLOCK_R: tl.constexpr,
+        WRITE_MASKED_W: tl.constexpr,
+        WRITE_SR_STE: tl.constexpr,
+    ):
+        """In-register BF16 TensorCore doubly-2:4 (`2to4_transposable`) mask & SR-STE kernel."""
+        pid_r = tl.program_id(0)
+        pid_c = tl.program_id(1)
+        offs_t = tl.arange(0, BLOCK_R)
+        r4 = pid_r * (BLOCK_R // 4) + offs_t // 4
+        c4 = pid_c * 4 + (offs_t % 4)
+        mask_t = (r4 < N_TILE4) & (c4 < K_TILE4)
+
+        offs_16 = tl.arange(0, 16)
+        dr = offs_16 // 4
+        dc = offs_16 % 4
+        addr = (r4[:, None] * 4 + dr[None, :]) * K + (c4[:, None] * 4 + dc[None, :])
+
+        w_val = tl.load(W_ptr + addr, mask=mask_t[:, None], other=0.0)
+        w_abs = tl.abs(w_val.to(tl.float32)).to(tl.bfloat16)
+
+        offs_128 = tl.arange(0, 128)
+        cat = tl.load(Cat_ptr + offs_16[:, None] * 128 + offs_128[None, :])
+        scores = tl.dot(w_abs, cat)
+        best_idx = tl.argmax(scores, axis=1)
+
+        m_bool = tl.load(
+            CatBool_ptr + best_idx[:, None] * 16 + offs_16[None, :],
+            mask=mask_t[:, None],
+            other=0,
+        ).to(tl.int1)
+        tl.store(Mask_ptr + addr, m_bool, mask=mask_t[:, None])
+        if WRITE_MASKED_W:
+            tl.store(WMasked_ptr + addr, tl.where(m_bool, w_val, 0.0), mask=mask_t[:, None])
+        if WRITE_SR_STE:
+            sr_val = tl.where(m_bool, 0.0, sr_decay * w_val.to(tl.float32)).to(
+                SR_ptr.dtype.element_ty
+            )
+            tl.store(SR_ptr + addr, sr_val, mask=mask_t[:, None])
+
+    @triton.jit
+    def _triton_quantize_2d_grouped_weights_kernel(
+        W_ptr,
+        Bg_ptr,
+        Bfwd_ptr,
+        Bsfwd_ptr,
+        Bbwd_ptr,
+        Bsbwd_ptr,
+        N: tl.constexpr,
+        K: tl.constexpr,
+    ):
+        """Fused single-pass 2D forward + transposed backward NVFP4 grouped weight quantizer."""
+        d = tl.program_id(0)
+        bn = tl.program_id(1)
+        bk = tl.program_id(2)
+
+        offs_n = bn * 16 + tl.arange(0, 16)
+        offs_k_pair = tl.arange(0, 8)
+        offs_k_even = bk * 16 + offs_k_pair * 2
+        offs_k_odd = offs_k_even + 1
+
+        w_base = W_ptr + d * N * K
+        v_even = tl.load(w_base + offs_n[:, None] * K + offs_k_even[None, :]).to(tl.float32)
+        v_odd = tl.load(w_base + offs_n[:, None] * K + offs_k_odd[None, :]).to(tl.float32)
+
+        bg = tl.load(Bg_ptr + d).to(tl.float32)
+        block_amax = tl.maximum(tl.max(tl.abs(v_even)), tl.max(tl.abs(v_odd)))
+        bs_f8 = tl.minimum(block_amax / (6.0 * bg), 448.0).to(tl.float8e4nv)
+        dec = bs_f8.to(tl.float32) * bg
+        inv = tl.where(dec > 0.0, 1.0 / dec, 0.0)
+
+        c_even = _e2m1_nibble_triton(v_even * inv, 0.0, False)
+        c_odd = _e2m1_nibble_triton(v_odd * inv, 0.0, False)
+
+        packed_fwd = tl.trans(c_even | (c_odd << 4))
+        offs_kp = bk * 8 + offs_k_pair
+        bfwd_base = Bfwd_ptr + d * (K // 2) * N
+        tl.store(bfwd_base + offs_kp[:, None] * N + offs_n[None, :], packed_fwd)
+
+        bsfwd_base = Bsfwd_ptr + d * N * (K // 16)
+        tl.store(bsfwd_base + offs_n * (K // 16) + bk, bs_f8)
+
+        offs_k = bk * 16 + tl.arange(0, 16)
+        offs_n_pair = tl.arange(0, 8)
+        offs_n_even = bn * 16 + offs_n_pair * 2
+        offs_n_odd = offs_n_even + 1
+        vn_even = tl.load(w_base + offs_n_even[:, None] * K + offs_k[None, :]).to(tl.float32)
+        vn_odd = tl.load(w_base + offs_n_odd[:, None] * K + offs_k[None, :]).to(tl.float32)
+        cn_even = _e2m1_nibble_triton(vn_even * inv, 0.0, False)
+        cn_odd = _e2m1_nibble_triton(vn_odd * inv, 0.0, False)
+        packed_bwd = cn_even | (cn_odd << 4)
+        offs_np = bn * 8 + offs_n_pair
+        bbwd_base = Bbwd_ptr + d * (N // 2) * K
+        tl.store(bbwd_base + offs_np[:, None] * K + offs_k[None, :], packed_bwd)
+
+        bsbwd_base = Bsbwd_ptr + d * K * (N // 16)
+        tl.store(bsbwd_base + offs_k * (N // 16) + bn, bs_f8)
 
     @triton.jit
     def _nvfp4_quantize_1d_kernel(
@@ -751,6 +1096,7 @@ if _HAS_TRITON_DOT_SCALED:
         BLOCK_M: tl.constexpr,
         BLOCK_K: tl.constexpr,
         STOCHASTIC: tl.constexpr,
+        UNIT_GLOBAL_SCALE: tl.constexpr,
     ):
         pid_m = tl.program_id(0)
         pid_k = tl.program_id(1)
@@ -773,10 +1119,14 @@ if _HAS_TRITON_DOT_SCALED:
             tl.float32
         )
 
-        g_a = tl.load(GlobalScale_ptr).to(tl.float32)
         amax = tl.maximum(tl.max(tl.abs(v0), axis=2), tl.max(tl.abs(v1), axis=2))
-        scale_f8 = tl.minimum(amax / (6.0 * g_a), 448.0).to(tl.float8e4nv)
-        decoding = scale_f8.to(tl.float32) * g_a
+        if UNIT_GLOBAL_SCALE:
+            scale_f8 = tl.minimum(amax / 6.0, 448.0).to(tl.float8e4nv)
+            decoding = scale_f8.to(tl.float32)
+        else:
+            g_a = tl.load(GlobalScale_ptr).to(tl.float32)
+            scale_f8 = tl.minimum(amax / (6.0 * g_a), 448.0).to(tl.float8e4nv)
+            decoding = scale_f8.to(tl.float32) * g_a
         inv = tl.where(decoding > 0.0, 1.0 / decoding, 0.0)[:, :, None]
 
         if STOCHASTIC:
@@ -791,6 +1141,8 @@ if _HAS_TRITON_DOT_SCALED:
         packed = (c0 | (c1 << 4)).reshape(BLOCK_M, BLOCK_K // 2)
 
         offs_kp = pid_k * (BLOCK_K // 2) + tl.arange(0, BLOCK_K // 2)
+        offs_kp = tl.max_contiguous(tl.multiple_of(offs_kp, BLOCK_K // 2), BLOCK_K // 2)
+        offs_b = tl.max_contiguous(tl.multiple_of(offs_b, N_BLOCKS), N_BLOCKS)
         tl.store(
             Packed_ptr + offs_m[:, None] * (K // 2) + offs_kp[None, :],
             packed,
@@ -819,16 +1171,22 @@ if _HAS_TRITON_DOT_SCALED:
         BLOCK_M: tl.constexpr,
         BLOCK_N: tl.constexpr,
         BLOCK_K: tl.constexpr,
+        GROUP_M: tl.constexpr,
+        UNIT_A_SCALE: tl.constexpr,
     ):
+        """DeepGEMM-inspired L2-swizzled multi-stage grouped NVFP4 TensorCore GEMM kernel."""
         tile_id = tl.program_id(0)
         pid_n = tl.program_id(1)
+        num_pid_m = tl.num_programs(0)
+        num_pid_n = tl.num_programs(1)
+        tile_id, pid_n = tl.swizzle2d(tile_id, pid_n, num_pid_m, num_pid_n, GROUP_M)
 
         cum_tiles = 0
         chosen_e = -1
         chosen_m_start = 0
         chosen_m_end = 0
         prev_off = 0
-        for e in range(E):
+        for e in tl.static_range(E):
             cur_off = tl.load(Offs_ptr + e)
             cnt = cur_off - prev_off
             n_tiles = (cnt + BLOCK_M - 1) // BLOCK_M
@@ -847,16 +1205,23 @@ if _HAS_TRITON_DOT_SCALED:
         offs_m = chosen_m_start + tl.arange(0, BLOCK_M)
         mask_m = offs_m < chosen_m_end
         offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        offs_n = tl.max_contiguous(tl.multiple_of(offs_n, BLOCK_N), BLOCK_N)
 
         b_expert_base = B_ptr + chosen_e * (K // 2) * N
         bs_expert_base = Bs_ptr + chosen_e * N * (K // 16)
-        g_a = tl.load(Ag_ptr).to(tl.float32)
         g_b = tl.load(Bg_ptr + chosen_e).to(tl.float32)
+        if UNIT_A_SCALE:
+            g_scale = g_b
+        else:
+            g_a = tl.load(Ag_ptr).to(tl.float32)
+            g_scale = g_a * g_b
 
         acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
         for k0 in range(0, K, BLOCK_K):
             offs_kp = (k0 // 2) + tl.arange(0, BLOCK_K // 2)
             offs_ks = (k0 // 16) + tl.arange(0, BLOCK_K // 16)
+            offs_kp = tl.max_contiguous(tl.multiple_of(offs_kp, BLOCK_K // 2), BLOCK_K // 2)
+            offs_ks = tl.max_contiguous(tl.multiple_of(offs_ks, BLOCK_K // 16), BLOCK_K // 16)
 
             a = tl.load(
                 A_ptr + offs_m[:, None] * (K // 2) + offs_kp[None, :],
@@ -874,7 +1239,7 @@ if _HAS_TRITON_DOT_SCALED:
                 a, a_scale, "e2m1", b, b_scale, "e2m1", acc=acc, rhs_k_pack=True
             )
 
-        acc = acc * (g_a * g_b)
+        acc = acc * g_scale
         tl.store(
             Out_ptr + offs_m[:, None] * N + offs_n[None, :],
             acc.to(Out_ptr.dtype.element_ty),
@@ -885,6 +1250,7 @@ if _HAS_TRITON_DOT_SCALED:
     def _grouped_wgrad_kernel(
         Grad_ptr,
         X_ptr,
+        SR_ptr,
         Offs_ptr,
         MaskReq_ptr,
         dW_ptr,
@@ -893,28 +1259,36 @@ if _HAS_TRITON_DOT_SCALED:
         BLOCK_M: tl.constexpr,
         BLOCK_N: tl.constexpr,
         BLOCK_K: tl.constexpr,
+        GROUP_N: tl.constexpr,
+        HAS_SR_STE: tl.constexpr,
     ):
+        """DeepGEMM-inspired coalesced SMEM-transposed L2-swizzled grouped `wgrad` + fused SR-STE kernel."""
         e = tl.program_id(0)
         req = tl.load(MaskReq_ptr + e)
         if req == 0:
             return
-        start_m = 0 if e == 0 else tl.load(Offs_ptr + e - 1)
-        end_m = tl.load(Offs_ptr + e)
-        if start_m >= end_m:
-            return
         pid_n = tl.program_id(1)
         pid_k = tl.program_id(2)
+        num_pid_n = tl.num_programs(1)
+        num_pid_k = tl.num_programs(2)
+        pid_n, pid_k = tl.swizzle2d(pid_n, pid_k, num_pid_n, num_pid_k, GROUP_N)
+
+        start_m = 0 if e == 0 else tl.load(Offs_ptr + e - 1)
+        end_m = tl.load(Offs_ptr + e)
 
         offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
         offs_k = pid_k * BLOCK_K + tl.arange(0, BLOCK_K)
+        offs_n = tl.max_contiguous(tl.multiple_of(offs_n, BLOCK_N), BLOCK_N)
+        offs_k = tl.max_contiguous(tl.multiple_of(offs_k, BLOCK_K), BLOCK_K)
+
         acc = tl.zeros((BLOCK_N, BLOCK_K), dtype=tl.float32)
 
         for m0 in range(start_m, end_m, BLOCK_M):
             offs_m = m0 + tl.arange(0, BLOCK_M)
             mask_m = offs_m < end_m
-            g_t = tl.load(
-                Grad_ptr + offs_m[None, :] * N + offs_n[:, None],
-                mask=mask_m[None, :],
+            g = tl.load(
+                Grad_ptr + offs_m[:, None] * N + offs_n[None, :],
+                mask=mask_m[:, None],
                 other=0.0,
             ).to(tl.bfloat16)
             x_sub = tl.load(
@@ -922,40 +1296,41 @@ if _HAS_TRITON_DOT_SCALED:
                 mask=mask_m[:, None],
                 other=0.0,
             ).to(tl.bfloat16)
-            acc = tl.dot(g_t, x_sub, acc=acc)
+            acc = tl.dot(tl.trans(g), x_sub, acc=acc)
 
-        dw_base = dW_ptr + e * N * K
-        tl.store(dw_base + offs_n[:, None] * K + offs_k[None, :], acc)
+        ep_offset = (e * N + offs_n[:, None]) * K + offs_k[None, :]
+        if HAS_SR_STE:
+            sr_val = tl.load(SR_ptr + ep_offset).to(tl.float32)
+            acc = acc + sr_val
+
+        tl.store(dW_ptr + ep_offset, acc.to(dW_ptr.dtype.element_ty))
 
 
 def _quantize_grouped_weights_core(
     w_batch: Tensor,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     d, n, k = w_batch.shape
-    w_abs = w_batch.abs()
+    w_f = w_batch.float()
+    w_abs = w_f.abs()
     amax = w_abs.amax(dim=(1, 2))
     bg = torch.where(amax > 0, amax / 2688.0, torch.ones_like(amax)).clamp_min(1.17549435e-38)
     block_amax = w_abs.view(d, n // 16, 16, k // 16, 16).amax(dim=(2, 4))
     bs_tiles = (block_amax / (6.0 * bg.view(d, 1, 1))).clamp(max=448.0).to(torch.float8_e4m3fn)
 
-    bs_fwd = bs_tiles.repeat_interleave(16, dim=1).contiguous()
-    dec_fwd = bs_fwd.float() * bg.view(d, 1, 1)
-    inv_fwd = torch.where(
-        dec_fwd > 0, dec_fwd.reciprocal().clamp(max=3.402823466e38), torch.zeros_like(dec_fwd)
+    dec_tiles = bs_tiles.float() * bg.view(d, 1, 1)
+    inv_tiles = torch.where(
+        dec_tiles > 0, dec_tiles.reciprocal().clamp(max=3.402823466e38), torch.zeros_like(dec_tiles)
     )
-    norm_fwd = (w_batch.view(d, n, k // 16, 16) * inv_fwd.unsqueeze(-1)).reshape(d, n, k)
-    codes_fwd = _e2m1_codes(norm_fwd, False)
-    b_fwd = (codes_fwd[:, :, 0::2] | (codes_fwd[:, :, 1::2] << 4)).transpose(1, 2).contiguous()
+    norm_5d = w_f.view(d, n // 16, 16, k // 16, 16) * inv_tiles[:, :, None, :, None]
+    codes_5d = _e2m1_codes(norm_5d, False)
 
-    w_t = w_batch.transpose(1, 2).contiguous()
-    bs_bwd = bs_tiles.transpose(1, 2).repeat_interleave(16, dim=1).contiguous()
-    dec_bwd = bs_bwd.float() * bg.view(d, 1, 1)
-    inv_bwd = torch.where(
-        dec_bwd > 0, dec_bwd.reciprocal().clamp(max=3.402823466e38), torch.zeros_like(dec_bwd)
-    )
-    norm_bwd = (w_t.view(d, k, n // 16, 16) * inv_bwd.unsqueeze(-1)).reshape(d, k, n)
-    codes_bwd = _e2m1_codes(norm_bwd, False)
+    codes_fwd = codes_5d.reshape(d, n, k)
+    b_fwd = (codes_fwd[:, :, 0::2] | (codes_fwd[:, :, 1::2] << 4)).transpose(1, 2).contiguous()
+    bs_fwd = bs_tiles.repeat_interleave(16, dim=1).contiguous()
+
+    codes_bwd = codes_5d.permute(0, 3, 4, 1, 2).reshape(d, k, n)
     b_bwd = (codes_bwd[:, :, 0::2] | (codes_bwd[:, :, 1::2] << 4)).transpose(1, 2).contiguous()
+    bs_bwd = bs_tiles.transpose(1, 2).repeat_interleave(16, dim=1).contiguous()
 
     return b_fwd, bs_fwd, bg, b_bwd, bs_bwd
 
@@ -979,6 +1354,7 @@ def _get_or_build_grouped_nvfp4_cache(experts: nn.ModuleList, proj_name: str) ->
     e_count = len(weights)
     n, k = weights[0].shape
     device = weights[0].device
+    w_dtype = weights[0].dtype
     sparsity_mode = layers[0].sparsity_mode
     sr_ste_decay = layers[0].sr_ste_decay
 
@@ -1005,10 +1381,13 @@ def _get_or_build_grouped_nvfp4_cache(experts: nn.ModuleList, proj_name: str) ->
             "Bg": torch.empty((e_count,), dtype=torch.float32, device=device),
             "B_bwd": torch.empty((e_count, n // 2, k), dtype=torch.uint8, device=device),
             "Bs_bwd": torch.empty((e_count, k, n // 16), dtype=torch.float8_e4m3fn, device=device),
+            "masks_stack": torch.ones((e_count, n, k), dtype=torch.bool, device=device),
+            "sr_ste_stack": torch.zeros((e_count, n, k), dtype=w_dtype, device=device),
+            "w_masked_scratch": torch.empty((e_count, n, k), dtype=w_dtype, device=device),
             "masks": [None] * e_count,
             "sparsity_mode": sparsity_mode,
             "sr_ste_decay": sr_ste_decay,
-            "one_f32": torch.ones(1, dtype=torch.float32, device=device),
+            "one_f32": _unit_scale_f32(str(device)),
             "req_cache": {},
         }
         cache_dict[proj_name] = entry
@@ -1022,34 +1401,103 @@ def _get_or_build_grouped_nvfp4_cache(experts: nn.ModuleList, proj_name: str) ->
         if old_v != new_v
     ]
     if dirty:
-        dirty_w_list: list[Tensor] = []
-        for idx in dirty:
-            w_det = weights[idx].detach().float()
-            smode = layers[idx].sparsity_mode
-            if smode != "none":
-                m = compute_2to4_mask(w_det, mode=smode)
-                entry["masks"][idx] = m
-                w_det = w_det * m.float()
-            else:
-                entry["masks"][idx] = None
-            dirty_w_list.append(w_det)
-        w_batch = torch.stack(dirty_w_list, dim=0)
-        b_fwd, bs_fwd, bg, b_bwd, bs_bwd = _quantize_grouped_weights_compiled(w_batch)
         is_contiguous_range = (dirty[-1] - dirty[0] + 1) == len(dirty)
-        if is_contiguous_range:
+        can_use_triton_2d = (
+            _HAS_TRITON_DOT_SCALED
+            and device.type == "cuda"
+            and n >= 64
+            and k >= 64
+            and n % 16 == 0
+            and k % 16 == 0
+            and (k // 4) % 4 == 0
+            and is_contiguous_range
+            and sparsity_mode in ("2to4_transposable", "none")
+        )
+        if can_use_triton_2d:
+            d_cnt = len(dirty)
             sl = slice(dirty[0], dirty[-1] + 1)
-            entry["B_fwd"][sl].copy_(b_fwd)
-            entry["Bs_fwd"][sl].copy_(bs_fwd)
+            w_batch_in = torch.stack([weights[i].detach() for i in dirty], dim=0).contiguous()
+            if sparsity_mode == "2to4_transposable":
+                cat_16x128, cat_bool = _transposable_2to4_triton_tables(str(device))
+                w_masked = entry["w_masked_scratch"][:d_cnt]
+                m_out = entry["masks_stack"][sl]
+                sr_out = entry["sr_ste_stack"][sl]
+                n_tile4 = d_cnt * (n // 4)
+                k_tile4 = k // 4
+                grid_2to4 = (triton.cdiv(n_tile4, 32), triton.cdiv(k_tile4, 4))
+                _triton_2to4_direct_2d_kernel[grid_2to4](
+                    w_batch_in,
+                    cat_16x128,
+                    cat_bool,
+                    w_masked,
+                    m_out,
+                    sr_out,
+                    float(sr_ste_decay),
+                    n_tile4,
+                    K_TILE4=k_tile4,
+                    K=k,
+                    BLOCK_R=128,
+                    WRITE_MASKED_W=True,
+                    WRITE_SR_STE=bool(sr_ste_decay > 0.0),
+                    num_warps=4,
+                )
+                for idx in dirty:
+                    entry["masks"][idx] = entry["masks_stack"][idx]
+            else:
+                w_masked = w_batch_in
+                for idx in dirty:
+                    entry["masks"][idx] = None
+
+            amax = w_masked.abs().amax(dim=(1, 2)).float()
+            bg = torch.where(amax > 0, amax * (1.0 / 2688.0), entry["one_f32"]).clamp_min(
+                1.17549435e-38
+            )
             entry["Bg"][sl].copy_(bg)
-            entry["B_bwd"][sl].copy_(b_bwd)
-            entry["Bs_bwd"][sl].copy_(bs_bwd)
+            grid_q2d = (d_cnt, n // 16, k // 16)
+            _triton_quantize_2d_grouped_weights_kernel[grid_q2d](
+                w_masked,
+                entry["Bg"][sl],
+                entry["B_fwd"][sl],
+                entry["Bs_fwd"][sl],
+                entry["B_bwd"][sl],
+                entry["Bs_bwd"][sl],
+                N=n,
+                K=k,
+                num_warps=1,
+            )
         else:
-            idx_t = torch.tensor(dirty, dtype=torch.long, device=device)
-            entry["B_fwd"].index_copy_(0, idx_t, b_fwd)
-            entry["Bs_fwd"].view(torch.uint8).index_copy_(0, idx_t, bs_fwd.view(torch.uint8))
-            entry["Bg"].index_copy_(0, idx_t, bg)
-            entry["B_bwd"].index_copy_(0, idx_t, b_bwd)
-            entry["Bs_bwd"].view(torch.uint8).index_copy_(0, idx_t, bs_bwd.view(torch.uint8))
+            dirty_w_list: list[Tensor] = []
+            for idx in dirty:
+                w_det = weights[idx].detach().float()
+                smode = layers[idx].sparsity_mode
+                if smode != "none":
+                    m = compute_2to4_mask(w_det, mode=smode)
+                    entry["masks"][idx] = m
+                    entry["masks_stack"][idx].copy_(m)
+                    if sr_ste_decay > 0.0:
+                        entry["sr_ste_stack"][idx].copy_(
+                            (sr_ste_decay * (~m).float() * w_det).to(w_dtype)
+                        )
+                    w_det = w_det * m.float()
+                else:
+                    entry["masks"][idx] = None
+                dirty_w_list.append(w_det)
+            w_batch = torch.stack(dirty_w_list, dim=0)
+            b_fwd, bs_fwd, bg, b_bwd, bs_bwd = _quantize_grouped_weights_compiled(w_batch)
+            if is_contiguous_range:
+                sl = slice(dirty[0], dirty[-1] + 1)
+                entry["B_fwd"][sl].copy_(b_fwd)
+                entry["Bs_fwd"][sl].copy_(bs_fwd)
+                entry["Bg"][sl].copy_(bg)
+                entry["B_bwd"][sl].copy_(b_bwd)
+                entry["Bs_bwd"][sl].copy_(bs_bwd)
+            else:
+                idx_t = torch.tensor(dirty, dtype=torch.long, device=device)
+                entry["B_fwd"].index_copy_(0, idx_t, b_fwd)
+                entry["Bs_fwd"].view(torch.uint8).index_copy_(0, idx_t, bs_fwd.view(torch.uint8))
+                entry["Bg"].index_copy_(0, idx_t, bg)
+                entry["B_bwd"].index_copy_(0, idx_t, b_bwd)
+                entry["Bs_bwd"].view(torch.uint8).index_copy_(0, idx_t, bs_bwd.view(torch.uint8))
         entry["versions"] = cur_versions
         entry["sparsity_mode"] = sparsity_mode
         entry["sr_ste_decay"] = sr_ste_decay
@@ -1080,7 +1528,7 @@ class _NVFP4GroupedLinear(torch.autograd.Function):
         x_c = inputs.contiguous()
         qa = torch.empty((m_total, k // 2), dtype=torch.uint8, device=inputs.device)
         sa = torch.empty((m_total, k // 16), dtype=torch.float8_e4m3fn, device=inputs.device)
-        grid_q = (triton.cdiv(m_total, 32), k // 128)
+        grid_q = (triton.cdiv(m_total, 64), k // 128)
         _nvfp4_quantize_1d_kernel[grid_q](
             x_c,
             entry["one_f32"],
@@ -1089,9 +1537,11 @@ class _NVFP4GroupedLinear(torch.autograd.Function):
             m_total,
             K=k,
             seed=0,
-            BLOCK_M=32,
+            BLOCK_M=64,
             BLOCK_K=128,
             STOCHASTIC=False,
+            UNIT_GLOBAL_SCALE=True,
+            num_warps=4,
         )
 
         out = torch.empty((m_total, n), dtype=inputs.dtype, device=inputs.device)
@@ -1112,6 +1562,10 @@ class _NVFP4GroupedLinear(torch.autograd.Function):
             BLOCK_M=128,
             BLOCK_N=128,
             BLOCK_K=128,
+            GROUP_M=8,
+            UNIT_A_SCALE=True,
+            num_warps=4,
+            num_stages=3,
         )
         _GEMM_COUNTS["forward"] += e_count
         if entry["sparsity_mode"] != "none":
@@ -1134,18 +1588,13 @@ class _NVFP4GroupedLinear(torch.autograd.Function):
             if m_total == 0:
                 grad_inputs = torch.zeros_like(inputs)
             else:
-                amax_g = grad_out_c.abs().amax().float()
-                ga_bwd = (
-                    torch.where(amax_g > 0, amax_g / 2688.0, entry["one_f32"])
-                    .clamp_min(1.17549435e-38)
-                    .reshape(1)
-                )
+                ga_bwd = _compute_global_scale_compiled(grad_out_c, entry["one_f32"])
                 qg = torch.empty((m_total, n // 2), dtype=torch.uint8, device=inputs.device)
                 sg = torch.empty(
                     (m_total, n // 16), dtype=torch.float8_e4m3fn, device=inputs.device
                 )
                 seed = random.getrandbits(31)
-                grid_qg = (triton.cdiv(m_total, 32), n // 128)
+                grid_qg = (triton.cdiv(m_total, 64), n // 128)
                 _nvfp4_quantize_1d_kernel[grid_qg](
                     grad_out_c,
                     ga_bwd,
@@ -1154,9 +1603,11 @@ class _NVFP4GroupedLinear(torch.autograd.Function):
                     m_total,
                     K=n,
                     seed=seed,
-                    BLOCK_M=32,
+                    BLOCK_M=64,
                     BLOCK_K=128,
                     STOCHASTIC=True,
+                    UNIT_GLOBAL_SCALE=False,
+                    num_warps=4,
                 )
                 grad_inputs = torch.empty((m_total, k), dtype=inputs.dtype, device=inputs.device)
                 grid_dgrad = ((m_total + 127) // 128 + e_count, k // 128)
@@ -1176,6 +1627,10 @@ class _NVFP4GroupedLinear(torch.autograd.Function):
                     BLOCK_M=128,
                     BLOCK_N=128,
                     BLOCK_K=128,
+                    GROUP_M=8,
+                    UNIT_A_SCALE=False,
+                    num_warps=4,
+                    num_stages=3,
                 )
                 _GEMM_COUNTS["dgrad"] += e_count
                 if entry["sparsity_mode"] != "none":
@@ -1197,11 +1652,16 @@ class _NVFP4GroupedLinear(torch.autograd.Function):
                         device=inputs.device,
                     )
                     entry["req_cache"][need_w_flags] = req_mask
-                dw_all = torch.zeros((e_count, n, k), dtype=torch.float32, device=inputs.device)
+                w_dtype = weights[0].dtype
+                has_sr = bool(
+                    entry["sparsity_mode"] != "none" and float(entry["sr_ste_decay"]) > 0.0
+                )
+                dw_all = torch.empty((e_count, n, k), dtype=w_dtype, device=inputs.device)
                 grid_wgrad = (e_count, n // 128, k // 128)
                 _grouped_wgrad_kernel[grid_wgrad](
                     grad_out_c,
                     inputs.contiguous(),
+                    entry["sr_ste_stack"],
                     offs,
                     req_mask,
                     dw_all,
@@ -1210,17 +1670,15 @@ class _NVFP4GroupedLinear(torch.autograd.Function):
                     BLOCK_M=64,
                     BLOCK_N=128,
                     BLOCK_K=128,
+                    GROUP_N=8,
+                    HAS_SR_STE=has_sr,
+                    num_warps=4,
+                    num_stages=3,
                 )
                 _GEMM_COUNTS["wgrad"] += sum(need_w_flags)
-                sr_decay = float(entry["sr_ste_decay"])
-                masks = entry["masks"]
                 for i, flag in enumerate(need_w_flags):
                     if flag:
-                        gw = dw_all[i].to(weights[i].dtype)
-                        m_i = masks[i]
-                        if m_i is not None and sr_decay > 0.0:
-                            gw = gw + sr_decay * (~m_i).to(weights[i].dtype) * weights[i]
-                        grad_weights[i] = gw
+                        grad_weights[i] = dw_all[i]
 
         return (grad_inputs, None, None, None, *grad_weights)
 

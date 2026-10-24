@@ -1568,31 +1568,69 @@ class MCL4DreamDiscovery:
                 candidate_encoded=self._cached_cand_encoded,
                 **op_kwargs,
             )
-            s_feat = op_out.decision.state_features[:1].detach().float()
+            s_feat = torch.nan_to_num(
+                op_out.decision.state_features[:1].detach().float(),
+                nan=0.0,
+                posinf=1.0,
+                neginf=-1.0,
+            )
             q_emb = F.normalize(
                 s_feat - s_feat.mean(dim=-1, keepdim=True), dim=-1, eps=1e-6
             )
 
-        probs = op_out.decision.probabilities[0].float()
-        expected_verdict = float((probs * self._h_scores).sum().item())
-        gold_prob = float(probs[self.task.gold_index].item())
+        def _clean_float(val: Any, default: float = 0.0, lo: float | None = 0.0, hi: float | None = 1.0) -> float:
+            try:
+                f = float(val)
+            except (TypeError, ValueError, OverflowError):
+                f = default
+            if not math.isfinite(f):
+                f = default
+            if lo is not None and f < lo:
+                f = lo
+            if hi is not None and f > hi:
+                f = hi
+            return f
+
+        probs = torch.nan_to_num(
+            op_out.decision.probabilities[0].float(), nan=0.0, posinf=1.0, neginf=0.0
+        )
+        prob_sum = float(probs.sum().item())
+        if not math.isfinite(prob_sum) or prob_sum <= 1e-8:
+            probs = torch.full_like(probs, 1.0 / max(1, int(probs.numel())))
+        else:
+            probs = probs / prob_sum
+        expected_verdict = _clean_float((probs * self._h_scores).sum().item(), 0.0, 0.0, 1.0)
+        gold_prob = _clean_float(probs[self.task.gold_index].item(), 0.0, 0.0, 1.0)
         best_rollout_idx = int(probs.argmax().item())
-        picked_verdict = float(self._h_scores[best_rollout_idx].item())
+        picked_verdict = _clean_float(self._h_scores[best_rollout_idx].item(), 0.0, 0.0, 1.0)
 
-        ded_entailed = float(op_out.deduction_probs[0, 0].item())
-        ded_contradicted = float(op_out.deduction_probs[0, 1].item())
-        meta_confidence = float(op_out.metacognition_probs[0, 0].item())
-        vetoed = (ded_contradicted > 0.55) or (meta_confidence < 0.35)
+        ded_probs = torch.nan_to_num(
+            op_out.deduction_probs.float(), nan=0.33, posinf=1.0, neginf=0.0
+        )
+        meta_probs = torch.nan_to_num(
+            op_out.metacognition_probs.float(), nan=0.5, posinf=1.0, neginf=0.0
+        )
+        ded_entailed = _clean_float(ded_probs[0, 0].item(), 0.33, 0.0, 1.0)
+        ded_contradicted = _clean_float(ded_probs[0, 1].item(), 0.33, 0.0, 1.0)
+        meta_confidence = _clean_float(meta_probs[0, 0].item(), 0.5, 0.0, 1.0)
+        vetoed = bool((ded_contradicted > 0.55) or (meta_confidence < 0.35))
 
-        ref_utils = op_out.evaluation_utilities.float().view(-1)
-        utility = float(ref_utils[best_rollout_idx].clamp(0.0, 1.0).item())
+        ref_utils = torch.nan_to_num(
+            op_out.evaluation_utilities.float().view(-1), nan=0.5, posinf=1.0, neginf=0.0
+        )
+        utility = _clean_float(ref_utils[best_rollout_idx].item(), 0.5, 0.0, 1.0)
 
         if not self._node_embeddings:
             novelty = 1.0
         else:
             prev_stack = torch.cat(self._node_embeddings, dim=0)
-            sims = pearson_similarity(q_emb.expand_as(prev_stack), prev_stack)
-            novelty = float((1.0 - sims.max().clamp(-1.0, 1.0)).clamp(0.0, 2.0).item())
+            sims = torch.nan_to_num(
+                pearson_similarity(q_emb.expand_as(prev_stack), prev_stack),
+                nan=0.0,
+                posinf=1.0,
+                neginf=-1.0,
+            )
+            novelty = _clean_float(1.0 - float(sims.max().item()), 1.0, 0.0, 2.0)
         self._node_embeddings.append(q_emb.detach())
 
         depth_bonus = min(0.08, 0.025 * depth) if not vetoed else -0.05
@@ -1602,14 +1640,14 @@ class MCL4DreamDiscovery:
             + 0.10 * gold_prob
             + depth_bonus
         )
-        score = round(max(0.0, min(1.0, raw_score)), 5)
-        task_stars = max(0.5, float(getattr(self.task, "star_difficulty", 1.0)))
+        score = round(_clean_float(raw_score, 0.0, 0.0, 1.0), 5)
+        task_stars = _clean_float(getattr(self.task, "star_difficulty", 1.0), 1.0, 0.5, 1e6)
         task_rec = max(1, int(getattr(self.task, "recursion_depth", 1)))
-        raw_pp_val = round(100.0 * (task_stars ** 1.15) * score, 4)
+        raw_pp_val = round(_clean_float(100.0 * (task_stars ** 1.15) * score, 0.0, 0.0, 1e12), 4)
         higher_in_view = sum(1 for n in view.nodes[1:] if n.score > score + 1e-7)
         pp_rank = higher_in_view + 1
-        pp_weighted_val = round(raw_pp_val * (0.95 ** (pp_rank - 1)), 4)
-        rec_prog = round(min(1.0, float(depth + 1) / float(task_rec)) * expected_verdict, 5)
+        pp_weighted_val = round(_clean_float(raw_pp_val * (0.95 ** (pp_rank - 1)), 0.0, 0.0, 1e12), 4)
+        rec_prog = round(_clean_float(min(1.0, float(depth + 1) / float(task_rec)) * expected_verdict, 0.0, 0.0, 1.0), 5)
 
         observation = {
             "node_id": node_id,

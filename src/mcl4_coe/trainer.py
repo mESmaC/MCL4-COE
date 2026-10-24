@@ -2263,7 +2263,9 @@ class MCL4COETrainer:
         del model_state
         with torch.no_grad():
             self.model.log_scale.data.clamp_(math.log(0.5), math.log(3.5))
-        if self.config.release_mitotic_pairs and not (self.config.freeze_non_clone_experts and added_pairs):
+        if self.config.release_mitotic_pairs and not (
+            self.config.freeze_non_clone_experts and (added_pairs or existing_pairs)
+        ):
             self._released_mitotic_pairs = list(all_prior_pairs) + list(added_pairs)
             self._set_model_mitotic_pairs([])
         elif added_pairs:
@@ -2271,11 +2273,18 @@ class MCL4COETrainer:
             # keeping only the newly split pairs twin-locked and plastic for the current run.
             self._released_mitotic_pairs = list(all_prior_pairs)
             self._set_model_mitotic_pairs(list(added_pairs))
-        elif existing_pairs and not self._get_model_mitotic_pairs():
+        elif existing_pairs:
             self._released_mitotic_pairs = list(prev_released)
             self._set_model_mitotic_pairs(list(existing_pairs))
 
         self.latest_metrics = dict(payload.get("latest_metrics", {}))
+        if not added_pairs:
+            self._clone_warmup_tokens_seen = int(
+                self.latest_metrics.get("clone_warmup_tokens_seen", 0)
+            )
+            self._resumed_in_clone_pure_rl = bool(
+                self.latest_metrics.get("mitosis_phase") == "clone_pure_rl"
+            )
         init_loads = list(self.latest_metrics.get("expert_load", []))
         if init_loads and len(init_loads) == ckpt_experts and self.config.num_experts > ckpt_experts:
             init_loads = init_loads + [0.0] * (self.config.num_experts - ckpt_experts)
@@ -2625,10 +2634,13 @@ class MCL4COETrainer:
                     int(self.config.clone_warmup_steps) > 0 or int(self.config.clone_warmup_tokens) > 0
                 )
                 in_clone_warmup = bool(
-                    (int(self.config.clone_warmup_steps) > 0 and local_step <= int(self.config.clone_warmup_steps))
-                    or (
-                        int(self.config.clone_warmup_tokens) > 0
-                        and self._clone_warmup_tokens_seen < int(self.config.clone_warmup_tokens)
+                    not getattr(self, "_resumed_in_clone_pure_rl", False)
+                    and (
+                        (int(self.config.clone_warmup_steps) > 0 and local_step <= int(self.config.clone_warmup_steps))
+                        or (
+                            int(self.config.clone_warmup_tokens) > 0
+                            and self._clone_warmup_tokens_seen < int(self.config.clone_warmup_tokens)
+                        )
                     )
                 )
                 in_clone_pure_rl = bool(

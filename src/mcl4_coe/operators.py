@@ -1973,8 +1973,8 @@ class CognitiveOperatorEnsemble(nn.Module):
                 eos_hits[:, 0] = False
             first_ep_mask = eos_hits.cumsum(dim=1) == 0
             min_ep_len = int(first_ep_mask.sum(dim=1).min().item())
-            first_unmasked = 0
-            if targets is not None and targets.shape == input_ids.shape:
+            first_unmasked = int(prior_start_pos) if prior_start_pos >= 12 else 0
+            if first_unmasked == 0 and targets is not None and targets.shape == input_ids.shape:
                 unmasked = targets != -100
                 if unmasked.any(dim=1).all():
                     first_unmasked = int(unmasked.int().argmax(dim=1).min().item())
@@ -1984,10 +1984,9 @@ class CognitiveOperatorEnsemble(nn.Module):
                 pref_len = max(
                     4,
                     min(
-                        max(12, min_ep_len) // 3,
-                        64,
-                        input_ids.shape[1] // 3,
-                        max(64, int(self.config.gist_chunk_size)),
+                        max(12, int(min_ep_len * 0.75)),
+                        int(input_ids.shape[1] * 0.75),
+                        384,
                     ),
                 )
             pref_ids = input_ids[:, :pref_len]

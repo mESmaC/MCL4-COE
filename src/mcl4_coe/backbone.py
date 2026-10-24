@@ -1777,7 +1777,7 @@ class MCL4CEDBackbone(nn.Module):
         ):
             s_ids = encoded_state.state_ids
             s_val = encoded_state.valid
-            s_content_val = s_val & (s_ids != self.eos_id)
+            s_content_val = s_val & (s_ids != self.config.eos_id)
             s_content_val = torch.where(
                 s_content_val.any(dim=-1, keepdim=True), s_content_val, s_val
             )

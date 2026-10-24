@@ -2650,6 +2650,17 @@ class MCL4COETrainer:
                 )
                 if in_clone_pure_rl and not getattr(self, "_logged_clone_pure_rl_transition", False):
                     self._logged_clone_pure_rl_transition = True
+                    for blk in list(self.model.backbone.encoder_layers) + list(
+                        self.model.backbone.decoder_layers
+                    ):
+                        blk.moe.mitotic_ortho_coef = 0.0
+                    if self.backbone_cfg.preserve_residual_across_stacks:
+                        for name, param in self.model.named_parameters():
+                            if any(
+                                k in name
+                                for k in ("global_out_proj", "ple.gate_scale", "markov_gate", "feedback.gate")
+                            ):
+                                param.requires_grad_(False)
                     print(
                         f"  [mitosis-phase2 @ step {step}] Clone token warmup complete "
                         f"({self._clone_warmup_tokens_seen:,} warmup tokens) -> "

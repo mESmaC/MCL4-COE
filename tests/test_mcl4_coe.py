@@ -2699,11 +2699,11 @@ def test_ornith_pp_weighting_granular_skills_and_infinite_recursion() -> None:
     assert abs(miss_high_star.delta_skill_pp) < 0.40
 
     # 3. Verify all 56 granular skills & specialized/Sherlockian/Polymath/Agentic families (0..55) verify gold == 1.0 and hack == 0.0
-    assert len(SKILL_TAXONOMY) == 56
+    assert len(SKILL_TAXONOMY) == 64
     improver = OrnithSelfImprover(projection_dim=16, max_seq_len=384)
     seen_skills: set[str] = set()
     seen_domains: set[str] = set()
-    for k in range(56):
+    for k in range(64):
         t = improver._generate_task(k, compact=False)
         seen_skills.add(t.skill)
         seen_domains.add(t.domain)
@@ -2731,8 +2731,14 @@ def test_ornith_pp_weighting_granular_skills_and_infinite_recursion() -> None:
             assert verify_python_rollout(
                 t_ag.candidate_rollouts[t_ag.gold_index], t_ag.harness_h, t_ag.gold_answer
             ) == 1.0
+        for lc_m in range(8):
+            t_lc = improver._synthesize_leetcode_recursive_coding_task(40 + lc_m, tier=tier_val, mode=lc_m)
+            assert t_lc.recursion_depth >= 3 + (tier_val - 1)
+            assert verify_python_rollout(
+                t_lc.candidate_rollouts[t_lc.gold_index], t_lc.harness_h, t_lc.gold_answer
+            ) == 1.0
 
-    assert len(seen_skills) == 56
+    assert len(seen_skills) == 64
     for req_dom in (
         "arc_science",
         "arc_physics",
@@ -2763,6 +2769,14 @@ def test_ornith_pp_weighting_granular_skills_and_infinite_recursion() -> None:
         "cybersec_phd_rl",
         "infinite_agentic_recursion",
         "cross_skill_agentic",
+        "leetcode_dp_rl",
+        "leetcode_divconq_rl",
+        "leetcode_backtracking_rl",
+        "leetcode_graph_rl",
+        "leetcode_array_window_rl",
+        "leetcode_bsearch_rl",
+        "leetcode_tree_interval_rl",
+        "leetcode_grandmaster_rl",
     ):
         assert req_dom in seen_domains
 

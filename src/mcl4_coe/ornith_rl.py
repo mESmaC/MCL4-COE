@@ -735,6 +735,15 @@ SKILL_TAXONOMY: tuple[tuple[str, str], ...] = (
     ("recursion.infinite_terminal_tool_sandbox_loop", "infinite_agentic_recursion"),
     ("mixing.cross_skill_terminal_tool_cybergym", "cross_skill_agentic"),
     ("mixing.cross_skill_computer_use_cybersec_deduction", "cross_skill_agentic"),
+    # 56..63: LeetCode & Competitive Infinite-Recursive Algorithmic Coding RL Suite
+    ("leetcode.recursive_dp_memoization", "leetcode_dp_rl"),
+    ("leetcode.divide_and_conquer_tree_recurrence", "leetcode_divconq_rl"),
+    ("leetcode.backtracking_subset_constraint_pruning", "leetcode_backtracking_rl"),
+    ("leetcode.graph_dfs_dag_topological_longest_path", "leetcode_graph_rl"),
+    ("leetcode.monotonic_window_subarray_optimization", "leetcode_array_window_rl"),
+    ("leetcode.parametric_binary_search_on_answer", "leetcode_bsearch_rl"),
+    ("leetcode.tree_postorder_robber_interval_dp", "leetcode_tree_interval_rl"),
+    ("leetcode.grandmaster_recursive_hybrid_synthesis", "leetcode_grandmaster_rl"),
 )
 
 
@@ -1060,6 +1069,8 @@ _SAFE_AST_NODES = (
     ast.NotIn,
     ast.Is,
     ast.IsNot,
+    ast.Nonlocal,
+    ast.Global,
 )
 _SAFE_BUILTINS: dict[str, Any] = {
     "abs": abs,
@@ -1299,22 +1310,48 @@ def verify_python_rollout(
                 value=ast.Call(func=ast.Name(id="_tick", ctx=ast.Load()), args=[], keywords=[])
             )
             for node in ast.walk(tree):
-                if isinstance(node, (ast.While, ast.For)):
+                if isinstance(node, (ast.While, ast.For, ast.FunctionDef)):
                     node.body.insert(0, tick_stmt)
             ast.fix_missing_locations(tree)
             steps = [0]
 
             def _tick() -> None:
                 steps[0] += 1
-                if steps[0] > 4096:
-                    raise RuntimeError("Loop iteration limit exceeded")
+                if steps[0] > 16384:
+                    raise RuntimeError("Recursion or loop iteration limit exceeded")
 
             env: dict[str, Any] = {"__builtins__": dict(_SAFE_BUILTINS), "_tick": _tick}
             exec(compile(tree, "<ornith_verifier>", "exec"), env, env)
             return 1.0 * thought_consistency
         except AssertionError:
-            # Compiles and passes AST lint checks (`FunctionDef` + `Return`), but failed unit test assertion
+            # Compiles and passes AST lint checks (`FunctionDef` + `Return`), but failed full assertion suite.
+            # Evaluate individual conjunct test cases (`assert c1 and c2 and ...`) for graduated partial credit
+            # while keeping base_partial compatibility for single-case or 0-pass rollouts.
             base_partial = 0.25 if any(op in t_body for op in ("*", "+", "-", "if", "for", "return")) else 0.15
+            try:
+                assert_tree = ast.parse(harness_clean, mode="exec")
+                sub_tests: list[ast.expr] = []
+                for st in assert_tree.body:
+                    if isinstance(st, ast.Assert):
+                        if isinstance(st.test, ast.BoolOp) and isinstance(st.test.op, ast.And):
+                            sub_tests.extend(st.test.values)
+                        else:
+                            sub_tests.append(st.test)
+                if len(sub_tests) >= 3:
+                    passed_sub = 0
+                    for sub_expr in sub_tests:
+                        steps[0] = 0
+                        sub_mod = ast.Expression(body=sub_expr)
+                        ast.fix_missing_locations(sub_mod)
+                        try:
+                            if bool(eval(compile(sub_mod, "<ornith_subtest>", "eval"), env, env)):
+                                passed_sub += 1
+                        except Exception:
+                            pass
+                    if 0 < passed_sub < len(sub_tests):
+                        return round((base_partial + 0.35 * (passed_sub / float(len(sub_tests)))) * thought_consistency, 4)
+            except Exception:
+                pass
             return base_partial * thought_consistency
         except Exception:
             return 0.0
@@ -1387,7 +1424,8 @@ class OrnithEnvArchitect:
     NUM_SHERLOCK_FAMILIES: int = 4
     NUM_POLYMATH_FAMILIES: int = 8
     NUM_AGENTIC_FAMILIES: int = 8
-    TOTAL_FAMILIES: int = 56
+    NUM_LEETCODE_FAMILIES: int = 8
+    TOTAL_FAMILIES: int = 64
 
     def __init__(
         self,
@@ -1463,7 +1501,7 @@ class OrnithEnvArchitect:
             return idx % self.TOTAL_FAMILIES
         # Parity-unlocked stride so alternating external steps cannot lock selection to only even family indices
         base_slot = (idx + (idx // 2)) % self.TOTAL_FAMILIES
-        # Dedicate every 3rd online step across the 20 Sherlockian, Polymath & Agentic families (36..55)
+        # Dedicate every 3rd online step across the 28 Sherlockian, Polymath, Agentic & LeetCode families (36..63)
         if idx % 3 == 0:
             return 36 + (
                 (idx // 3)
@@ -1471,6 +1509,7 @@ class OrnithEnvArchitect:
                     self.NUM_SHERLOCK_FAMILIES
                     + self.NUM_POLYMATH_FAMILIES
                     + self.NUM_AGENTIC_FAMILIES
+                    + self.NUM_LEETCODE_FAMILIES
                 )
             )
         mean_prim_pass = sum(self.family_pass_ema[: self.NUM_PRIMITIVE_FAMILIES]) / float(
@@ -2877,6 +2916,654 @@ class OrnithSelfImprover:
             difficulty_mods=mods,
         )
 
+    def _synthesize_leetcode_recursive_coding_task(
+        self,
+        idx: int,
+        *,
+        tier: int = 1,
+        mode: int = 0,
+    ) -> OrnithTask:
+        """Synthesize an Infinite-Recursive LeetCode & Competitive Algorithmic Coding RL task (`kind = 56 .. 63`)
+        verified by a 4-case executable Python assertion harness (`solve(L)`, `solve(probe)`, `solve(1)`, `solve(0)`).
+        """
+        t_val = max(1, int(tier))
+        m_id = int(mode) % 8
+        kind_slot = 56 + m_id
+        hops = min(64, 3 + (t_val - 1))
+        mods = self.env_architect.difficulty_mods(kind_slot)
+        stars = compute_star_difficulty(t_val, recursion_depth=hops, mods=mods)
+        skill_name, domain_name = self.env_architect.skill_and_domain(kind_slot)
+        diff_label = (
+            "Easy" if t_val <= 1 else ("Medium" if t_val <= 3 else ("Hard" if t_val <= 6 else "Grandmaster-ICPC"))
+        )
+
+        a = 3 + ((idx * 7 + self._rng_seed) % (9 + 2 * t_val))
+        b = 2 + ((idx * 11 + self._rng_seed) % (7 + 2 * t_val))
+        c = 1 + ((idx * 5 + t_val) % (5 + t_val))
+
+        if m_id == 0:
+            # 56: LeetCode Recursive DP & Memoization (Generalized Climbing Stairs / Decode Ways / House Robber)
+            p_mod = 997 + 2 * (idx % 25)
+            alpha = 1 + (idx % 3)
+            beta = 1 + ((idx // 3) % 3)
+            bias = c + (t_val - 1)
+
+            def _dp_ref(n: int) -> int:
+                if n <= 0:
+                    return a
+                if n == 1:
+                    return b
+                dp0, dp1 = a, b
+                for step_i in range(2, n + 1):
+                    dp0, dp1 = dp1, (alpha * dp1 + beta * dp0 + bias * (step_i % 3)) % p_mod
+                return dp1
+
+            ans_L = _dp_ref(hops)
+            ans_2 = _dp_ref(2)
+            ans_1 = _dp_ref(1)
+            ans_0 = _dp_ref(0)
+            task_id = f"lc_dp_memo_t{t_val}_L{hops}_{a}_{b}_{idx}"
+            prompt_q = (
+                f"#U$# [LeetCode-{diff_label} RL: Memoized DP Recurrence | ★{stars:.2f} | Horizon L={hops}] "
+                f"Given base states `dp[0] = {a}`, `dp[1] = {b}`, and transition for `i >= 2`: "
+                f"`dp[i] = ({alpha} * dp[i - 1] + {beta} * dp[i - 2] + {bias} * (i % 3)) % {p_mod}`. "
+                f"Unmemoized exponential recursion times out at high tiers; implement an O(n) DP or memoized solver `def solve(n):` returning `dp[n]`.\n"
+                f"#Q$# [code] Trace `dp[0..{hops}]` in `#T$#` and implement `def solve(n):` in `#A$#` passing all 4 test cases."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Base cases are dp[0] = {ans_0} and dp[1] = {ans_1}. "
+                f"At i = 2, dp[2] = ({alpha}*{ans_1} + {beta}*{ans_0} + {bias}*2) mod {p_mod} = {ans_2}. "
+                f"Iterating the O(n) state transition up to n = {hops} yields dp[{hops}] = {ans_L}."
+            )
+            gold_a = (
+                f"def solve(n):\n"
+                f"    if n <= 0:\n"
+                f"        return {a}\n"
+                f"    if n == 1:\n"
+                f"        return {b}\n"
+                f"    dp0, dp1 = {a}, {b}\n"
+                f"    for i in range(2, n + 1):\n"
+                f"        dp0, dp1 = dp1, ({alpha} * dp1 + {beta} * dp0 + {bias} * (i % 3)) % {p_mod}\n"
+                f"    return dp1"
+            )
+            d1_t = f"We omit the parity bonus {bias} * (i % 3) in the recurrence."
+            d1_a = (
+                f"def solve(n):\n"
+                f"    if n <= 0:\n"
+                f"        return {a}\n"
+                f"    dp0, dp1 = {a}, {b}\n"
+                f"    for i in range(2, n + 1):\n"
+                f"        dp0, dp1 = dp1, ({alpha} * dp1 + {beta} * dp0) % {p_mod}\n"
+                f"    return dp1"
+            )
+            d2_t = f"We halt one step early at n - 1."
+            d2_a = (
+                f"def solve(n):\n"
+                f"    if n <= 0:\n"
+                f"        return {a}\n"
+                f"    dp0, dp1 = {a}, {b}\n"
+                f"    for i in range(2, n):\n"
+                f"        dp0, dp1 = dp1, ({alpha} * dp1 + {beta} * dp0 + {bias} * (i % 3)) % {p_mod}\n"
+                f"    return dp1"
+            )
+            hack_a = "def solve(n):\n    return 0"
+            default_scaffold = "induction -> abstraction -> deduction -> decision -> metacognition"
+
+        elif m_id == 1:
+            # 57: LeetCode Divide-and-Conquer Recursive Tree Recurrence (True recursive solve(n // 2))
+            n_val = (1 << min(12, 2 + t_val)) - 1 - (idx % 3)
+            n_half = n_val // 2
+            m_even = 2 + (idx % 2)
+            m_odd = 3
+            c_add = b + t_val
+
+            def _divconq_ref(n: int) -> int:
+                if n <= 0:
+                    return a
+                if n == 1:
+                    return a + c_add
+                if n % 2 == 0:
+                    return m_even * _divconq_ref(n // 2) + c_add
+                return m_odd * _divconq_ref(n // 2) + n + c_add
+
+            ans_n = _divconq_ref(n_val)
+            ans_half = _divconq_ref(n_half)
+            ans_1 = _divconq_ref(1)
+            ans_0 = _divconq_ref(0)
+            task_id = f"lc_divconq_t{t_val}_N{n_val}_{a}_{c_add}_{idx}"
+            prompt_q = (
+                f"#U$# [LeetCode-{diff_label} RL: Divide-and-Conquer Tree Recursion | ★{stars:.2f} | N={n_val}] "
+                f"Implement the recursive divide-and-conquer function `def solve(n):` defined for integer `n >= 0` by:\n"
+                f"- Base cases: `solve(0) = {a}`, `solve(1) = {a + c_add}`\n"
+                f"- Even branch (`n > 1` and `n % 2 == 0`): `return {m_even} * solve(n // 2) + {c_add}`\n"
+                f"- Odd branch (`n > 1` and `n % 2 == 1`): `return {m_odd} * solve(n // 2) + n + {c_add}`\n"
+                f"#Q$# [code] Trace the recursive tree calls in `#T$#` and implement `def solve(n):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({n_val}) == {ans_n} "
+                f"and solve({n_half}) == {ans_half} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Base cases verify solve(0) = {ans_0} and solve(1) = {ans_1}. "
+                f"Recursively halving n // 2 along parity branches yields solve({n_half}) = {ans_half} and solve({n_val}) = {ans_n}."
+            )
+            gold_a = (
+                f"def solve(n):\n"
+                f"    if n <= 0:\n"
+                f"        return {a}\n"
+                f"    if n == 1:\n"
+                f"        return {a + c_add}\n"
+                f"    if n % 2 == 0:\n"
+                f"        return {m_even} * solve(n // 2) + {c_add}\n"
+                f"    return {m_odd} * solve(n // 2) + n + {c_add}"
+            )
+            d1_t = f"We use the even multiplier {m_even} for both even and odd branches."
+            d1_a = (
+                f"def solve(n):\n"
+                f"    if n <= 0:\n"
+                f"        return {a}\n"
+                f"    if n == 1:\n"
+                f"        return {a + c_add}\n"
+                f"    return {m_even} * solve(n // 2) + {c_add}"
+            )
+            d2_t = f"We omit + n on the odd branch."
+            d2_a = (
+                f"def solve(n):\n"
+                f"    if n <= 0:\n"
+                f"        return {a}\n"
+                f"    if n == 1:\n"
+                f"        return {a + c_add}\n"
+                f"    if n % 2 == 0:\n"
+                f"        return {m_even} * solve(n // 2) + {c_add}\n"
+                f"    return {m_odd} * solve(n // 2) + {c_add}"
+            )
+            hack_a = "def solve(n):\n    return 0"
+            default_scaffold = "abstraction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 2:
+            # 58: LeetCode Backtracking & Constraint-Pruned Subset Accumulation
+            bad_div = 3 + (idx % 3)
+            step_w = 2 + (t_val % 4)
+
+            def _backtrack_ref(n: int) -> int:
+                total = 0
+                for i in range(1, n + 1):
+                    val = a + i * step_w
+                    if val % bad_div != 0:
+                        total += val
+                    else:
+                        total += c
+                return total
+
+            ans_L = _backtrack_ref(hops)
+            ans_3 = _backtrack_ref(3)
+            ans_1 = _backtrack_ref(1)
+            ans_0 = _backtrack_ref(0)
+            task_id = f"lc_backtrack_prune_t{t_val}_L{hops}_{a}_{step_w}_{bad_div}_{idx}"
+            prompt_q = (
+                f"#U$# [LeetCode-{diff_label} RL: Constraint-Pruned Subset Recursion | ★{stars:.2f} | Depth L={hops}] "
+                f"Across `i = 1..n`, candidate item `i` has weight `val = {a} + i * {step_w}`. "
+                f"If `val` is NOT divisible by forbidden divisor `{bad_div}`, add `val` to the subset score; "
+                f"otherwise prune the branch and add fallback penalty `+{c}`. For `n <= 0`, return `0`.\n"
+                f"#Q$# [code] Trace the constraint pruning in `#T$#` and implement `def solve(n):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve(3) == {ans_3} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"For n = 0 the score is 0; for n = 1, val = {a + step_w} gives score {ans_1}; "
+                f"for n = 3 score is {ans_3}; accumulating across all {hops} pruned candidates yields {ans_L}."
+            )
+            gold_a = (
+                f"def solve(n):\n"
+                f"    total = 0\n"
+                f"    for i in range(1, n + 1):\n"
+                f"        val = {a} + i * {step_w}\n"
+                f"        if val % {bad_div} != 0:\n"
+                f"            total += val\n"
+                f"        else:\n"
+                f"            total += {c}\n"
+                f"    return total"
+            )
+            d1_t = f"We forget to prune multiples of {bad_div} and sum all candidate weights."
+            d1_a = (
+                f"def solve(n):\n"
+                f"    total = 0\n"
+                f"    for i in range(1, n + 1):\n"
+                f"        total += {a} + i * {step_w}\n"
+                f"    return total"
+            )
+            d2_t = f"We subtract {c} instead of adding on pruned branches."
+            d2_a = (
+                f"def solve(n):\n"
+                f"    total = 0\n"
+                f"    for i in range(1, n + 1):\n"
+                f"        val = {a} + i * {step_w}\n"
+                f"        total += val if val % {bad_div} != 0 else -{c}\n"
+                f"    return total"
+            )
+            hack_a = "def solve(n):\n    return 0"
+            default_scaffold = "abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 3:
+            # 59: LeetCode Graph DFS / Topological Longest Path on Multi-Layer Weighted DAG
+            w_fast = a + t_val
+            w_alt = b + c
+            cross_bonus = 2 + (idx % 5)
+
+            def _dag_ref(layers: int) -> int:
+                if layers <= 0:
+                    return 0
+                hi, lo = w_fast, w_alt
+                for l_i in range(2, layers + 1):
+                    nxt_hi = max(hi + w_fast, lo + w_alt + cross_bonus * (l_i % 2))
+                    nxt_lo = max(lo + w_alt, hi + c)
+                    hi, lo = nxt_hi, nxt_lo
+                return max(hi, lo)
+
+            ans_L = _dag_ref(hops)
+            ans_2 = _dag_ref(2)
+            ans_1 = _dag_ref(1)
+            ans_0 = _dag_ref(0)
+            task_id = f"lc_dag_toposort_t{t_val}_L{hops}_{w_fast}_{w_alt}_{idx}"
+            prompt_q = (
+                f"#U$# [LeetCode-{diff_label} RL: Two-Track Topological DAG Longest Path | ★{stars:.2f} | Layers L={hops}] "
+                f"A 2-track weighted DAG has `layers` topological stages (`0` returns `0`; stage `1` initializes `hi = {w_fast}, lo = {w_alt}`). "
+                f"For each stage `l = 2..layers`, transitions are:\n"
+                f"- `nxt_hi = max(hi + {w_fast}, lo + {w_alt} + {cross_bonus} * (l % 2))`\n"
+                f"- `nxt_lo = max(lo + {w_alt}, hi + {c})`\n"
+                f"Return `max(hi, lo)` after `layers` stages (ignoring cyclic back-edge traps).\n"
+                f"#Q$# [code] Unroll the topological DAG DP in `#T$#` and implement `def solve(layers):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"At layers = 0 path is 0; at layers = 1 max({w_fast}, {w_alt}) = {ans_1}; "
+                f"at layers = 2 longest path is {ans_2}; propagating across all {hops} topological layers yields {ans_L}."
+            )
+            gold_a = (
+                f"def solve(layers):\n"
+                f"    if layers <= 0:\n"
+                f"        return 0\n"
+                f"    hi, lo = {w_fast}, {w_alt}\n"
+                f"    for l in range(2, layers + 1):\n"
+                f"        hi, lo = max(hi + {w_fast}, lo + {w_alt} + {cross_bonus} * (l % 2)), max(lo + {w_alt}, hi + {c})\n"
+                f"    return max(hi, lo)"
+            )
+            d1_t = f"We take only the greedy single track layers * {w_fast} without cross-track transitions."
+            d1_a = (
+                f"def solve(layers):\n"
+                f"    return max(0, layers - 1) * {w_fast}"
+            )
+            d2_t = f"We use min instead of max across topological edges."
+            d2_a = (
+                f"def solve(layers):\n"
+                f"    if layers <= 0:\n"
+                f"        return 0\n"
+                f"    hi, lo = {w_fast}, {w_alt}\n"
+                f"    for l in range(2, layers + 1):\n"
+                f"        hi, lo = min(hi + {w_fast}, lo + {w_alt}), min(lo + {w_alt}, hi + {c})\n"
+                f"    return min(hi, lo)"
+            )
+            hack_a = "def solve(layers):\n    return 0"
+            default_scaffold = "association -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 4:
+            # 60: LeetCode Sliding Window / Kadane Subarray Optimization
+            win_k = 2 + (t_val % 3)
+            mod_m = 11 + 2 * (idx % 7)
+            shift_s = 3 + (idx % 3)
+
+            def _window_ref(n: int) -> int:
+                if n <= 0:
+                    return 0
+                arr = [((i * a + b) % mod_m) - shift_s for i in range(n)]
+                best = 0
+                cur = 0
+                for idx_i, val in enumerate(arr):
+                    cur += val
+                    if idx_i >= win_k:
+                        cur -= arr[idx_i - win_k]
+                    if cur > best:
+                        best = cur
+                return best
+
+            ans_L = _window_ref(hops)
+            ans_k = _window_ref(win_k)
+            ans_1 = _window_ref(1)
+            ans_0 = _window_ref(0)
+            task_id = f"lc_sliding_window_t{t_val}_L{hops}_K{win_k}_{a}_{b}_{idx}"
+            prompt_q = (
+                f"#U$# [LeetCode-{diff_label} RL: Sliding-Window Subarray Maximization | ★{stars:.2f} | Length L={hops} | Window K={win_k}] "
+                f"For `n` elements (`0 <= i < n`), let `arr[i] = ((i * {a} + {b}) % {mod_m}) - {shift_s}`. "
+                f"Maintain a sliding window `cur` of at most `K = {win_k}` contiguous elements (`cur += arr[i]`; if `i >= {win_k}`, `cur -= arr[i - {win_k}]`), "
+                f"and track the running maximum `best = max(best, cur)` initialized at `best = 0`.\n"
+                f"#Q$# [code] Trace the sliding-window updates in `#T$#` and implement `def solve(n):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve({win_k}) == {ans_k} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"For n = 0 best is 0; for n = 1 best is {ans_1}; for n = {win_k} best is {ans_k}; "
+                f"sliding the window of width {win_k} across all {hops} elements yields best = {ans_L}."
+            )
+            gold_a = (
+                f"def solve(n):\n"
+                f"    if n <= 0:\n"
+                f"        return 0\n"
+                f"    arr = [((i * {a} + {b}) % {mod_m}) - {shift_s} for i in range(n)]\n"
+                f"    best = 0\n"
+                f"    cur = 0\n"
+                f"    for i, val in enumerate(arr):\n"
+                f"        cur += val\n"
+                f"        if i >= {win_k}:\n"
+                f"            cur -= arr[i - {win_k}]\n"
+                f"        if cur > best:\n"
+                f"            best = cur\n"
+                f"    return best"
+            )
+            d1_t = f"We forget to evict arr[i - {win_k}] when the window exceeds width {win_k}."
+            d1_a = (
+                f"def solve(n):\n"
+                f"    arr = [((i * {a} + {b}) % {mod_m}) - {shift_s} for i in range(max(0, n))]\n"
+                f"    return max(0, sum(arr))"
+            )
+            d2_t = f"We return only the final window sum instead of the running maximum."
+            d2_a = (
+                f"def solve(n):\n"
+                f"    if n <= 0:\n"
+                f"        return 0\n"
+                f"    arr = [((i * {a} + {b}) % {mod_m}) - {shift_s} for i in range(n)]\n"
+                f"    return sum(arr[-{win_k}:]) - 99"
+            )
+            hack_a = "def solve(n):\n    return -1"
+            default_scaffold = "induction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 5:
+            # 61: LeetCode Parametric Binary Search on Answer (Split Array Largest Sum / Capacity to Ship Packages)
+            days_d = 2 + (t_val % 4)
+            step_c = 1 + (c % 3)
+
+            def _bsearch_ref(n: int, days: int) -> int:
+                if n <= 0:
+                    return 0
+                weights = [a + (i % 4) * step_c for i in range(n)]
+                lo, hi = max(weights), sum(weights)
+                while lo < hi:
+                    mid = (lo + hi) // 2
+                    used_days = 1
+                    cur_load = 0
+                    for w in weights:
+                        if cur_load + w > mid:
+                            used_days += 1
+                            cur_load = w
+                        else:
+                            cur_load += w
+                    if used_days <= max(1, days):
+                        hi = mid
+                    else:
+                        lo = mid + 1
+                return lo
+
+            ans_L = _bsearch_ref(hops, days_d)
+            ans_1day = _bsearch_ref(hops, 1)
+            ans_1item = _bsearch_ref(1, days_d)
+            ans_0 = _bsearch_ref(0, days_d)
+            task_id = f"lc_bsearch_cap_t{t_val}_L{hops}_D{days_d}_{a}_{step_c}_{idx}"
+            prompt_q = (
+                f"#U$# [LeetCode-{diff_label} RL: Parametric Binary Search on Answer | ★{stars:.2f} | Tasks L={hops} | Days D={days_d}] "
+                f"Given `n` sequential workloads `weights = [{a} + (i % 4) * {step_c} for i in range(n)]` and `days` shipping windows (`solve(0, days) = 0`), "
+                f"use binary search over capacity `[max(weights), sum(weights)]` to find the minimum daily capacity required to ship all `n` workloads in order within `max(1, days)` days.\n"
+                f"#Q$# [code] Derive the binary-search feasibility bounds in `#T$#` and implement `def solve(n, days):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}, {days_d}) == {ans_L} "
+                f"and solve({hops}, 1) == {ans_1day} "
+                f"and solve(1, {days_d}) == {ans_1item} "
+                f"and solve(0, {days_d}) == {ans_0}"
+            )
+            gold_t = (
+                f"For n = 0 capacity is 0; for n = 1 capacity is {ans_1item}; for 1 day total sum is {ans_1day}; "
+                f"binary searching [max(weights), sum(weights)] for n = {hops} across {days_d} days yields minimum feasible capacity {ans_L}."
+            )
+            gold_a = (
+                f"def solve(n, days):\n"
+                f"    if n <= 0:\n"
+                f"        return 0\n"
+                f"    weights = [{a} + (i % 4) * {step_c} for i in range(n)]\n"
+                f"    lo, hi = max(weights), sum(weights)\n"
+                f"    while lo < hi:\n"
+                f"        mid = (lo + hi) // 2\n"
+                f"        used, cur = 1, 0\n"
+                f"        for w in weights:\n"
+                f"            if cur + w > mid:\n"
+                f"                used += 1\n"
+                f"                cur = w\n"
+                f"            else:\n"
+                f"                cur += w\n"
+                f"        if used <= max(1, days):\n"
+                f"            hi = mid\n"
+                f"        else:\n"
+                f"            lo = mid + 1\n"
+                f"    return lo"
+            )
+            d1_t = f"We approximate capacity by integer division sum(weights) // days without checking packet boundaries."
+            d1_a = (
+                f"def solve(n, days):\n"
+                f"    if n <= 0:\n"
+                f"        return 0\n"
+                f"    weights = [{a} + (i % 4) * {step_c} for i in range(n)]\n"
+                f"    return sum(weights) // max(1, days)"
+            )
+            d2_t = f"We return max(weights) regardless of the number of days."
+            d2_a = (
+                f"def solve(n, days):\n"
+                f"    if n <= 0:\n"
+                f"        return 0\n"
+                f"    return {a}"
+            )
+            hack_a = "def solve(n, days):\n    return -1"
+            default_scaffold = "abstraction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 6:
+            # 62: LeetCode Binary Tree Post-Order DP (House Robber III / Independent Set on Tree Levels)
+            h_max = min(10, 2 + t_val)
+
+            def _tree_rob_ref(h: int) -> int:
+                if h <= 0:
+                    return 0
+                rob, skip = 0, 0
+                for d in range(h - 1, -1, -1):
+                    node_val = a + d * b
+                    nxt_rob = node_val + 2 * skip
+                    nxt_skip = 2 * max(rob, skip)
+                    rob, skip = nxt_rob, nxt_skip
+                return max(rob, skip)
+
+            ans_h = _tree_rob_ref(h_max)
+            ans_2 = _tree_rob_ref(2)
+            ans_1 = _tree_rob_ref(1)
+            ans_0 = _tree_rob_ref(0)
+            task_id = f"lc_tree_robber_t{t_val}_H{h_max}_{a}_{b}_{idx}"
+            prompt_q = (
+                f"#U$# [LeetCode-{diff_label} RL: Binary Tree Post-Order Independent Set (House Robber III) | ★{stars:.2f} | Height H={h_max}] "
+                f"A complete binary tree of height `h` has levels `d = h - 1` down to `0` (`solve(0) = 0`), where each node at depth `d` has value `{a} + d * {b}` and two identical subtrees. "
+                f"In post-order from `d = h - 1` down to `0`, update `(rob, skip)` from `(0, 0)` via:\n"
+                f"- `nxt_rob = ({a} + d * {b}) + 2 * skip`\n"
+                f"- `nxt_skip = 2 * max(rob, skip)`\n"
+                f"Return `max(rob, skip)` at the root.\n"
+                f"#Q$# [code] Trace the bottom-up post-order tree recursion in `#T$#` and implement `def solve(h):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({h_max}) == {ans_h} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"For h = 0 result is 0; for h = 1 root value is {ans_1}; for h = 2 post-order gives {ans_2}; "
+                f"recursing bottom-up across height {h_max} yields max(rob, skip) = {ans_h}."
+            )
+            gold_a = (
+                f"def solve(h):\n"
+                f"    if h <= 0:\n"
+                f"        return 0\n"
+                f"    rob, skip = 0, 0\n"
+                f"    for d in range(h - 1, -1, -1):\n"
+                f"        rob, skip = ({a} + d * {b}) + 2 * skip, 2 * max(rob, skip)\n"
+                f"    return max(rob, skip)"
+            )
+            d1_t = f"We forget the factor of 2 for left and right child subtrees."
+            d1_a = (
+                f"def solve(h):\n"
+                f"    if h <= 0:\n"
+                f"        return 0\n"
+                f"    rob, skip = 0, 0\n"
+                f"    for d in range(h - 1, -1, -1):\n"
+                f"        rob, skip = ({a} + d * {b}) + skip, max(rob, skip)\n"
+                f"    return max(rob, skip)"
+            )
+            d2_t = f"We allow robbing adjacent parent and child levels simultaneously."
+            d2_a = (
+                f"def solve(h):\n"
+                f"    if h <= 0:\n"
+                f"        return 0\n"
+                f"    rob = 0\n"
+                f"    for d in range(h - 1, -1, -1):\n"
+                f"        rob = ({a} + d * {b}) + 2 * rob\n"
+                f"    return rob"
+            )
+            hack_a = "def solve(h):\n    return -1"
+            default_scaffold = "abduction -> induction -> deduction -> decision -> metacognition"
+
+        else:
+            # 63: LeetCode Grandmaster / ICPC Hybrid Recursive Reduction + Modular DP Synthesis
+            p_mod = 509 + 2 * (idx % 30)
+            mult_k = 2 + (idx % 3)
+
+            def _grandmaster_ref(x: int, steps: int) -> int:
+                if steps <= 0:
+                    return x % p_mod
+                cur = x % p_mod
+                acc = cur
+                for s_i in range(1, steps + 1):
+                    if cur % 2 == 0:
+                        cur = (cur // 2 + b * s_i) % p_mod
+                    else:
+                        cur = (cur * mult_k + c) % p_mod
+                    acc = (acc + cur) % p_mod
+                return acc
+
+            ans_L = _grandmaster_ref(a, hops)
+            ans_2 = _grandmaster_ref(a, 2)
+            ans_1 = _grandmaster_ref(a, 1)
+            ans_0 = _grandmaster_ref(a, 0)
+            task_id = f"lc_grandmaster_hybrid_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [LeetCode-{diff_label} RL: Grandmaster Hybrid Parity-Tree & Prefix-DP | ★{stars:.2f} | Depth L={hops}] "
+                f"Starting from `cur = x % {p_mod}` and `acc = cur` (`if steps <= 0: return x % {p_mod}`), "
+                f"for each recursive step `s = 1..steps`:\n"
+                f"- If `cur % 2 == 0`: `cur = (cur // 2 + {b} * s) % {p_mod}`\n"
+                f"- Else (`cur % 2 == 1`): `cur = (cur * {mult_k} + {c}) % {p_mod}`\n"
+                f"- Accumulate prefix invariant: `acc = (acc + cur) % {p_mod}`\n"
+                f"Return `acc` after `steps` transitions.\n"
+                f"#Q$# [code] Unroll the hybrid parity-tree and prefix-DP transitions in `#T$#` and implement `def solve(x, steps):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({a}, {hops}) == {ans_L} "
+                f"and solve({a}, 2) == {ans_2} "
+                f"and solve({a}, 1) == {ans_1} "
+                f"and solve({a}, 0) == {ans_0}"
+            )
+            gold_t = (
+                f"At steps = 0 result is {ans_0}; at steps = 1 result is {ans_1}; at steps = 2 result is {ans_2}; "
+                f"stepping through all {hops} parity-tree transitions and accumulating modulo {p_mod} yields {ans_L}."
+            )
+            gold_a = (
+                f"def solve(x, steps):\n"
+                f"    cur = x % {p_mod}\n"
+                f"    if steps <= 0:\n"
+                f"        return cur\n"
+                f"    acc = cur\n"
+                f"    for s in range(1, steps + 1):\n"
+                f"        if cur % 2 == 0:\n"
+                f"            cur = (cur // 2 + {b} * s) % {p_mod}\n"
+                f"        else:\n"
+                f"            cur = (cur * {mult_k} + {c}) % {p_mod}\n"
+                f"        acc = (acc + cur) % {p_mod}\n"
+                f"    return acc"
+            )
+            d1_t = f"We return only the terminal state cur instead of the accumulated prefix invariant acc."
+            d1_a = (
+                f"def solve(x, steps):\n"
+                f"    cur = x % {p_mod}\n"
+                f"    for s in range(1, steps + 1):\n"
+                f"        cur = (cur // 2 + {b} * s) % {p_mod} if cur % 2 == 0 else (cur * {mult_k} + {c}) % {p_mod}\n"
+                f"    return cur"
+            )
+            d2_t = f"We swap the even and odd branch transition rules."
+            d2_a = (
+                f"def solve(x, steps):\n"
+                f"    cur = x % {p_mod}\n"
+                f"    acc = cur\n"
+                f"    for s in range(1, steps + 1):\n"
+                f"        cur = (cur * {mult_k} + {c}) % {p_mod} if cur % 2 == 0 else (cur // 2 + {b} * s) % {p_mod}\n"
+                f"        acc = (acc + cur) % {p_mod}\n"
+                f"    return acc"
+            )
+            hack_a = "def solve(x, steps):\n    return 0"
+            default_scaffold = "analogy -> abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        base_cands = (
+            f"#T$# {gold_t}\n#A$# {gold_a}",
+            f"#T$# {d1_t}\n#A$# {d1_a}",
+            f"#T$# {d2_t}\n#A$# {d2_a}",
+            f"#T$# Default fallback.\n#A$# {hack_a}",
+        )
+        base_scores = (1.0, 0.25, 0.15, 0.0)
+        order = [0, 1, 2, 3]
+        shift = idx % 4
+        order[0], order[shift] = order[shift], order[0]
+        p_cands = tuple(base_cands[i] for i in order)
+        p_scores = tuple(base_scores[i] for i in order)
+        g_idx = order.index(0)
+        self._last_task_kinds[task_id] = kind_slot
+        cached_s = self.scaffold_cache.get(task_id, default=default_scaffold)
+        return OrnithTask(
+            task_id=task_id,
+            domain=domain_name,
+            prompt_q=prompt_q,
+            harness_h=harness_h,
+            scaffold_s=cached_s,
+            candidate_rollouts=p_cands,
+            harness_scores=p_scores,
+            gold_index=g_idx,
+            gold_thought=gold_t,
+            gold_answer=gold_a,
+            skill=skill_name,
+            star_difficulty=stars,
+            recursion_depth=hops,
+            difficulty_mods=mods,
+        )
+
     def _synthesize_combinatorial_pipeline_task(self, idx: int, *, tier: int = 1) -> OrnithTask:
         """Synthesize a randomized 3-stage cross-template pipeline ($8 \\times 6 \\times 4 = 192$ combinations)
         with length-matched adversarial multi-stage distractors (Stage-1 vs Stage-2 error propagation).
@@ -3136,6 +3823,8 @@ class OrnithSelfImprover:
             idx, seed=self._rng_seed, pp_leaderboard=self.pp_leaderboard
         )
         tier = self.env_architect.difficulty_tier(kind)
+        if not compact and 56 <= kind < 64:
+            return self._synthesize_leetcode_recursive_coding_task(idx, tier=tier, mode=kind - 56)
         if not compact and 48 <= kind < 56:
             return self._synthesize_agentic_tool_terminal_task(idx, tier=tier, mode=kind - 48)
         if not compact and 40 <= kind < 48:
@@ -3149,6 +3838,10 @@ class OrnithSelfImprover:
         # For online training steps beyond the initial 56-family sweep, dynamically invoke Agentic RL,
         # Sherlockian reasoning, Polymath challenges, the 192-pipeline combinatorial synthesizer, and infinite-horizon recursion.
         if not compact and idx >= self.env_architect.TOTAL_FAMILIES:
+            if idx % 6 == 5:
+                lc_mode = (idx // 6) % 8
+                lc_tier = max(tier, self.env_architect.difficulty_tier(56 + lc_mode))
+                return self._synthesize_leetcode_recursive_coding_task(idx, tier=lc_tier, mode=lc_mode)
             if idx % 9 == 8:
                 ag_mode = (idx // 9) % 8
                 ag_tier = max(tier, self.env_architect.difficulty_tier(48 + ag_mode))

@@ -394,5 +394,113 @@
         "raw_pp_gained": 88936.4
       }
     }
+  },
+  "frontier_agent_benchmarks_step_10000": {
+    "canonical_bpb": {
+      "terminal_bench_2_1_solve_sh_bpb_n89": 0.9187,
+      "agents_last_exam_v1_1_verifier_py_bpb_n122": 0.8607
+    },
+    "terminal_bench_2_1": {
+      "Solution_Synthesis_All (N=89, 4-way)": {
+        "acc": 33.71,
+        "acc_norm": 33.71,
+        "coe_decision_acc": 30.34,
+        "coe_multi_op_acc": 30.34,
+        "coe_adaptive_acc": 31.46,
+        "coe_full_ens_acc": 31.46
+      },
+      "Verification_Suite_All (N=89, 4-way)": {
+        "acc": 32.58,
+        "acc_norm": 24.72,
+        "coe_decision_acc": 24.72,
+        "coe_multi_op_acc": 24.72,
+        "coe_adaptive_acc": 25.84,
+        "coe_full_ens_acc": 24.72
+      },
+      "Easy_Split (N=4, 4-way)": {
+        "acc": 50.0,
+        "acc_norm": 75.0,
+        "coe_decision_acc": 25.0,
+        "coe_multi_op_acc": 25.0,
+        "coe_adaptive_acc": 25.0,
+        "coe_full_ens_acc": 25.0
+      },
+      "Medium_Split (N=55, 4-way)": {
+        "acc": 38.18,
+        "acc_norm": 38.18,
+        "coe_decision_acc": 23.64,
+        "coe_multi_op_acc": 23.64,
+        "coe_adaptive_acc": 25.45,
+        "coe_full_ens_acc": 25.45
+      },
+      "Hard_Split (N=30, 4-way)": {
+        "acc": 26.67,
+        "acc_norm": 26.67,
+        "coe_decision_acc": 36.67,
+        "coe_multi_op_acc": 36.67,
+        "coe_adaptive_acc": 36.67,
+        "coe_full_ens_acc": 36.67
+      },
+      "by_domain": {
+        "debugging (N=5)": {"acc": 60.0, "acc_norm": 60.0, "coe_decision_acc": 60.0, "coe_multi_op_acc": 60.0, "coe_adaptive_acc": 60.0, "coe_full_ens_acc": 60.0},
+        "scientific-computing (N=8)": {"acc": 25.0, "acc_norm": 25.0, "coe_decision_acc": 37.5, "coe_multi_op_acc": 37.5, "coe_adaptive_acc": 50.0, "coe_full_ens_acc": 37.5},
+        "system-administration (N=9)": {"acc": 44.44, "acc_norm": 44.44, "coe_decision_acc": 33.33, "coe_multi_op_acc": 33.33, "coe_adaptive_acc": 33.33, "coe_full_ens_acc": 33.33},
+        "software-engineering (N=26)": {"acc": 38.46, "acc_norm": 42.31, "coe_decision_acc": 26.92, "coe_multi_op_acc": 26.92, "coe_adaptive_acc": 26.92, "coe_full_ens_acc": 26.92},
+        "security (N=8)": {"acc": 37.5, "acc_norm": 37.5, "coe_decision_acc": 37.5, "coe_multi_op_acc": 37.5, "coe_adaptive_acc": 37.5, "coe_full_ens_acc": 37.5},
+        "data-science (N=8)": {"acc": 25.0, "acc_norm": 12.5, "coe_decision_acc": 37.5, "coe_multi_op_acc": 37.5, "coe_adaptive_acc": 25.0, "coe_full_ens_acc": 37.5},
+        "file-operations (N=5)": {"acc": 0.0, "acc_norm": 0.0, "coe_decision_acc": 20.0, "coe_multi_op_acc": 20.0, "coe_adaptive_acc": 20.0, "coe_full_ens_acc": 20.0}
+      }
+    },
+    "agents_last_exam_v1_1": {
+      "Workflow_All (N=122, 4-way)": {
+        "acc": 51.64,
+        "acc_norm": 50.82,
+        "coe_decision_acc": 39.34,
+        "coe_multi_op_acc": 39.34,
+        "coe_adaptive_acc": 40.16,
+        "coe_full_ens_acc": 38.52
+      },
+      "Verifier_All (N=122, 4-way)": {
+        "acc": 27.05,
+        "acc_norm": 27.05,
+        "coe_decision_acc": 21.31,
+        "coe_multi_op_acc": 21.31,
+        "coe_adaptive_acc": 22.13,
+        "coe_full_ens_acc": 21.31
+      },
+      "Split_NearTerm (N=45, 4-way)": {
+        "acc": 51.11,
+        "acc_norm": 48.89,
+        "coe_decision_acc": 37.78,
+        "coe_multi_op_acc": 37.78,
+        "coe_adaptive_acc": 40.0,
+        "coe_full_ens_acc": 35.56
+      },
+      "Split_FullSpectrum (N=41, 4-way)": {
+        "acc": 58.54,
+        "acc_norm": 58.54,
+        "coe_decision_acc": 46.34,
+        "coe_multi_op_acc": 46.34,
+        "coe_adaptive_acc": 46.34,
+        "coe_full_ens_acc": 46.34
+      },
+      "Split_LastExam (N=36, 4-way)": {
+        "acc": 47.22,
+        "acc_norm": 47.22,
+        "coe_decision_acc": 30.56,
+        "coe_multi_op_acc": 30.56,
+        "coe_adaptive_acc": 30.56,
+        "coe_full_ens_acc": 30.56
+      },
+      "by_domain": {
+        "visual_media (N=11)": {"acc": 81.82, "acc_norm": 81.82, "coe_decision_acc": 72.73, "coe_multi_op_acc": 72.73, "coe_adaptive_acc": 63.64, "coe_full_ens_acc": 63.64},
+        "engineering (N=16)": {"acc": 62.5, "acc_norm": 62.5, "coe_decision_acc": 56.25, "coe_multi_op_acc": 56.25, "coe_adaptive_acc": 56.25, "coe_full_ens_acc": 56.25},
+        "health_medicine (N=19)": {"acc": 57.89, "acc_norm": 57.89, "coe_decision_acc": 26.32, "coe_multi_op_acc": 26.32, "coe_adaptive_acc": 31.58, "coe_full_ens_acc": 26.32},
+        "physical_sciences (N=14)": {"acc": 57.14, "acc_norm": 57.14, "coe_decision_acc": 28.57, "coe_multi_op_acc": 28.57, "coe_adaptive_acc": 28.57, "coe_full_ens_acc": 28.57},
+        "business_finance (N=19)": {"acc": 52.63, "acc_norm": 52.63, "coe_decision_acc": 42.11, "coe_multi_op_acc": 42.11, "coe_adaptive_acc": 42.11, "coe_full_ens_acc": 42.11},
+        "life_sciences (N=12)": {"acc": 33.33, "acc_norm": 33.33, "coe_decision_acc": 25.0, "coe_multi_op_acc": 25.0, "coe_adaptive_acc": 16.67, "coe_full_ens_acc": 16.67},
+        "computing_math (N=19)": {"acc": 26.32, "acc_norm": 21.05, "coe_decision_acc": 21.05, "coe_multi_op_acc": 21.05, "coe_adaptive_acc": 26.32, "coe_full_ens_acc": 21.05}
+      }
+    }
   }
 }

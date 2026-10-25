@@ -349,7 +349,7 @@ def upcycle_state_dict_experts(
     if new_num_experts <= old_num_experts:
         return state_dict
 
-    out = {k: v.clone() for k, v in state_dict.items()}
+    out = {k: v.clone() for k, v in state_dict.items() if isinstance(v, torch.Tensor)}
     router_suffix = ".moe.router.weight"
     moe_prefixes = [k[: -len(".router.weight")] for k in out if k.endswith(router_suffix)]
 
@@ -1232,7 +1232,7 @@ class MCL4COETrainer:
 
         n_exp = int(self.model.backbone.config.num_experts)
         if self.config.freeze_non_clone_experts:
-            active_pairs = self._get_model_mitotic_pairs()
+            active_pairs = getattr(self, "_active_plastic_pairs", None) or self._get_model_mitotic_pairs()
             plastic_set: set[int] = {
                 int(c) for _, c in active_pairs if 0 <= int(c) < n_exp
             }
@@ -1321,7 +1321,7 @@ class MCL4COETrainer:
                 base_markers = (*base_markers, ".moe.router.")
             new_adapter_markers = base_markers
             active_clone_markers = (
-                tuple(f".moe.experts.{int(c)}." for _, c in self._get_model_mitotic_pairs())
+                tuple(f".moe.experts.{int(c)}." for _, c in (getattr(self, "_active_plastic_pairs", None) or self._get_model_mitotic_pairs()))
                 if self.config.freeze_non_clone_experts
                 else ()
             )
@@ -1686,7 +1686,7 @@ class MCL4COETrainer:
                 base_markers = (*base_markers, ".moe.router.")
             new_adapter_markers = base_markers
             active_clone_markers = (
-                tuple(f".moe.experts.{int(c)}." for _, c in self._get_model_mitotic_pairs())
+                tuple(f".moe.experts.{int(c)}." for _, c in (getattr(self, "_active_plastic_pairs", None) or self._get_model_mitotic_pairs()))
                 if self.config.freeze_non_clone_experts
                 else ()
             )
@@ -2306,13 +2306,25 @@ class MCL4COETrainer:
             self._released_mitotic_pairs = list(all_prior_pairs) + list(added_pairs)
             self._set_model_mitotic_pairs([])
         elif added_pairs:
-            # Release prior-generation mitotic pairs so they graduate into independent top-k experts,
-            # keeping only the newly split pairs twin-locked and plastic for the current run.
+            # Release prior-generation mitotic pairs from plasticity/ortho-repulsion so they graduate,
+            # keeping only the newly split pairs plastic for the current run.
+            # In Co-Active Sliced Dense models (routed_scaling_factor > 1.0), keep all slice pairs
+            # twin-gated in SparseMoE so each horizontal FFN slice routes 1 winning specialist.
             self._released_mitotic_pairs = list(all_prior_pairs)
-            self._set_model_mitotic_pairs(list(added_pairs))
+            self._active_plastic_pairs = list(added_pairs)
+            if float(self.config.routed_scaling_factor) > 1.0:
+                self._set_model_mitotic_pairs(list(all_prior_pairs) + list(added_pairs))
+            else:
+                self._set_model_mitotic_pairs(list(added_pairs))
         elif existing_pairs:
             self._released_mitotic_pairs = list(prev_released)
-            self._set_model_mitotic_pairs(list(existing_pairs))
+            self._active_plastic_pairs = [
+                p for p in existing_pairs if p not in prev_released
+            ] or list(existing_pairs)
+            if float(self.config.routed_scaling_factor) > 1.0 and prev_released:
+                self._set_model_mitotic_pairs(list(all_prior_pairs))
+            else:
+                self._set_model_mitotic_pairs(list(existing_pairs))
 
         self.latest_metrics = dict(payload.get("latest_metrics", {}))
         if not added_pairs:

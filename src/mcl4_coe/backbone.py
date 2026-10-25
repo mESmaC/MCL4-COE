@@ -418,6 +418,15 @@ class SparseMoE(nn.Module):
             for p_idx, c_idx in self.mitotic_pairs
             if 0 <= p_idx < self.num_experts and 0 <= c_idx < self.num_experts and p_idx != c_idx
         ]
+        if torch.is_grad_enabled():
+            grad_pairs = [
+                (p_idx, c_idx)
+                for p_idx, c_idx in valid_pairs
+                if self.experts[p_idx].up_proj.weight.requires_grad
+                or self.experts[c_idx].up_proj.weight.requires_grad
+            ]
+            if grad_pairs:
+                valid_pairs = grad_pairs
         if not valid_pairs:
             return torch.zeros((), dtype=torch.float32, device=device)
         max_pairs = 2 if (self.num_experts * self.router.in_features >= 65536) else 16

@@ -458,11 +458,30 @@ class MCL4COETrainer:
     def _prepare_resume_geometry(self, checkpoint_path: str | Path) -> None:
         """Align backbone and COE dimensions with the checkpoint while allowing `num_experts` upcycling."""
         p = Path(checkpoint_path).expanduser().resolve()
+        meta: dict[str, Any] = {}
         if p.name.endswith(".meta.json"):
             meta = json.loads(p.read_text(encoding="utf-8"))
             pt_candidate = Path(meta["pt_file"])
             p = pt_candidate if pt_candidate.exists() else p.with_name(pt_candidate.name)
+        else:
+            meta_cand = p.with_suffix(".meta.json")
+            if meta_cand.is_file():
+                meta = json.loads(meta_cand.read_text(encoding="utf-8"))
         payload = torch.load(p, map_location="cpu", weights_only=False)
+        if isinstance(payload, dict) and "model_state" not in payload:
+            metrics_meta = meta.get("metrics", {})
+            cfg_meta = dict(meta.get("config", {}))
+            if "num_experts" in meta:
+                cfg_meta["num_experts"] = int(meta["num_experts"])
+            payload = {
+                "model_state": payload,
+                "config": cfg_meta,
+                "latest_metrics": metrics_meta,
+                "step": int(meta.get("step", metrics_meta.get("step", 0))),
+                "mitotic_pairs": metrics_meta.get("mitotic_pairs", []),
+                "cumulative_tokens": int(metrics_meta.get("cumulative_tokens", 0)),
+                "cumulative_wall_s": float(metrics_meta.get("wall_time_s", 0.0)),
+            }
         self._resume_payload = payload
         b_cfg = payload.get("backbone_config") or payload.get("config") or {}
         for key in (
@@ -2228,7 +2247,25 @@ class MCL4COETrainer:
             payload = self._resume_payload
             self._resume_payload = None
         else:
+            meta_l: dict[str, Any] = {}
+            meta_cand_l = ckpt_pt_path.with_suffix(".meta.json")
+            if meta_cand_l.is_file():
+                meta_l = json.loads(meta_cand_l.read_text(encoding="utf-8"))
             payload = torch.load(ckpt_pt_path, map_location="cpu", weights_only=False)
+            if isinstance(payload, dict) and "model_state" not in payload:
+                metrics_meta = meta_l.get("metrics", {})
+                cfg_meta = dict(meta_l.get("config", {}))
+                if "num_experts" in meta_l:
+                    cfg_meta["num_experts"] = int(meta_l["num_experts"])
+                payload = {
+                    "model_state": payload,
+                    "config": cfg_meta,
+                    "latest_metrics": metrics_meta,
+                    "step": int(meta_l.get("step", metrics_meta.get("step", 0))),
+                    "mitotic_pairs": metrics_meta.get("mitotic_pairs", []),
+                    "cumulative_tokens": int(metrics_meta.get("cumulative_tokens", 0)),
+                    "cumulative_wall_s": float(metrics_meta.get("wall_time_s", 0.0)),
+                }
 
         b_cfg = payload.get("backbone_config") or payload.get("config") or {}
         ckpt_experts = int(b_cfg.get("num_experts", self.config.num_experts))

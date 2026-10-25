@@ -1889,7 +1889,11 @@ class CurriculumMixtureSampler:
             name: EpochBlockSampler(
                 len(dataset.track_datasets[name]),
                 seed=seed + idx * 1009,
-                shard_boundaries=dataset.track_datasets[name]._cum_blocks.tolist(),
+                shard_boundaries=(
+                    dataset.track_datasets[name]._cum_blocks.tolist()
+                    if len(dataset.track_datasets[name]) > 32768
+                    else None
+                ),
             )
             for idx, name in enumerate(dataset.track_names)
         }

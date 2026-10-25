@@ -11,3 +11,9 @@ runs/
 *.bin
 *.log
 data_shards/_portable/
+*.exe
+*.dll
+*.lib
+*.exp
+*.obj
+*.pdb

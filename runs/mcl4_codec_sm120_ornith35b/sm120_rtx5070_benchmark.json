@@ -1,0 +1,120 @@
+{
+  "engine": "MCL4-Codec Native C++/CUDA SM120 Single-Point Compute Engine (v6)",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 5070",
+    "compute_capability": "12.0 (Blackwell SM120)",
+    "sm_count": 48,
+    "vram_gib": 11.91,
+    "l2_cache_mib": 48.0,
+    "host_ram_gib": 31.71,
+    "cuda_version": "13.3",
+    "compiler": "MSVC 14.51 (VS 18) + nvcc -arch=sm_120 -O3"
+  },
+  "target_checkpoint": {
+    "path": "X:\\ornith-1.5-35B-A3B",
+    "architecture": "Qwen3_5MoeForConditionalGeneration",
+    "total_params_b": 35.0,
+    "active_params_b": 3.0,
+    "num_layers": 40,
+    "linear_attention_layers": 30,
+    "full_attention_layers": 10,
+    "num_experts_per_layer": 256,
+    "top_k": 8,
+    "hidden_size": 2048,
+    "moe_intermediate_size": 512
+  },
+  "mcl4c_packet_format": {
+    "packet_bytes": 1773568,
+    "packet_mib": 1.69140625,
+    "bf16_expert_mib": 6.0,
+    "compression_ratio": 3.5473,
+    "page_alignment_bytes": 4096,
+    "cosine_similarity_vs_bf16_top8": 0.989636,
+    "pcie_gen5_pinned_dma_bandwidth_gibs": 50.32,
+    "pcie_gen5_dma_us_per_expert": 32.8
+  },
+  "moe_kernel_optimization_progression_us_per_layer": {
+    "T_1_decode": {
+      "v1_constant_lut": 147.56,
+      "v2_shfl_register_lut": 54.73,
+      "v4_templated_mcap1_bfloat162": 44.13,
+      "v5_zero_spill_swizzled_smem": 36.76,
+      "total_speedup_vs_v1": 4.01,
+      "40_layer_moe_ms": 1.47,
+      "40_layer_moe_tok_s": 680.0,
+      "effective_bandwidth_gibs": 359.4
+    },
+    "T_4_small_batch": {
+      "v3_dynamic_group": 439.97,
+      "v4_templated": 121.29,
+      "v5_zero_spill_swizzled_smem": 116.58,
+      "total_speedup_vs_v3": 3.77,
+      "40_layer_moe_ms": 4.66,
+      "40_layer_moe_tok_s": 857.8,
+      "effective_bandwidth_gibs": 226.7
+    },
+    "T_16_rl_stem_rollout": {
+      "v1_constant_lut": 2032.24,
+      "v3_expert_grouped": 897.56,
+      "v4_templated_mcap8": 405.49,
+      "v5_zero_spill_unswizzled": 279.19,
+      "v6_zero_spill_swizzled_smem": 225.20,
+      "total_speedup_vs_v1": 9.02,
+      "40_layer_moe_ms": 9.01,
+      "40_layer_moe_tok_s": 1776.2
+    },
+    "T_32_batch": {
+      "v1_constant_lut": 4048.35,
+      "v3_expert_grouped": 1757.72,
+      "v4_templated_mcap8": 804.08,
+      "v5_zero_spill_unswizzled": 543.69,
+      "v6_zero_spill_swizzled_smem": 434.31,
+      "total_speedup_vs_v1": 9.32,
+      "40_layer_moe_ms": 17.37,
+      "40_layer_moe_tok_s": 1842.0
+    }
+  },
+  "complete_40_layer_ornith35b_step_breakdown_us": {
+    "T_1_single_token_decode": {
+      "input_rmsnorm_2048_us": 8.37,
+      "linear_attn_in_proj_qkvz_mcl4c_us": 24.81,
+      "linear_attn_fused_conv1d_register_deltanet_norm_us": 10.14,
+      "linear_attn_out_proj_mcl4c_us": 10.53,
+      "full_attn_qkv_proj_mcl4c_us": 20.27,
+      "full_attn_fused_qknorm_gqa_gate_us": 25.77,
+      "full_attn_o_proj_mcl4c_us": 10.53,
+      "moe_fused_post_rmsnorm_32warp_router_top8_us": 19.68,
+      "moe_fused_shared_and_routed_mcl4c_us": 37.29,
+      "linear_attn_full_layer_total_us": 110.82,
+      "full_attn_full_layer_total_us": 121.90,
+      "complete_40_layer_forward_ms": 4.54,
+      "complete_40_layer_decode_tok_s": 220.1
+    },
+    "T_16_batched_rollout": {
+      "input_rmsnorm_2048_us": 9.53,
+      "linear_attn_in_proj_qkvz_mcl4c_us": 149.80,
+      "linear_attn_fused_conv1d_register_deltanet_norm_us": 32.66,
+      "linear_attn_out_proj_mcl4c_us": 58.94,
+      "full_attn_qkv_proj_mcl4c_us": 113.32,
+      "full_attn_fused_qknorm_gqa_gate_us": 44.22,
+      "full_attn_o_proj_mcl4c_us": 58.94,
+      "moe_fused_post_rmsnorm_32warp_router_top8_us": 19.97,
+      "moe_fused_shared_and_routed_mcl4c_us": 228.01,
+      "linear_attn_full_layer_total_us": 498.91,
+      "full_attn_full_layer_total_us": 473.99,
+      "complete_40_layer_forward_ms": 19.71,
+      "complete_40_layer_rollout_tok_s": 811.9
+    }
+  },
+  "vram_footprint_on_12gb_rtx5070_mib": {
+    "linear_attention_30_layers_mcl4c": 559.2,
+    "full_attention_10_layers_mcl4c": 146.6,
+    "shared_experts_40_mcl4c_and_routers": 107.7,
+    "embeddings_and_lm_head_mcl4c": 546.8,
+    "gated_deltanet_fp32_recurrent_states": 60.0,
+    "ping_pong_active_expert_arena_32_slots": 54.1,
+    "total_pinned_computation_core_mib": 1474.4,
+    "total_pinned_computation_core_gib": 1.44,
+    "free_vram_for_warm_expert_cache_or_rl_gib": 10.22
+  }
+}

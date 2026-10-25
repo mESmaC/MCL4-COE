@@ -1463,37 +1463,80 @@ class MCL4DreamDiscovery:
                 candidate_encoded=tiled_ce,
                 **op_kwargs,
             )
-            s_feats = op_out.decision.state_features.detach().float()
-            q_embs = F.normalize(
-                s_feats - s_feats.mean(dim=-1, keepdim=True), dim=-1, eps=1e-6
+            s_feats = torch.nan_to_num(
+                op_out.decision.state_features.detach().float(),
+                nan=0.0,
+                posinf=1.0,
+                neginf=-1.0,
+            )
+            q_embs = torch.nan_to_num(
+                F.normalize(
+                    s_feats - s_feats.mean(dim=-1, keepdim=True), dim=-1, eps=1e-6
+                ),
+                nan=0.0,
+                posinf=1.0,
+                neginf=-1.0,
             )
 
-        probs_all = op_out.decision.probabilities.float()
-        ref_utils_all = op_out.evaluation_utilities.float().view(b_cnt, -1)
+        def _clean_float(val: Any, default: float = 0.0, lo: float | None = 0.0, hi: float | None = 1.0) -> float:
+            try:
+                f = float(val)
+            except (TypeError, ValueError, OverflowError):
+                f = default
+            if not math.isfinite(f):
+                f = default
+            if lo is not None and f < lo:
+                f = lo
+            if hi is not None and f > hi:
+                f = hi
+            return f
+
+        probs_all = torch.nan_to_num(
+            op_out.decision.probabilities.float(), nan=0.0, posinf=1.0, neginf=0.0
+        )
+        ded_probs_all = torch.nan_to_num(
+            op_out.deduction_probs.float(), nan=0.33, posinf=1.0, neginf=0.0
+        )
+        meta_probs_all = torch.nan_to_num(
+            op_out.metacognition_probs.float(), nan=0.5, posinf=1.0, neginf=0.0
+        )
+        ref_utils_all = torch.nan_to_num(
+            op_out.evaluation_utilities.float().view(b_cnt, -1), nan=0.5, posinf=1.0, neginf=0.0
+        )
         outcomes: list[Outcome] = []
         for idx_i, pid in enumerate(parent_ids):
             node_id = start_node_id + idx_i
             depth = depths[idx_i]
             scaffold = scaffolds[idx_i]
             probs = probs_all[idx_i]
+            prob_sum = float(probs.sum().item())
+            if not math.isfinite(prob_sum) or prob_sum <= 1e-8:
+                probs = torch.full_like(probs, 1.0 / max(1, int(probs.numel())))
+            else:
+                probs = probs / prob_sum
             q_emb = q_embs[idx_i : idx_i + 1]
-            expected_verdict = float((probs * self._h_scores).sum().item())
-            gold_prob = float(probs[self.task.gold_index].item())
+            expected_verdict = _clean_float((probs * self._h_scores).sum().item(), 0.0, 0.0, 1.0)
+            gold_prob = _clean_float(probs[self.task.gold_index].item(), 0.0, 0.0, 1.0)
             best_rollout_idx = int(probs.argmax().item())
-            picked_verdict = float(self._h_scores[best_rollout_idx].item())
+            picked_verdict = _clean_float(self._h_scores[best_rollout_idx].item(), 0.0, 0.0, 1.0)
 
-            ded_entailed = float(op_out.deduction_probs[idx_i, 0].item())
-            ded_contradicted = float(op_out.deduction_probs[idx_i, 1].item())
-            meta_confidence = float(op_out.metacognition_probs[idx_i, 0].item())
-            vetoed = (ded_contradicted > 0.55) or (meta_confidence < 0.35)
-            utility = float(ref_utils_all[idx_i, best_rollout_idx].clamp(0.0, 1.0).item())
+            ded_entailed = _clean_float(ded_probs_all[idx_i, 0].item(), 0.33, 0.0, 1.0)
+            ded_contradicted = _clean_float(ded_probs_all[idx_i, 1].item(), 0.33, 0.0, 1.0)
+            meta_confidence = _clean_float(meta_probs_all[idx_i, 0].item(), 0.5, 0.0, 1.0)
+            vetoed = bool((ded_contradicted > 0.55) or (meta_confidence < 0.35))
+            utility = _clean_float(ref_utils_all[idx_i, best_rollout_idx].item(), 0.5, 0.0, 1.0)
 
             if not self._node_embeddings:
                 novelty = 1.0
             else:
                 prev_stack = torch.cat(self._node_embeddings, dim=0)
-                sims = pearson_similarity(q_emb.expand_as(prev_stack), prev_stack)
-                novelty = float((1.0 - sims.max().clamp(-1.0, 1.0)).clamp(0.0, 2.0).item())
+                sims = torch.nan_to_num(
+                    pearson_similarity(q_emb.expand_as(prev_stack), prev_stack),
+                    nan=0.0,
+                    posinf=1.0,
+                    neginf=-1.0,
+                )
+                novelty = _clean_float(1.0 - float(sims.max().item()), 1.0, 0.0, 2.0)
             self._node_embeddings.append(q_emb.detach())
 
             depth_bonus = min(0.08, 0.025 * depth) if not vetoed else -0.05
@@ -1503,14 +1546,14 @@ class MCL4DreamDiscovery:
                 + 0.10 * gold_prob
                 + depth_bonus
             )
-            score = round(max(0.0, min(1.0, raw_score)), 5)
-            task_stars = max(0.5, float(getattr(self.task, "star_difficulty", 1.0)))
+            score = round(_clean_float(raw_score, 0.0, 0.0, 1.0), 5)
+            task_stars = _clean_float(getattr(self.task, "star_difficulty", 1.0), 1.0, 0.5, 1e6)
             task_rec = max(1, int(getattr(self.task, "recursion_depth", 1)))
-            raw_pp_val = round(100.0 * (task_stars ** 1.15) * score, 4)
+            raw_pp_val = round(_clean_float(100.0 * (task_stars ** 1.15) * score, 0.0, 0.0, 1e12), 4)
             higher_in_view = sum(1 for n in view.nodes[1:] if n.score > score + 1e-7)
             pp_rank = higher_in_view + 1 + idx_i
-            pp_weighted_val = round(raw_pp_val * (0.95 ** (pp_rank - 1)), 4)
-            rec_prog = round(min(1.0, float(depth + 1) / float(task_rec)) * expected_verdict, 5)
+            pp_weighted_val = round(_clean_float(raw_pp_val * (0.95 ** (pp_rank - 1)), 0.0, 0.0, 1e12), 4)
+            rec_prog = round(_clean_float(min(1.0, float(depth + 1) / float(task_rec)) * expected_verdict, 0.0, 0.0, 1.0), 5)
             observation = {
                 "node_id": node_id,
                 "parent_id": pid,

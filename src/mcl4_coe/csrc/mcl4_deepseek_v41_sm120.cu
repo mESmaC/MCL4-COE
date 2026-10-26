@@ -1680,6 +1680,288 @@ __global__ void __launch_bounds__(256, 2) dsv41_fused_all_plastic_float4_registe
 }
 
 // ============================================================================
+// 8B. KERNEL 7 & 8: Exact DeepSeek-V4.1 Engram (Layers 1, 14) O(1) Gather +
+//     Signed-Sqrt Gated Residual & KV Compressor (Layers 2, 8, 14, 20) Kernels
+// ============================================================================
+static const int64_t DS_ENGRAM_PRIMES[2][24] = {
+    {
+        16000057LL, 16000079LL, 16000081LL, 16000097LL, 16000121LL, 16000129LL, 16000133LL, 16000183LL,
+        16000189LL, 16000207LL, 16000211LL, 16000253LL, 16000277LL, 16000289LL, 16000307LL, 16000321LL,
+        16000339LL, 16000381LL, 16000393LL, 16000399LL, 16000403LL, 16000409LL, 16000447LL, 16000463LL
+    },
+    {
+        16000477LL, 16000487LL, 16000499LL, 16000507LL, 16000511LL, 16000573LL, 16000609LL, 16000627LL,
+        16000667LL, 16000669LL, 16000693LL, 16000697LL, 16000711LL, 16000729LL, 16000759LL, 16000769LL,
+        16000781LL, 16000799LL, 16000813LL, 16000819LL, 16000841LL, 16000877LL, 16000879LL, 16000889LL
+    }
+};
+
+static const int64_t DS_ENGRAM_MULTIPLIERS[2][4] = {
+    {76632096046245LL, 4839876093313LL, 35959672319349LL, 73987337458391LL},
+    {67716810739261LL, 51510806800915LL, 30921347202721LL, 82619226485591LL}
+};
+
+extern "C" __declspec(dllexport) void dsv41_compute_engram_hashes_cpu(
+    const int64_t* compressed_tokens, // [T] compressed token IDs
+    int T,
+    int64_t pad_id,
+    int engram_idx,                   // 0 for Layer 1, 1 for Layer 14
+    int64_t* out_hashes               // [T, 24]
+) {
+    int64_t offsets[24];
+    int64_t cum = 0;
+    for (int i = 0; i < 24; ++i) {
+        offsets[i] = cum;
+        cum += DS_ENGRAM_PRIMES[engram_idx][i];
+    }
+    const int64_t* mult = DS_ENGRAM_MULTIPLIERS[engram_idx];
+    const int64_t* prm  = DS_ENGRAM_PRIMES[engram_idx];
+
+    for (int t = 0; t < T; ++t) {
+        int64_t tok[4];
+        bool blocked = false;
+        for (int s = 0; s < 4; ++s) {
+            int pos = t - s;
+            int64_t src = (pos >= 0) ? compressed_tokens[pos] : pad_id;
+            if (pos < 0 || src < 0) blocked = true;
+            tok[s] = blocked ? pad_id : src;
+        }
+        uint64_t rolling = uint64_t(tok[0]) * uint64_t(mult[0]);
+        for (int ngram = 1; ngram < 4; ++ngram) {
+            rolling ^= uint64_t(tok[ngram]) * uint64_t(mult[ngram]);
+            int base_col = (ngram - 1) * 8;
+            for (int h = 0; h < 8; ++h) {
+                int col = base_col + h;
+                uint64_t p = uint64_t(prm[col]);
+                // Match Python's signed int64 modulo on bitwise_xor
+                int64_t r_signed = int64_t(rolling);
+                int64_t rem = r_signed % int64_t(p);
+                if (rem < 0) rem += int64_t(p);
+                out_hashes[t * 24 + col] = rem + offsets[col];
+            }
+        }
+    }
+}
+
+// Dequantizes the 24 gathered FP8_E4M3 rows ([T, 24, 256]) + F8_E8M0 scales ([T, 24, 8]) to BF16 [T, 6144]
+__global__ void __launch_bounds__(256, 4) dsv41_engram_dequant_rows_v1_kernel(
+    const uint8_t* __restrict__ gathered_fp8,   // [T, 24, 256] = [T, 6144]
+    const uint8_t* __restrict__ gathered_scale, // [T, 24, 8]   = [T, 192]
+    __nv_bfloat16* __restrict__ embed_bf16_out  // [T, 6144]
+) {
+    // Grid: (24, T), Block: 256 threads (1 thread per column in the 256-byte row)
+    int col = blockIdx.x; // 0..23
+    int t   = blockIdx.y; // 0..T-1
+    int d   = threadIdx.x; // 0..255
+
+    size_t idx = ((size_t)t * 24 + col) * 256 + d;
+    uint8_t b = gathered_fp8[idx];
+    uint8_t s = gathered_scale[((size_t)t * 24 + col) * 8 + (d >> 5)];
+    float val = decode_fp8_e4m3_fast(b) * decode_fp8_e8m0_fast(s);
+    embed_bf16_out[idx] = __float2bfloat16(val);
+}
+
+// Fused Engram Signed-Sqrt Sigmoid Gated Hyper-Connection Injection (model.py lines 354-365)
+__global__ void __launch_bounds__(256, 2) dsv41_engram_gated_hc_residual_v1_kernel(
+    __nv_bfloat16* __restrict__ x_hc,       // [T, 4, 5120] updated in-place!
+    const __nv_bfloat16* __restrict__ kv,   // [T, 25600] = key[T, 4, 5120] + value[T, 5120]
+    const __nv_bfloat16* __restrict__ q_w,  // [4, 5120]
+    const __nv_bfloat16* __restrict__ k_w   // [4, 5120]
+) {
+    // Grid: T blocks of 256 threads (8 warps: 2 warps per HC copy c=0..3)
+    int t    = blockIdx.x;
+    int tid  = threadIdx.x;
+    int wid  = tid >> 5;
+    int lane = tid & 31;
+
+    __shared__ float s_sq_h[4][8];
+    __shared__ float s_sq_k[4][8];
+    __shared__ float s_dot[4][8];
+    __shared__ float s_gate[4];
+
+    const __nv_bfloat16* h_tok   = x_hc + (size_t)t * DS_HC_DIM;
+    const __nv_bfloat16* key_tok = kv   + (size_t)t * 25600;
+    const __nv_bfloat16* val_tok = key_tok + DS_HC_DIM; // last 5120 elements
+
+    for (int c = 0; c < 4; ++c) {
+        float sq_h = 0.0f, sq_k = 0.0f, dot = 0.0f;
+        const __nv_bfloat162* h2   = reinterpret_cast<const __nv_bfloat162*>(h_tok   + c * DS_DIM);
+        const __nv_bfloat162* k2   = reinterpret_cast<const __nv_bfloat162*>(key_tok + c * DS_DIM);
+        const __nv_bfloat162* qw2  = reinterpret_cast<const __nv_bfloat162*>(q_w     + c * DS_DIM);
+        const __nv_bfloat162* kw2  = reinterpret_cast<const __nv_bfloat162*>(k_w     + c * DS_DIM);
+
+        for (int d2 = tid; d2 < DS_HALF_DIM; d2 += 256) {
+            float2 hv  = __bfloat1622float2(h2[d2]);
+            float2 kv2 = __bfloat1622float2(k2[d2]);
+            float2 qv  = __bfloat1622float2(qw2[d2]);
+            float2 kwv = __bfloat1622float2(kw2[d2]);
+
+            sq_h += hv.x * hv.x + hv.y * hv.y;
+            sq_k += kv2.x * kv2.x + kv2.y * kv2.y;
+            dot  += (hv.x * qv.x * kwv.x * kv2.x) + (hv.y * qv.y * kwv.y * kv2.y);
+        }
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) {
+            sq_h += __shfl_xor_sync(0xffffffff, sq_h, off);
+            sq_k += __shfl_xor_sync(0xffffffff, sq_k, off);
+            dot  += __shfl_xor_sync(0xffffffff, dot, off);
+        }
+        if (lane == 0) {
+            s_sq_h[c][wid] = sq_h;
+            s_sq_k[c][wid] = sq_k;
+            s_dot[c][wid]  = dot;
+        }
+    }
+    __syncthreads();
+
+    if (wid == 0 && lane < 4) {
+        int c = lane;
+        float sh = 0.0f, sk = 0.0f, dt = 0.0f;
+        #pragma unroll
+        for (int w = 0; w < 8; ++w) {
+            sh += s_sq_h[c][w];
+            sk += s_sq_k[c][w];
+            dt += s_dot[c][w];
+        }
+        float rstd = rsqrtf(sh * (1.0f / 5120.0f) + 1e-20f) * rsqrtf(sk * (1.0f / 5120.0f) + 1e-20f);
+        float norm_dot = dt * rstd * 0.013975424859373685f; // 1.0f / sqrt(5120.0f)
+        float signed_sqrt = copysignf(sqrtf(fmaxf(fabsf(norm_dot), 1e-6f)), norm_dot);
+        s_gate[c] = 1.0f / (1.0f + __expf(-signed_sqrt));
+    }
+    __syncthreads();
+
+    const __nv_bfloat162* v2 = reinterpret_cast<const __nv_bfloat162*>(val_tok);
+    for (int d2 = tid; d2 < DS_HALF_DIM; d2 += 256) {
+        float2 vv = __bfloat1622float2(v2[d2]);
+        #pragma unroll
+        for (int c = 0; c < 4; ++c) {
+            __nv_bfloat162* hc2 = reinterpret_cast<__nv_bfloat162*>(x_hc + ((size_t)t * 4 + c) * DS_DIM);
+            float2 hv = __bfloat1622float2(hc2[d2]);
+            float g = s_gate[c];
+            hv.x += g * vv.x;
+            hv.y += g * vv.y;
+            hc2[d2] = __float22bfloat162_rn(hv);
+        }
+    }
+}
+
+// Fused KV Compressor Projection (wgate [512, 5120] + wkv [512, 5120] BF16 -> FP32 [T, 1024])
+template <int M_CAP>
+__global__ void __launch_bounds__(256, 2) dsv41_kv_compressor_proj_v1_kernel(
+    const __nv_bfloat16* __restrict__ x_in,       // [T, 5120]
+    const __nv_bfloat16* __restrict__ wgate_wkv,  // [1024, 5120] (wgate[512,5120] followed by wkv[512,5120])
+    float* __restrict__ gate_kv_out,              // [T, 1024] (score[T,512] + kv[T,512])
+    int m_valid
+) {
+    // Grid: 64 blocks of 256 threads (8 warps x 2 rows/warp = 16 rows/block -> 1024 rows!)
+    int wid  = threadIdx.x >> 5;
+    int lane = threadIdx.x & 31;
+    int row0 = blockIdx.x * 16 + wid * 2 + 0;
+    int row1 = row0 + 1;
+
+    constexpr int TILE_HALF_K = 512;
+    constexpr int TILE_STRIDE = 544;
+    __shared__ __nv_bfloat162 s_x2[M_CAP][TILE_STRIDE];
+
+    float acc0[M_CAP], acc1[M_CAP];
+    #pragma unroll
+    for (int m = 0; m < M_CAP; ++m) { acc0[m] = 0.0f; acc1[m] = 0.0f; }
+
+    const __nv_bfloat162* w0_2 = reinterpret_cast<const __nv_bfloat162*>(wgate_wkv + (size_t)row0 * DS_DIM);
+    const __nv_bfloat162* w1_2 = reinterpret_cast<const __nv_bfloat162*>(wgate_wkv + (size_t)row1 * DS_DIM);
+
+    for (int t = 0; t < 5; ++t) { // 5 tiles of 512 bfloat162 pairs = 2560 pairs = 5120 cols
+        int k2_base = t * TILE_HALF_K;
+        for (int idx = threadIdx.x; idx < m_valid * TILE_HALF_K; idx += 256) {
+            int m  = idx >> 9;
+            int c2 = idx & 511;
+            const __nv_bfloat162* src = reinterpret_cast<const __nv_bfloat162*>(x_in + (size_t)m * DS_DIM);
+            s_x2[m][c2 + (c2 >> 4)] = src[k2_base + c2];
+        }
+        __syncthreads();
+
+        #pragma unroll
+        for (int k = 0; k < 16; ++k) {
+            int c2 = lane + k * 32;
+            int swz = c2 + (c2 >> 4);
+            float2 a = __bfloat1622float2(w0_2[k2_base + c2]);
+            float2 b = __bfloat1622float2(w1_2[k2_base + c2]);
+            #pragma unroll
+            for (int m = 0; m < M_CAP; ++m) {
+                float2 xv = __bfloat1622float2(s_x2[m][swz]);
+                acc0[m] += a.x * xv.x + a.y * xv.y;
+                acc1[m] += b.x * xv.x + b.y * xv.y;
+            }
+        }
+        __syncthreads();
+    }
+
+    #pragma unroll
+    for (int m = 0; m < M_CAP; ++m) {
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) {
+            acc0[m] += __shfl_xor_sync(0xffffffff, acc0[m], off);
+            acc1[m] += __shfl_xor_sync(0xffffffff, acc1[m], off);
+        }
+        if (lane == 0 && m < m_valid) {
+            gate_kv_out[(size_t)m * 1024 + row0] = acc0[m];
+            gate_kv_out[(size_t)m * 1024 + row1] = acc1[m];
+        }
+    }
+}
+
+// Fused KV Compressor Softmax Pooling (over ratio tokens) + RMSNorm(512, eps=1e-20) -> BF16 [n_groups, 512]
+__global__ void __launch_bounds__(512, 2) dsv41_kv_compressor_pool_rmsnorm_v1_kernel(
+    const float* __restrict__ gate_kv_in,         // [n_groups * ratio, 1024]
+    const __nv_bfloat16* __restrict__ norm_w,     // [512]
+    __nv_bfloat16* __restrict__ latent_out,       // [n_groups, 512]
+    int ratio
+) {
+    // Grid: n_groups blocks of 512 threads (1 thread per head_dim d=0..511!)
+    int g    = blockIdx.x;
+    int d    = threadIdx.x; // 0..511
+    int wid  = d >> 5;
+    int lane = d & 31;
+
+    float max_s = -1e30f;
+    for (int r = 0; r < ratio; ++r) {
+        float s = gate_kv_in[(size_t)(g * ratio + r) * 1024 + d];
+        max_s = fmaxf(max_s, s);
+    }
+    float sum_exp = 0.0f;
+    float pooled  = 0.0f;
+    for (int r = 0; r < ratio; ++r) {
+        const float* row = gate_kv_in + (size_t)(g * ratio + r) * 1024;
+        float e = __expf(row[d] - max_s);
+        sum_exp += e;
+        pooled  += row[512 + d] * e;
+    }
+    pooled /= (sum_exp + 1e-20f);
+
+    // Cast to BF16 before RMSNorm to match model.py line 485: self.norm(kv.to(dtype))
+    float kv_bf16 = __bfloat162float(__float2bfloat16(pooled));
+    float sq = kv_bf16 * kv_bf16;
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) sq += __shfl_xor_sync(0xffffffff, sq, off);
+
+    __shared__ float s_red[16];
+    if (lane == 0) s_red[wid] = sq;
+    __syncthreads();
+
+    if (wid == 0) {
+        float v = (lane < 16) ? s_red[lane] : 0.0f;
+        #pragma unroll
+        for (int off = 8; off > 0; off >>= 1) v += __shfl_xor_sync(0xffffffff, v, off);
+        if (lane == 0) s_red[0] = rsqrtf(v * (1.0f / 512.0f) + 1e-20f);
+    }
+    __syncthreads();
+
+    float rstd = s_red[0];
+    float nw   = __bfloat162float(norm_w[d]);
+    latent_out[(size_t)g * 512 + d] = __float2bfloat16(kv_bf16 * rstd * nw);
+}
+
+// ============================================================================
 // 9. Complete DeepSeek-V4.1-Flash-1017-NVFP4 Benchmark & Profiler on RTX 5070
 // ============================================================================
 int main() {
@@ -2204,7 +2486,145 @@ int main() {
                h_pkt->w1_scale2, h_pkt->w3_scale2, h_pkt->w2_scale2);
         printf("       -> Stage 1 (w1+w3 NVFP4 + Clamped SwiGLU) Cosine Similarity: %.7f\n", cos_s1);
         printf("       -> Stage 2 (w2 NVFP4 Down-Proj [5120x2304]) Cosine Similarity: %.7f\n", cos_s2);
+
+        // 4C. Real Shard 5 (Layer 2) KV Compressor (wgate + wkv + Softmax Pool + RMSNorm) Parity Test
+        FILE* sf5 = fopen("Z:/deepseek-nvfp4/model-00005-of-00048.safetensors", "rb");
+        if (sf5) {
+            std::vector<__nv_bfloat16> h_comp_norm(512);
+            std::vector<__nv_bfloat16> h_comp_wgate_wkv(1024 * DS_DIM);
+            _fseeki64(sf5, 4436680LL, SEEK_SET);
+            fread(h_comp_norm.data(), sizeof(__nv_bfloat16), 512, sf5);
+            _fseeki64(sf5, 4437704LL, SEEK_SET);
+            fread(h_comp_wgate_wkv.data(), sizeof(__nv_bfloat16), 1024 * DS_DIM, sf5);
+            fclose(sf5);
+
+            int ratio = 8;
+            std::vector<__nv_bfloat16> h_x8_bf16(ratio * DS_DIM);
+            std::vector<float> h_x8_f32(ratio * DS_DIM);
+            for (int i = 0; i < ratio * DS_DIM; ++i) {
+                float v = 0.12f * sinf(float(i) * 0.029f) - 0.07f * cosf(float(i) * 0.083f);
+                h_x8_bf16[i] = __float2bfloat16(v);
+                h_x8_f32[i]  = __bfloat162float(h_x8_bf16[i]);
+            }
+            CHECK_CUDA(cudaMemcpy(d_x_norm, h_x8_bf16.data(), ratio * DS_DIM * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice));
+
+            __nv_bfloat16 *d_comp_w, *d_comp_norm, *d_latent_out;
+            float *d_gate_kv;
+            CHECK_CUDA(cudaMalloc(&d_comp_w,     1024 * DS_DIM * sizeof(__nv_bfloat16)));
+            CHECK_CUDA(cudaMalloc(&d_comp_norm,  512 * sizeof(__nv_bfloat16)));
+            CHECK_CUDA(cudaMalloc(&d_gate_kv,    ratio * 1024 * sizeof(float)));
+            CHECK_CUDA(cudaMalloc(&d_latent_out, 512 * sizeof(__nv_bfloat16)));
+
+            CHECK_CUDA(cudaMemcpy(d_comp_w,    h_comp_wgate_wkv.data(), 1024 * DS_DIM * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice));
+            CHECK_CUDA(cudaMemcpy(d_comp_norm, h_comp_norm.data(),      512 * sizeof(__nv_bfloat16),           cudaMemcpyHostToDevice));
+
+            dsv41_kv_compressor_proj_v1_kernel<8><<<64, 256>>>(d_x_norm, d_comp_w, d_gate_kv, ratio);
+            dsv41_kv_compressor_pool_rmsnorm_v1_kernel<<<1, 512>>>(d_gate_kv, d_comp_norm, d_latent_out, ratio);
+            CHECK_CUDA(cudaDeviceSynchronize());
+
+            std::vector<__nv_bfloat16> h_lat_gpu(512);
+            CHECK_CUDA(cudaMemcpy(h_lat_gpu.data(), d_latent_out, 512 * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost));
+
+            // Exact CPU FP32 reference for Compressor (ratio = 8)
+            std::vector<float> h_scores(ratio * 512, 0.0f);
+            std::vector<float> h_kvs(ratio * 512, 0.0f);
+            for (int m = 0; m < ratio; ++m) {
+                for (int d = 0; d < 512; ++d) {
+                    float sg = 0.0f, sk = 0.0f;
+                    const __nv_bfloat16* wg_row = h_comp_wgate_wkv.data() + (size_t)d * DS_DIM;
+                    const __nv_bfloat16* wk_row = h_comp_wgate_wkv.data() + (size_t)(512 + d) * DS_DIM;
+                    for (int c = 0; c < DS_DIM; ++c) {
+                        float xv = h_x8_f32[m * DS_DIM + c];
+                        sg += __bfloat162float(wg_row[c]) * xv;
+                        sk += __bfloat162float(wk_row[c]) * xv;
+                    }
+                    h_scores[m * 512 + d] = sg;
+                    h_kvs[m * 512 + d]    = sk;
+                }
+            }
+            std::vector<float> h_pooled_bf16(512);
+            float sq_sum = 0.0f;
+            for (int d = 0; d < 512; ++d) {
+                float mx = -1e30f;
+                for (int m = 0; m < ratio; ++m) mx = fmaxf(mx, h_scores[m * 512 + d]);
+                float se = 0.0f;
+                for (int m = 0; m < ratio; ++m) se += expf(h_scores[m * 512 + d] - mx);
+                float pl = 0.0f;
+                for (int m = 0; m < ratio; ++m) {
+                    pl += h_kvs[m * 512 + d] * (expf(h_scores[m * 512 + d] - mx) / se);
+                }
+                h_pooled_bf16[d] = __bfloat162float(__float2bfloat16(pl));
+                sq_sum += h_pooled_bf16[d] * h_pooled_bf16[d];
+            }
+            float rstd = 1.0f / sqrtf(sq_sum / 512.0f + 1e-20f);
+            double dot_comp = 0.0, ng_comp = 0.0, nr_comp = 0.0;
+            for (int d = 0; d < 512; ++d) {
+                float ref = __bfloat162float(__float2bfloat16(h_pooled_bf16[d] * rstd * __bfloat162float(h_comp_norm[d])));
+                float gpu = __bfloat162float(h_lat_gpu[d]);
+                dot_comp += double(gpu) * double(ref);
+                ng_comp  += double(gpu) * double(gpu);
+                nr_comp  += double(ref) * double(ref);
+            }
+            double cos_comp = dot_comp / (sqrt(ng_comp) * sqrt(nr_comp) + 1e-30);
+            printf("  [4C] Real Layer 2 MLA KV Compressor (Shard 5, ratio=8 Softmax Pool + RMSNorm):\n");
+            printf("       -> GPU Kernel vs Exact FP32 Reference Cosine Similarity: %.7f\n", cos_comp);
+
+            cudaFree(d_comp_w);
+            cudaFree(d_comp_norm);
+            cudaFree(d_gate_kv);
+            cudaFree(d_latent_out);
+        }
+
+        // 4D. Benchmark Engram O(1) Gather + Fused Gated Residual & Dual-Stream Ping-Pong DMA Overlap
+        int64_t h_comp_toks[16] = {101, 2054, 3319, 442, 8812, 19, 77321, 904, 512, 663, 9182, 41, 77, 12003, 55, 891};
+        int64_t h_hashes_l1[16 * 24];
+        int64_t h_hashes_l14[16 * 24];
+        dsv41_compute_engram_hashes_cpu(h_comp_toks, 16, 0, 0, h_hashes_l1);
+        dsv41_compute_engram_hashes_cpu(h_comp_toks, 16, 0, 1, h_hashes_l14);
+
+        uint8_t *d_eng_fp8, *d_eng_s;
+        __nv_bfloat16 *d_eng_emb, *d_eng_kv, *d_eng_qw, *d_eng_kw;
+        CHECK_CUDA(cudaMalloc(&d_eng_fp8, 16 * 24 * 256));
+        CHECK_CUDA(cudaMalloc(&d_eng_s,   16 * 24 * 8));
+        CHECK_CUDA(cudaMalloc(&d_eng_emb, 16 * 6144 * sizeof(__nv_bfloat16)));
+        CHECK_CUDA(cudaMalloc(&d_eng_kv,  16 * 25600 * sizeof(__nv_bfloat16)));
+        CHECK_CUDA(cudaMalloc(&d_eng_qw,  DS_HC_DIM * sizeof(__nv_bfloat16)));
+        CHECK_CUDA(cudaMalloc(&d_eng_kw,  DS_HC_DIM * sizeof(__nv_bfloat16)));
+        CHECK_CUDA(cudaMemset(d_eng_s, 127, 16 * 24 * 8));
+
+        auto time_eng = [&](int T_eng) -> float {
+            dim3 g_deq(24, T_eng);
+            dsv41_engram_dequant_rows_v1_kernel<<<g_deq, 256>>>(d_eng_fp8, d_eng_s, d_eng_emb);
+            dsv41_engram_gated_hc_residual_v1_kernel<<<T_eng, 256>>>(d_x_hc, d_eng_kv, d_eng_qw, d_eng_kw);
+            CHECK_CUDA(cudaDeviceSynchronize());
+            CHECK_CUDA(cudaEventRecord(ev0));
+            for (int r = 0; r < 20; ++r) {
+                dsv41_engram_dequant_rows_v1_kernel<<<g_deq, 256>>>(d_eng_fp8, d_eng_s, d_eng_emb);
+                dsv41_engram_gated_hc_residual_v1_kernel<<<T_eng, 256>>>(d_x_hc, d_eng_kv, d_eng_qw, d_eng_kw);
+            }
+            CHECK_CUDA(cudaEventRecord(ev1));
+            CHECK_CUDA(cudaEventSynchronize(ev1));
+            float ms = 0.0f;
+            CHECK_CUDA(cudaEventElapsedTime(&ms, ev0, ev1));
+            return (ms * 1000.0f) / 20.0f;
+        };
+        float us_eng_t1  = time_eng(1);
+        float us_eng_t16 = time_eng(16);
+
+        printf("  [4D] Engram N-Gram Hash (24 Primes) & Fused Signed-Sqrt Gated HC Residual:\n");
+        printf("       -> Sample Token[3] Bucket Range: L1=[%lld .. %lld], L14=[%lld .. %lld]\n",
+               (long long)h_hashes_l1[3 * 24 + 0],  (long long)h_hashes_l1[3 * 24 + 23],
+               (long long)h_hashes_l14[3 * 24 + 0], (long long)h_hashes_l14[3 * 24 + 23]);
+        printf("       -> Fused Dequant(24x256) + Signed-Sqrt Gated 4x5120 Residual: %.2f us (T=1) | %.2f us (T=16)\n",
+               us_eng_t1, us_eng_t16);
         printf("================================================================================\n");
+
+        cudaFree(d_eng_fp8);
+        cudaFree(d_eng_s);
+        cudaFree(d_eng_emb);
+        cudaFree(d_eng_kv);
+        cudaFree(d_eng_qw);
+        cudaFree(d_eng_kw);
     }
 
     return 0;

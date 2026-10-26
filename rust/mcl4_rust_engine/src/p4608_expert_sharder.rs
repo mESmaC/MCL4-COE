@@ -242,6 +242,161 @@ impl P4608DualDriveExpertStore {
         Ok((missing.len(), cached, dt_ms))
     }
 
+    /// Exact byte size of `SHARED.mcl4s` (`8,649 × 4096 = 35,426,304` bytes = `33.79 MiB`).
+    pub const SHARED_EXPERT_BYTES: usize = 35_426_304;
+    /// Exact byte size of `ATTN.mcl4a` (`31,426 × 4096 = 128,720,896` bytes = `122.76 MiB`).
+    pub const LAYER_ATTN_BYTES: usize = 128_720_896;
+
+    #[inline]
+    pub fn layer_shared_path(&self, layer: usize) -> PathBuf {
+        let root = if (layer & 1) == 0 {
+            &self.ctrl0_root
+        } else {
+            &self.ctrl1_root
+        };
+        root.join(format!("L{:02}", layer)).join("SHARED.mcl4s")
+    }
+
+    #[inline]
+    pub fn layer_attn_path(&self, layer: usize) -> PathBuf {
+        let root = if (layer & 1) == 0 {
+            &self.ctrl0_root
+        } else {
+            &self.ctrl1_root
+        };
+        root.join(format!("L{:02}", layer)).join("ATTN.mcl4a")
+    }
+
+    #[inline]
+    pub fn is_layer_shared_sharded(&self, layer: usize) -> bool {
+        let p = self.layer_shared_path(layer);
+        match fs::metadata(&p) {
+            Ok(m) => m.is_file() && m.len() == (Self::SHARED_EXPERT_BYTES as u64),
+            Err(_) => false,
+        }
+    }
+
+    #[inline]
+    pub fn is_layer_attn_sharded(&self, layer: usize) -> bool {
+        let p = self.layer_attn_path(layer);
+        match fs::metadata(&p) {
+            Ok(m) => m.is_file() && m.len() == (Self::LAYER_ATTN_BYTES as u64),
+            Err(_) => false,
+        }
+    }
+
+    pub fn write_layer_shared_shard(
+        &self,
+        index: &SafetensorsShardIndex,
+        layer: usize,
+    ) -> io::Result<PathBuf> {
+        let out_path = self.layer_shared_path(layer);
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut buf = vec![0u8; Self::SHARED_EXPERT_BYTES];
+        let pfx = format!("layers.{}.ffn.shared_experts", layer);
+        index.read_tensor_exact(&format!("{}.w1.weight", pfx), &mut buf[0..11_796_480])?;
+        index.read_tensor_exact(&format!("{}.w3.weight", pfx), &mut buf[11_796_480..23_592_960])?;
+        index.read_tensor_exact(&format!("{}.w2.weight", pfx), &mut buf[23_592_960..35_389_440])?;
+        index.read_tensor_exact(&format!("{}.w1.scale", pfx), &mut buf[35_389_440..35_400_960])?;
+        index.read_tensor_exact(&format!("{}.w3.scale", pfx), &mut buf[35_400_960..35_412_480])?;
+        index.read_tensor_exact(&format!("{}.w2.scale", pfx), &mut buf[35_412_480..35_424_000])?;
+
+        let mut f = File::create(&out_path)?;
+        f.write_all(&buf)?;
+        Ok(out_path)
+    }
+
+    pub fn write_layer_attn_shard(
+        &self,
+        index: &SafetensorsShardIndex,
+        layer: usize,
+    ) -> io::Result<PathBuf> {
+        let out_path = self.layer_attn_path(layer);
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut buf = vec![0u8; Self::LAYER_ATTN_BYTES];
+        let pfx = format!("layers.{}", layer);
+        let mut off = 0usize;
+        let mut read_into = |name: &str, len: usize, b: &mut [u8]| -> io::Result<()> {
+            index.read_tensor_exact(name, &mut b[off..off + len])?;
+            off += len;
+            Ok(())
+        };
+        read_into(&format!("{}.hc_attn_fn", pfx), 1_966_080, &mut buf)?;
+        read_into(&format!("{}.hc_attn_base", pfx), 96, &mut buf)?;
+        read_into(&format!("{}.hc_attn_scale", pfx), 12, &mut buf)?;
+        read_into(&format!("{}.attn_norm.weight", pfx), 10_240, &mut buf)?;
+        read_into(&format!("{}.attn.q_norm.weight", pfx), 2_560, &mut buf)?;
+        read_into(&format!("{}.attn.kv_norm.weight", pfx), 1_024, &mut buf)?;
+        read_into(&format!("{}.attn.attn_sink", pfx), 256, &mut buf)?;
+        read_into(&format!("{}.attn.wq_a.weight", pfx), 6_553_600, &mut buf)?;
+        read_into(&format!("{}.attn.wq_a.scale", pfx), 6_400, &mut buf)?;
+        read_into(&format!("{}.attn.wq_b.weight", pfx), 41_943_040, &mut buf)?;
+        read_into(&format!("{}.attn.wq_b.scale", pfx), 40_960, &mut buf)?;
+        read_into(&format!("{}.attn.wkv.weight", pfx), 2_621_440, &mut buf)?;
+        read_into(&format!("{}.attn.wkv.scale", pfx), 2_560, &mut buf)?;
+        read_into(&format!("{}.attn.wo_a.weight", pfx), 33_554_432, &mut buf)?;
+        read_into(&format!("{}.attn.wo_a.scale", pfx), 32_768, &mut buf)?;
+        read_into(&format!("{}.attn.wo_b.weight", pfx), 41_943_040, &mut buf)?;
+        read_into(&format!("{}.attn.wo_b.scale", pfx), 40_960, &mut buf)?;
+
+        let mut f = File::create(&out_path)?;
+        f.write_all(&buf)?;
+        Ok(out_path)
+    }
+
+    pub fn ensure_layers_shared_and_attn_sharded(
+        &self,
+        index: &Arc<SafetensorsShardIndex>,
+        layers: &[usize],
+    ) -> io::Result<(usize, usize, f64)> {
+        let t0 = Instant::now();
+        let mut missing_sh = Vec::new();
+        let mut missing_at = Vec::new();
+        let mut cached = 0usize;
+        for &l in layers {
+            if self.is_layer_shared_sharded(l) {
+                cached += 1;
+            } else {
+                missing_sh.push(l);
+            }
+            if self.is_layer_attn_sharded(l) {
+                cached += 1;
+            } else {
+                missing_at.push(l);
+            }
+        }
+        let new_cnt = missing_sh.len() + missing_at.len();
+        if new_cnt > 0 {
+            thread::scope(|s| -> io::Result<()> {
+                let mut handles = Vec::new();
+                for &l in &missing_sh {
+                    let idx_clone = Arc::clone(index);
+                    let store_ref = self;
+                    handles.push(s.spawn(move || -> io::Result<()> {
+                        store_ref.write_layer_shared_shard(&idx_clone, l).map(|_| ())
+                    }));
+                }
+                for &l in &missing_at {
+                    let idx_clone = Arc::clone(index);
+                    let store_ref = self;
+                    handles.push(s.spawn(move || -> io::Result<()> {
+                        store_ref.write_layer_attn_shard(&idx_clone, l).map(|_| ())
+                    }));
+                }
+                for h in handles {
+                    h.join().unwrap()?;
+                }
+                Ok(())
+            })?;
+        }
+        let dt_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        Ok((new_cnt, cached, dt_ms))
+    }
+
     /// Writes a single `Dsv41Mcl4cExpertPacket` (`19,910,656 B = 4,861 × 4096 B`) to its
     /// striped `.mcl4e` destination on `X:` or `Z:`.
     pub fn write_expert_shard(
@@ -344,14 +499,18 @@ impl P4608DualDriveExpertStore {
     ) -> io::Result<(usize, usize, f64)> {
         let t0 = Instant::now();
 
-        // 1. Ensure all layer META.mcl4m bundles exist across X: and Z:
+        // 1. Ensure all layer META.mcl4m, SHARED.mcl4s, and ATTN.mcl4a bundles exist across X: and Z:
         let (meta_new, meta_cached, meta_ms) = self.ensure_layers_meta_sharded(index, layers)?;
+        let (sa_new, sa_cached, sa_ms) = self.ensure_layers_shared_and_attn_sharded(index, layers)?;
         println!(
-            "    [P4608 META.mcl4m] Layers={}: new={}, cached={}, time={:.2} ms",
+            "    [P4608 META.mcl4m + SHARED.mcl4s + ATTN.mcl4a] Layers={}: meta(new={}, cached={}, {:.2} ms) | shared+attn(new={}, cached={}, {:.2} ms)",
             layers.len(),
             meta_new,
             meta_cached,
-            meta_ms
+            meta_ms,
+            sa_new,
+            sa_cached,
+            sa_ms
         );
 
         // 2. Interleave (layer, expert) pairs across layers so adjacent items in `missing`

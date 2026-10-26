@@ -273,6 +273,50 @@ __device__ __forceinline__ float dg_fast_rcp(float x) {
     return y;
 }
 
+// ============================================================================
+// 2B. cuda-rust (cuda-oxide / cute-rs / ctm-rs) SM120a Hardware PTX Primitives
+//     - cr_ex2_approx_f32 + cr_fast_silu_f32 (cute-rs/src/numeric.rs)
+//     - cr_pack_bf16x2_f32 (cuda-device/src/generated/convert.rs: cvt.rn.bf16x2.f32)
+//     - cr_mma_m16n8k16_f32_bf16 (cuda-device/src/wmma.rs: mma.sync.aligned.m16n8k16)
+// ============================================================================
+static constexpr float CR_LOG2_E = 1.4426950408889634f;
+
+__device__ __forceinline__ float cr_ex2_approx_f32(float x) {
+    float y;
+    asm volatile("ex2.approx.f32 %0, %1;" : "=f"(y) : "f"(x));
+    return y;
+}
+
+__device__ __forceinline__ float cr_fast_silu_f32(float x) {
+    float e = cr_ex2_approx_f32(-x * CR_LOG2_E);
+    return x * dg_fast_rcp(1.0f + e);
+}
+
+// Packs f0_lo into bits [0..15] and f1_hi into bits [16..31] using hardware cvt.rn.bf16x2.f32
+__device__ __forceinline__ uint32_t cr_pack_bf16x2_f32(float f0_lo, float f1_hi) {
+    uint32_t out;
+    asm volatile("cvt.rn.bf16x2.f32 %0, %1, %2;" : "=r"(out) : "f"(f1_hi), "f"(f0_lo));
+    return out;
+}
+
+// Warp-synchronous SM120a BF16 Tensor Core MMA: D[16, 8] = A[16, 16] * B[16, 8] + C[16, 8]
+// Exact fragment layout per cuda-oxide/crates/cuda-device/src/wmma.rs (group = lane/4, thread = lane%4)
+__device__ __forceinline__ void cr_mma_m16n8k16_f32_bf16(
+    float& d0, float& d1, float& d2, float& d3,
+    uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
+    uint32_t b0, uint32_t b1,
+    float c0, float c1, float c2, float c3
+) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
+        "{%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%10, %11, %12, %13};"
+        : "=f"(d0), "=f"(d1), "=f"(d2), "=f"(d3)
+        : "r"(a0), "r"(a1), "r"(a2), "r"(a3),
+          "r"(b0), "r"(b1),
+          "f"(c0), "f"(c1), "f"(c2), "f"(c3)
+    );
+}
+
 // DeepGEMM 5-comparator 4-element sorting network (sorts descending: s0 >= s1 >= s2 >= s3)
 __device__ __forceinline__ void dg_compare_swap(float& a_s, int& a_i, float& b_s, int& b_i) {
     if (b_s > a_s || (b_s == a_s && b_i < a_i)) {
@@ -638,97 +682,127 @@ __global__ void __launch_bounds__(256, 2) dsv41_fp8_e8m0_gemm_v1_kernel(
     int m_valid,
     int N_OUT
 ) {
-    // 256 threads = 8 warps -> 16 output rows per block (2 rows per warp)
-    int wid  = threadIdx.x >> 5;
-    int lane = threadIdx.x & 31;
-    int row0 = blockIdx.x * 16 + wid * 2 + 0;
-    int row1 = row0 + 1;
+    // v7 SM120a Tensor Core mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32:
+    // 256 threads = 8 warps -> 16 output rows per block (2 m16n8k16 tiles: rows 0..7 and rows 8..15)
+    int wid      = threadIdx.x >> 5;   // 0..7
+    int lane     = threadIdx.x & 31;   // 0..31
+    int group    = lane >> 2;          // 0..7
+    int thread   = lane & 3;           // 0..3
+    int row_base = blockIdx.x * 16;
+    int r0       = row_base + wid;
+    int r1       = row_base + 8 + wid;
 
-    constexpr int HALF_K = K_DIM / 2;
-    constexpr int TILE_HALF_K = 256; // 512 elements per K-tile
-    constexpr int TILE_STRIDE = 288; // 256 + (256 >> 3)
-    __shared__ __nv_bfloat162 s_x2[M_CAP][TILE_STRIDE];
+    __shared__ uint32_t s_A[16][132];  // 16 tokens x 128 bf16x2 pairs (256 BF16 cols) + 4 pad (8.25 KiB)
+    __shared__ uint32_t s_B0[8][132];  // rows 0..7 x 128 bf16x2 pairs (4.125 KiB)
+    __shared__ uint32_t s_B1[8][132];  // rows 8..15 x 128 bf16x2 pairs (4.125 KiB)
 
-    float acc0[M_CAP], acc1[M_CAP];
-    #pragma unroll
-    for (int m = 0; m < M_CAP; ++m) { acc0[m] = 0.0f; acc1[m] = 0.0f; }
+    const uint4* x_u4    = reinterpret_cast<const uint4*>(x_in);
+    const uint2* w0_u2   = (r0 < N_OUT) ? reinterpret_cast<const uint2*>(w_fp8 + (size_t)r0 * K_DIM) : nullptr;
+    const uint2* w1_u2   = (r1 < N_OUT) ? reinterpret_cast<const uint2*>(w_fp8 + (size_t)r1 * K_DIM) : nullptr;
+    const uint8_t* s_row = (row_base < N_OUT) ? (s_e8m0 + (size_t)(row_base >> 5) * (K_DIM >> 5)) : nullptr;
 
-    const __nv_bfloat162* x2_in = reinterpret_cast<const __nv_bfloat162*>(x_in);
-    const uint4* w0_u4 = (row0 < N_OUT) ? reinterpret_cast<const uint4*>(w_fp8 + (size_t)row0 * K_DIM) : nullptr;
-    const uint4* w1_u4 = (row1 < N_OUT) ? reinterpret_cast<const uint4*>(w_fp8 + (size_t)row1 * K_DIM) : nullptr;
-    const uint8_t* s0_row = (row0 < N_OUT) ? (s_e8m0 + (size_t)(row0 >> 5) * (K_DIM >> 5)) : nullptr;
+    float acc0_0 = 0.0f, acc0_1 = 0.0f, acc0_2 = 0.0f, acc0_3 = 0.0f;
+    float acc1_0 = 0.0f, acc1_1 = 0.0f, acc1_2 = 0.0f, acc1_3 = 0.0f;
 
-    constexpr int NUM_TILES = K_DIM / 512;
+    constexpr int NUM_TILES = K_DIM / 256;
     #pragma unroll 1
     for (int t = 0; t < NUM_TILES; ++t) {
-        int k2_base = t * TILE_HALF_K;
-        for (int idx = threadIdx.x; idx < m_valid * TILE_HALF_K; idx += 256) {
-            int m = idx >> 8;
-            int c = idx & 255;
-            s_x2[m][c + (c >> 3)] = x2_in[(size_t)m * HALF_K + k2_base + c];
+        // 1. Coalesced load of [16, 256] BF16 activations (2 uint4s per thread)
+        #pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            int idx  = threadIdx.x + i * 256; // 0..511
+            int m    = idx >> 5;              // 0..15
+            int c_u4 = idx & 31;              // 0..31 (32 uint4s = 256 BF16s)
+            uint4 xv = (m < m_valid) ? x_u4[(size_t)m * (K_DIM >> 3) + t * 32 + c_u4] : make_uint4(0, 0, 0, 0);
+            int c_a  = c_u4 * 4;
+            s_A[m][c_a + 0] = xv.x;
+            s_A[m][c_a + 1] = xv.y;
+            s_A[m][c_a + 2] = xv.z;
+            s_A[m][c_a + 3] = xv.w;
+        }
+
+        // 2. Coalesced 256B warp load of [16, 256] FP8 weights -> lossless BF16x2
+        if (r1 < N_OUT) {
+            int u2_idx = t * 32 + lane;
+            uint2 pk0  = w0_u2[u2_idx];
+            uint2 pk1  = w1_u2[u2_idx];
+            int c_b    = lane * 4;
+
+            s_B0[wid][c_b + 0] = cr_pack_bf16x2_f32(decode_fp8_e4m3_fast(pk0.x & 0xFF), decode_fp8_e4m3_fast((pk0.x >> 8) & 0xFF));
+            s_B0[wid][c_b + 1] = cr_pack_bf16x2_f32(decode_fp8_e4m3_fast((pk0.x >> 16) & 0xFF), decode_fp8_e4m3_fast((pk0.x >> 24) & 0xFF));
+            s_B0[wid][c_b + 2] = cr_pack_bf16x2_f32(decode_fp8_e4m3_fast(pk0.y & 0xFF), decode_fp8_e4m3_fast((pk0.y >> 8) & 0xFF));
+            s_B0[wid][c_b + 3] = cr_pack_bf16x2_f32(decode_fp8_e4m3_fast((pk0.y >> 16) & 0xFF), decode_fp8_e4m3_fast((pk0.y >> 24) & 0xFF));
+
+            s_B1[wid][c_b + 0] = cr_pack_bf16x2_f32(decode_fp8_e4m3_fast(pk1.x & 0xFF), decode_fp8_e4m3_fast((pk1.x >> 8) & 0xFF));
+            s_B1[wid][c_b + 1] = cr_pack_bf16x2_f32(decode_fp8_e4m3_fast((pk1.x >> 16) & 0xFF), decode_fp8_e4m3_fast((pk1.x >> 24) & 0xFF));
+            s_B1[wid][c_b + 2] = cr_pack_bf16x2_f32(decode_fp8_e4m3_fast(pk1.y & 0xFF), decode_fp8_e4m3_fast((pk1.y >> 8) & 0xFF));
+            s_B1[wid][c_b + 3] = cr_pack_bf16x2_f32(decode_fp8_e4m3_fast((pk1.y >> 16) & 0xFF), decode_fp8_e4m3_fast((pk1.y >> 24) & 0xFF));
         }
         __syncthreads();
 
-        if (row1 < N_OUT) {
-            int u4_idx = t * 32 + lane;
-            uint4 pk0 = dg_ld_l2_128b_u4(&w0_u4[u4_idx]);
-            uint4 pk1 = dg_ld_l2_128b_u4(&w1_u4[u4_idx]);
-            // Note: row0 and row1 (even, odd) always lie in the SAME 32-row E8M0 block (row0 >> 5 == row1 >> 5)!
-            float blk_scale = decode_fp8_e8m0_fast(s0_row[u4_idx >> 1]);
+        // 3. Warp wid executes 2 k16 Tensor Core steps (32 K-cols = 1 exact E8M0 block: t * 8 + wid)
+        float sub0_0 = 0.0f, sub0_1 = 0.0f, sub0_2 = 0.0f, sub0_3 = 0.0f;
+        float sub1_0 = 0.0f, sub1_1 = 0.0f, sub1_2 = 0.0f, sub1_3 = 0.0f;
+        #pragma unroll
+        for (int sub = 0; sub < 2; ++sub) {
+            int c_base  = (wid * 2 + sub) * 8;
+            uint32_t a0 = s_A[group    ][c_base + thread];
+            uint32_t a1 = s_A[group + 8][c_base + thread];
+            uint32_t a2 = s_A[group    ][c_base + thread + 4];
+            uint32_t a3 = s_A[group + 8][c_base + thread + 4];
 
-            uint32_t words0[4] = {pk0.x, pk0.y, pk0.z, pk0.w};
-            uint32_t words1[4] = {pk1.x, pk1.y, pk1.z, pk1.w};
-            int swz_base = lane * 9;
+            uint32_t b0_0 = s_B0[group][c_base + thread];
+            uint32_t b0_1 = s_B0[group][c_base + thread + 4];
+            cr_mma_m16n8k16_f32_bf16(sub0_0, sub0_1, sub0_2, sub0_3, a0, a1, a2, a3, b0_0, b0_1, sub0_0, sub0_1, sub0_2, sub0_3);
 
-            float sub0[M_CAP], sub1[M_CAP];
-            #pragma unroll
-            for (int m = 0; m < M_CAP; ++m) { sub0[m] = 0.0f; sub1[m] = 0.0f; }
-
-            #pragma unroll
-            for (int w = 0; w < 4; ++w) {
-                uint32_t p0 = words0[w];
-                uint32_t p1 = words1[w];
-                float a0 = decode_fp8_e4m3_fast(p0 & 0xFF);
-                float a1 = decode_fp8_e4m3_fast((p0 >> 8) & 0xFF);
-                float a2 = decode_fp8_e4m3_fast((p0 >> 16) & 0xFF);
-                float a3 = decode_fp8_e4m3_fast((p0 >> 24) & 0xFF);
-
-                float b0 = decode_fp8_e4m3_fast(p1 & 0xFF);
-                float b1 = decode_fp8_e4m3_fast((p1 >> 8) & 0xFF);
-                float b2 = decode_fp8_e4m3_fast((p1 >> 16) & 0xFF);
-                float b3 = decode_fp8_e4m3_fast((p1 >> 24) & 0xFF);
-
-                int c2_0 = swz_base + w * 2 + 0;
-                int c2_1 = swz_base + w * 2 + 1;
-
-                #pragma unroll
-                for (int m = 0; m < M_CAP; ++m) {
-                    float2 x01 = __bfloat1622float2(s_x2[m][c2_0]);
-                    float2 x23 = __bfloat1622float2(s_x2[m][c2_1]);
-                    sub0[m] += a0 * x01.x + a1 * x01.y + a2 * x23.x + a3 * x23.y;
-                    sub1[m] += b0 * x01.x + b1 * x01.y + b2 * x23.x + b3 * x23.y;
-                }
-            }
-            #pragma unroll
-            for (int m = 0; m < M_CAP; ++m) {
-                acc0[m] += sub0[m] * blk_scale;
-                acc1[m] += sub1[m] * blk_scale;
-            }
+            uint32_t b1_0 = s_B1[group][c_base + thread];
+            uint32_t b1_1 = s_B1[group][c_base + thread + 4];
+            cr_mma_m16n8k16_f32_bf16(sub1_0, sub1_1, sub1_2, sub1_3, a0, a1, a2, a3, b1_0, b1_1, sub1_0, sub1_1, sub1_2, sub1_3);
+        }
+        if (r1 < N_OUT) {
+            float blk_scale = decode_fp8_e8m0_fast(s_row[t * 8 + wid]);
+            acc0_0 += sub0_0 * blk_scale;
+            acc0_1 += sub0_1 * blk_scale;
+            acc0_2 += sub0_2 * blk_scale;
+            acc0_3 += sub0_3 * blk_scale;
+            acc1_0 += sub1_0 * blk_scale;
+            acc1_1 += sub1_1 * blk_scale;
+            acc1_2 += sub1_2 * blk_scale;
+            acc1_3 += sub1_3 * blk_scale;
         }
         __syncthreads();
     }
 
-    if (row1 < N_OUT) {
+    float (*s_red)[8][32][4] = reinterpret_cast<float (*)[8][32][4]>(&s_A[0][0]);
+    s_red[0][wid][lane][0] = acc0_0;
+    s_red[0][wid][lane][1] = acc0_1;
+    s_red[0][wid][lane][2] = acc0_2;
+    s_red[0][wid][lane][3] = acc0_3;
+    s_red[1][wid][lane][0] = acc1_0;
+    s_red[1][wid][lane][1] = acc1_1;
+    s_red[1][wid][lane][2] = acc1_2;
+    s_red[1][wid][lane][3] = acc1_3;
+    __syncthreads();
+
+    if (wid < 2) {
+        float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
         #pragma unroll
-        for (int m = 0; m < M_CAP; ++m) {
-            #pragma unroll
-            for (int off = 16; off > 0; off >>= 1) {
-                acc0[m] += __shfl_xor_sync(0xffffffff, acc0[m], off);
-                acc1[m] += __shfl_xor_sync(0xffffffff, acc1[m], off);
+        for (int w = 0; w < 8; ++w) {
+            sum0 += s_red[wid][w][lane][0];
+            sum1 += s_red[wid][w][lane][1];
+            sum2 += s_red[wid][w][lane][2];
+            sum3 += s_red[wid][w][lane][3];
+        }
+        int out_c0 = row_base + wid * 8 + thread * 2 + 0;
+        int out_c1 = row_base + wid * 8 + thread * 2 + 1;
+        if (out_c1 < N_OUT) {
+            if (group < m_valid) {
+                y_out[(size_t)group * N_OUT + out_c0] = __float2bfloat16(sum0);
+                y_out[(size_t)group * N_OUT + out_c1] = __float2bfloat16(sum1);
             }
-            if (lane == 0 && m < m_valid) {
-                y_out[(size_t)m * N_OUT + row0] = __float2bfloat16(acc0[m]);
-                y_out[(size_t)m * N_OUT + row1] = __float2bfloat16(acc1[m]);
+            if (group + 8 < m_valid) {
+                y_out[(size_t)(group + 8) * N_OUT + out_c0] = __float2bfloat16(sum2);
+                y_out[(size_t)(group + 8) * N_OUT + out_c1] = __float2bfloat16(sum3);
             }
         }
     }
@@ -1065,93 +1139,128 @@ __global__ void __launch_bounds__(256, 2) dsv41_fused_mla_grouped_wo_a_v1_kernel
     __nv_bfloat16* __restrict__ o_lora_out, // [T, 8192]
     int m_valid
 ) {
+    // v7 SM120a Tensor Core mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32:
     // Grid: (64, 8) -> blockIdx.x = 0..63 (16 rows/block = 1024 rows/group), blockIdx.y = group 0..7
-    int wid  = threadIdx.x >> 5;
-    int lane = threadIdx.x & 31;
-    int grp  = blockIdx.y; // 0..7
-    int r_in_grp0 = blockIdx.x * 16 + wid * 2 + 0; // 0..1022
-    int row0 = grp * DS_O_LORA_RANK + r_in_grp0;
-    int row1 = row0 + 1;
+    int wid      = threadIdx.x >> 5;   // 0..7
+    int lane     = threadIdx.x & 31;   // 0..31
+    int group    = lane >> 2;          // 0..7
+    int thread   = lane & 3;           // 0..3
+    int grp      = blockIdx.y;         // 0..7
+    int r_in_grp = blockIdx.x * 16;    // 0..1008
+    int row_base = grp * DS_O_LORA_RANK + r_in_grp;
+    int r0       = row_base + wid;
+    int r1       = row_base + 8 + wid;
 
-    constexpr int TILE_HALF_K = 256;
-    constexpr int TILE_STRIDE = 288;
-    __shared__ __nv_bfloat162 s_o2[M_CAP][TILE_STRIDE];
+    __shared__ uint32_t s_A[16][132];  // 16 tokens x 128 bf16x2 pairs (256 BF16 cols) + 4 pad (8.25 KiB)
+    __shared__ uint32_t s_B0[8][132];  // rows 0..7 x 128 bf16x2 pairs (4.125 KiB)
+    __shared__ uint32_t s_B1[8][132];  // rows 8..15 x 128 bf16x2 pairs (4.125 KiB)
 
-    float acc0[M_CAP], acc1[M_CAP];
-    #pragma unroll
-    for (int m = 0; m < M_CAP; ++m) { acc0[m] = 0.0f; acc1[m] = 0.0f; }
+    const uint2* w0_u2   = reinterpret_cast<const uint2*>(wo_a_fp8 + (size_t)r0 * DS_GROUP_IN_DIM);
+    const uint2* w1_u2   = reinterpret_cast<const uint2*>(wo_a_fp8 + (size_t)r1 * DS_GROUP_IN_DIM);
+    const uint8_t* s_row = wo_a_s + (size_t)(row_base >> 5) * (DS_GROUP_IN_DIM >> 5);
 
-    const uint4* w0_u4  = reinterpret_cast<const uint4*>(wo_a_fp8 + (size_t)row0 * DS_GROUP_IN_DIM);
-    const uint4* w1_u4  = reinterpret_cast<const uint4*>(wo_a_fp8 + (size_t)row1 * DS_GROUP_IN_DIM);
-    const uint8_t* s_r  = wo_a_s + (size_t)(row0 >> 5) * (DS_GROUP_IN_DIM >> 5);
+    float acc0_0 = 0.0f, acc0_1 = 0.0f, acc0_2 = 0.0f, acc0_3 = 0.0f;
+    float acc1_0 = 0.0f, acc1_1 = 0.0f, acc1_2 = 0.0f, acc1_3 = 0.0f;
 
     #pragma unroll 1
-    for (int t = 0; t < 8; ++t) { // 4096 / 512 = 8 tiles
-        int k2_base = t * TILE_HALF_K;
-        for (int idx = threadIdx.x; idx < m_valid * TILE_HALF_K; idx += 256) {
-            int m = idx >> 8;
-            int c = idx & 255;
-            const __nv_bfloat162* src = reinterpret_cast<const __nv_bfloat162*>(
-                o_in + ((size_t)m * DS_O_GROUPS + grp) * DS_GROUP_IN_DIM
-            );
-            s_o2[m][c + (c >> 3)] = src[k2_base + c];
+    for (int t = 0; t < 16; ++t) { // 4096 / 256 = 16 tiles
+        // 1. Coalesced load of [16, 256] BF16 group activations (2 uint4s per thread)
+        #pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            int idx  = threadIdx.x + i * 256; // 0..511
+            int m    = idx >> 5;              // 0..15
+            int c_u4 = idx & 31;              // 0..31 (32 uint4s = 256 BF16s)
+            uint4 xv = make_uint4(0, 0, 0, 0);
+            if (m < m_valid) {
+                const uint4* src_u4 = reinterpret_cast<const uint4*>(
+                    o_in + ((size_t)m * DS_O_GROUPS + grp) * DS_GROUP_IN_DIM
+                );
+                xv = src_u4[t * 32 + c_u4];
+            }
+            int c_a = c_u4 * 4;
+            s_A[m][c_a + 0] = xv.x;
+            s_A[m][c_a + 1] = xv.y;
+            s_A[m][c_a + 2] = xv.z;
+            s_A[m][c_a + 3] = xv.w;
         }
+
+        // 2. Coalesced 256B warp load of [16, 256] FP8 weights -> lossless BF16x2
+        int u2_idx = t * 32 + lane;
+        uint2 pk0  = w0_u2[u2_idx];
+        uint2 pk1  = w1_u2[u2_idx];
+        int c_b    = lane * 4;
+
+        s_B0[wid][c_b + 0] = cr_pack_bf16x2_f32(decode_fp8_e4m3_fast(pk0.x & 0xFF), decode_fp8_e4m3_fast((pk0.x >> 8) & 0xFF));
+        s_B0[wid][c_b + 1] = cr_pack_bf16x2_f32(decode_fp8_e4m3_fast((pk0.x >> 16) & 0xFF), decode_fp8_e4m3_fast((pk0.x >> 24) & 0xFF));
+        s_B0[wid][c_b + 2] = cr_pack_bf16x2_f32(decode_fp8_e4m3_fast(pk0.y & 0xFF), decode_fp8_e4m3_fast((pk0.y >> 8) & 0xFF));
+        s_B0[wid][c_b + 3] = cr_pack_bf16x2_f32(decode_fp8_e4m3_fast((pk0.y >> 16) & 0xFF), decode_fp8_e4m3_fast((pk0.y >> 24) & 0xFF));
+
+        s_B1[wid][c_b + 0] = cr_pack_bf16x2_f32(decode_fp8_e4m3_fast(pk1.x & 0xFF), decode_fp8_e4m3_fast((pk1.x >> 8) & 0xFF));
+        s_B1[wid][c_b + 1] = cr_pack_bf16x2_f32(decode_fp8_e4m3_fast((pk1.x >> 16) & 0xFF), decode_fp8_e4m3_fast((pk1.x >> 24) & 0xFF));
+        s_B1[wid][c_b + 2] = cr_pack_bf16x2_f32(decode_fp8_e4m3_fast(pk1.y & 0xFF), decode_fp8_e4m3_fast((pk1.y >> 8) & 0xFF));
+        s_B1[wid][c_b + 3] = cr_pack_bf16x2_f32(decode_fp8_e4m3_fast((pk1.y >> 16) & 0xFF), decode_fp8_e4m3_fast((pk1.y >> 24) & 0xFF));
         __syncthreads();
 
-        int u4_idx = t * 32 + lane;
-        uint4 pk0 = dg_ld_l2_128b_u4(&w0_u4[u4_idx]);
-        uint4 pk1 = dg_ld_l2_128b_u4(&w1_u4[u4_idx]);
-        float blk_scale = decode_fp8_e8m0_fast(s_r[u4_idx >> 1]);
-        uint32_t words0[4] = {pk0.x, pk0.y, pk0.z, pk0.w};
-        uint32_t words1[4] = {pk1.x, pk1.y, pk1.z, pk1.w};
-        int swz_base = lane * 9;
-
-        float sub0[M_CAP], sub1[M_CAP];
+        // 3. Warp wid executes 2 k16 Tensor Core steps (32 K-cols = 1 exact E8M0 block: t * 8 + wid)
+        float sub0_0 = 0.0f, sub0_1 = 0.0f, sub0_2 = 0.0f, sub0_3 = 0.0f;
+        float sub1_0 = 0.0f, sub1_1 = 0.0f, sub1_2 = 0.0f, sub1_3 = 0.0f;
         #pragma unroll
-        for (int m = 0; m < M_CAP; ++m) { sub0[m] = 0.0f; sub1[m] = 0.0f; }
+        for (int sub = 0; sub < 2; ++sub) {
+            int c_base  = (wid * 2 + sub) * 8;
+            uint32_t a0 = s_A[group    ][c_base + thread];
+            uint32_t a1 = s_A[group + 8][c_base + thread];
+            uint32_t a2 = s_A[group    ][c_base + thread + 4];
+            uint32_t a3 = s_A[group + 8][c_base + thread + 4];
 
-        #pragma unroll
-        for (int w = 0; w < 4; ++w) {
-            uint32_t p0 = words0[w];
-            uint32_t p1 = words1[w];
-            float a0 = decode_fp8_e4m3_fast(p0 & 0xFF);
-            float a1 = decode_fp8_e4m3_fast((p0 >> 8) & 0xFF);
-            float a2 = decode_fp8_e4m3_fast((p0 >> 16) & 0xFF);
-            float a3 = decode_fp8_e4m3_fast((p0 >> 24) & 0xFF);
+            uint32_t b0_0 = s_B0[group][c_base + thread];
+            uint32_t b0_1 = s_B0[group][c_base + thread + 4];
+            cr_mma_m16n8k16_f32_bf16(sub0_0, sub0_1, sub0_2, sub0_3, a0, a1, a2, a3, b0_0, b0_1, sub0_0, sub0_1, sub0_2, sub0_3);
 
-            float b0 = decode_fp8_e4m3_fast(p1 & 0xFF);
-            float b1 = decode_fp8_e4m3_fast((p1 >> 8) & 0xFF);
-            float b2 = decode_fp8_e4m3_fast((p1 >> 16) & 0xFF);
-            float b3 = decode_fp8_e4m3_fast((p1 >> 24) & 0xFF);
-
-            int c2_0 = swz_base + w * 2 + 0;
-            int c2_1 = swz_base + w * 2 + 1;
-            #pragma unroll
-            for (int m = 0; m < M_CAP; ++m) {
-                float2 x01 = __bfloat1622float2(s_o2[m][c2_0]);
-                float2 x23 = __bfloat1622float2(s_o2[m][c2_1]);
-                sub0[m] += a0 * x01.x + a1 * x01.y + a2 * x23.x + a3 * x23.y;
-                sub1[m] += b0 * x01.x + b1 * x01.y + b2 * x23.x + b3 * x23.y;
-            }
+            uint32_t b1_0 = s_B1[group][c_base + thread];
+            uint32_t b1_1 = s_B1[group][c_base + thread + 4];
+            cr_mma_m16n8k16_f32_bf16(sub1_0, sub1_1, sub1_2, sub1_3, a0, a1, a2, a3, b1_0, b1_1, sub1_0, sub1_1, sub1_2, sub1_3);
         }
-        #pragma unroll
-        for (int m = 0; m < M_CAP; ++m) {
-            acc0[m] += sub0[m] * blk_scale;
-            acc1[m] += sub1[m] * blk_scale;
-        }
+        float blk_scale = decode_fp8_e8m0_fast(s_row[t * 8 + wid]);
+        acc0_0 += sub0_0 * blk_scale;
+        acc0_1 += sub0_1 * blk_scale;
+        acc0_2 += sub0_2 * blk_scale;
+        acc0_3 += sub0_3 * blk_scale;
+        acc1_0 += sub1_0 * blk_scale;
+        acc1_1 += sub1_1 * blk_scale;
+        acc1_2 += sub1_2 * blk_scale;
+        acc1_3 += sub1_3 * blk_scale;
         __syncthreads();
     }
 
-    #pragma unroll
-    for (int m = 0; m < M_CAP; ++m) {
+    float (*s_red)[8][32][4] = reinterpret_cast<float (*)[8][32][4]>(&s_A[0][0]);
+    s_red[0][wid][lane][0] = acc0_0;
+    s_red[0][wid][lane][1] = acc0_1;
+    s_red[0][wid][lane][2] = acc0_2;
+    s_red[0][wid][lane][3] = acc0_3;
+    s_red[1][wid][lane][0] = acc1_0;
+    s_red[1][wid][lane][1] = acc1_1;
+    s_red[1][wid][lane][2] = acc1_2;
+    s_red[1][wid][lane][3] = acc1_3;
+    __syncthreads();
+
+    if (wid < 2) {
+        float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
         #pragma unroll
-        for (int off = 16; off > 0; off >>= 1) {
-            acc0[m] += __shfl_xor_sync(0xffffffff, acc0[m], off);
-            acc1[m] += __shfl_xor_sync(0xffffffff, acc1[m], off);
+        for (int w = 0; w < 8; ++w) {
+            sum0 += s_red[wid][w][lane][0];
+            sum1 += s_red[wid][w][lane][1];
+            sum2 += s_red[wid][w][lane][2];
+            sum3 += s_red[wid][w][lane][3];
         }
-        if (lane == 0 && m < m_valid) {
-            o_lora_out[(size_t)m * DS_O_TOTAL_RANK + row0] = __float2bfloat16(acc0[m]);
-            o_lora_out[(size_t)m * DS_O_TOTAL_RANK + row1] = __float2bfloat16(acc1[m]);
+        int out_c0 = row_base + wid * 8 + thread * 2 + 0;
+        int out_c1 = row_base + wid * 8 + thread * 2 + 1;
+        if (group < m_valid) {
+            o_lora_out[(size_t)group * DS_O_TOTAL_RANK + out_c0] = __float2bfloat16(sum0);
+            o_lora_out[(size_t)group * DS_O_TOTAL_RANK + out_c1] = __float2bfloat16(sum1);
+        }
+        if (group + 8 < m_valid) {
+            o_lora_out[(size_t)(group + 8) * DS_O_TOTAL_RANK + out_c0] = __float2bfloat16(sum2);
+            o_lora_out[(size_t)(group + 8) * DS_O_TOTAL_RANK + out_c1] = __float2bfloat16(sum3);
         }
     }
 }
@@ -1450,11 +1559,11 @@ __global__ void __launch_bounds__(256, 1) dsv41_grouped_nvfp4_moe_stage1_2row_v2
         if (lane == 0 && m < m_valid) {
             float gate0 = fminf(acc_g0[m] * g_s2, 10.0f);
             float up0   = fminf(fmaxf(acc_u0[m] * u_s2, -10.0f), 10.0f);
-            float silu0 = gate0 / (1.0f + __expf(-gate0));
+            float silu0 = cr_fast_silu_f32(gate0);
 
             float gate1 = fminf(acc_g1[m] * g_s2, 10.0f);
             float up1   = fminf(fmaxf(acc_u1[m] * u_s2, -10.0f), 10.0f);
-            float silu1 = gate1 / (1.0f + __expf(-gate1));
+            float silu1 = cr_fast_silu_f32(gate1);
 
             size_t base_idx = ((size_t)g_idx * M_CAP + m) * DS_MOE_INTER;
             inter_buf[base_idx + row0] = silu0 * up0;
@@ -1581,7 +1690,7 @@ __global__ void __launch_bounds__(256, 2) dsv41_grouped_nvfp4_moe_stage1_clamped
         if (lane == 0 && m < m_valid) {
             float gate = fminf(acc_g[m] * g_s2, 10.0f);
             float up   = fminf(fmaxf(acc_u[m] * u_s2, -10.0f), 10.0f);
-            float silu = gate / (1.0f + __expf(-gate));
+            float silu = cr_fast_silu_f32(gate);
             inter_buf[((size_t)g_idx * M_CAP + m) * DS_MOE_INTER + row] = silu * up;
         }
     }
@@ -1741,7 +1850,8 @@ void launch_dsv41_grouped_moe(
 }
 
 // ============================================================================
-// 8. KERNEL 6: Isolated-Compute NCM(64-CB) + PLE(r=64) + LoRA(r=16) + 384-Expert
+// 8. KERNEL 6 (v7 — cuda-rust SM120a Tensor Core mma.sync.aligned.m16n8k16):
+//    Isolated-Compute NCM(64-CB) + PLE(r=64) + LoRA(r=16) + 384-Expert
 //    Lookahead + Single-Launch float4 Register-AdamW at H = 5120 (DeepSeek-V4.1)
 // ============================================================================
 __global__ void __launch_bounds__(256, 2) dsv41_ncm_ple_lora_fwd_enc_batched_v1_kernel(
@@ -1751,52 +1861,89 @@ __global__ void __launch_bounds__(256, 2) dsv41_ncm_ple_lora_fwd_enc_batched_v1_
     float* __restrict__ z_out,              // [16, 256]
     float* __restrict__ saved_hlora         // [16, 16]
 ) {
-    // Grid: (34, 8) -> 34 blocks x 8 warps = 272 rows (256 W_enc + 16 LoRA_A), 8 tiles of 2 tokens
-    int wid    = threadIdx.x >> 5;
-    int lane   = threadIdx.x & 31;
-    int row_id = blockIdx.x * 8 + wid; // 0..271
-    int t_base = blockIdx.y * 2;       // 2 tokens per tile -> 2 * 2560 * 4B = 20 KiB smem!
+    // Grid: 34 blocks x 256 threads (8 warps/block).
+    // Each block computes 8 output rows (34 * 8 = 272 rows: 256 W_enc + 16 LoRA_A) across ALL 16 tokens
+    // simultaneously using SM120a Tensor Core mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32!
+    // Global memory traffic for W_enc + LoRA_A is reduced 8x (loaded ONCE instead of 8 times)!
+    int wid      = threadIdx.x >> 5;   // 0..7
+    int lane     = threadIdx.x & 31;   // 0..31
+    int group    = lane >> 2;          // 0..7
+    int thread   = lane & 3;           // 0..3
+    int row_base = blockIdx.x * 8;     // 0..264
+    int row_id   = row_base + wid;     // 0..271
 
-    __shared__ __nv_bfloat162 s_x2[2][DS_HALF_DIM]; // 20 KiB
+    __shared__ uint32_t s_A[16][68];   // 16 tokens x 64 bf16x2 pairs (128 cols) + 4 pad (4.25 KiB)
+    __shared__ uint32_t s_B[8][68];    // 8 rows x 64 bf16x2 pairs (128 cols) + 4 pad (2.125 KiB)
 
-    const __nv_bfloat162* x2_in = reinterpret_cast<const __nv_bfloat162*>(x_in);
-    for (int idx = threadIdx.x; idx < 2 * DS_HALF_DIM; idx += 256) {
-        int m  = idx / DS_HALF_DIM;
-        int c2 = idx % DS_HALF_DIM;
-        s_x2[m][c2] = x2_in[(t_base + m) * DS_HALF_DIM + c2];
+    const uint4* x_u4 = reinterpret_cast<const uint4*>(x_in);
+    const float4* w4_row = (row_id < 256)
+        ? reinterpret_cast<const float4*>(w_enc  + (size_t)row_id * DS_DIM)
+        : reinterpret_cast<const float4*>(lora_a + (size_t)(row_id - 256) * DS_DIM);
+
+    int tok_m  = threadIdx.x >> 4; // 0..15
+    int col_u4 = threadIdx.x & 15; // 0..15
+
+    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+
+    // 5120 cols / 128 cols per tile = 40 tiles
+    #pragma unroll 4
+    for (int t = 0; t < 40; ++t) {
+        // 1. 100% coalesced load of [16, 128] BF16 activations (1 uint4 per thread)
+        uint4 xv = x_u4[tok_m * 320 + t * 16 + col_u4];
+        int c_a = col_u4 * 4;
+        s_A[tok_m][c_a + 0] = xv.x;
+        s_A[tok_m][c_a + 1] = xv.y;
+        s_A[tok_m][c_a + 2] = xv.z;
+        s_A[tok_m][c_a + 3] = xv.w;
+
+        // 2. 100% coalesced 128B warp load of [8, 128] FP32 weights -> hardware cvt.rn.bf16x2.f32
+        float4 wv = w4_row[t * 32 + lane];
+        s_B[wid][lane * 2 + 0] = cr_pack_bf16x2_f32(wv.x, wv.y);
+        s_B[wid][lane * 2 + 1] = cr_pack_bf16x2_f32(wv.z, wv.w);
+        __syncthreads();
+
+        // 3. Warp wid executes SM120a Tensor Core m16n8k16 on k16 slice c_base = wid * 8
+        int c_base = wid * 8;
+        uint32_t a0 = s_A[group    ][c_base + thread];
+        uint32_t a1 = s_A[group + 8][c_base + thread];
+        uint32_t a2 = s_A[group    ][c_base + thread + 4];
+        uint32_t a3 = s_A[group + 8][c_base + thread + 4];
+        uint32_t b0 = s_B[group][c_base + thread];
+        uint32_t b1 = s_B[group][c_base + thread + 4];
+        cr_mma_m16n8k16_f32_bf16(acc0, acc1, acc2, acc3, a0, a1, a2, a3, b0, b1, acc0, acc1, acc2, acc3);
+        __syncthreads();
     }
+
+    __shared__ float s_red[8][32][4];
+    s_red[wid][lane][0] = acc0;
+    s_red[wid][lane][1] = acc1;
+    s_red[wid][lane][2] = acc2;
+    s_red[wid][lane][3] = acc3;
     __syncthreads();
 
-    const float2* w2_row = (row_id < 256)
-        ? reinterpret_cast<const float2*>(w_enc  + (size_t)row_id * DS_DIM)
-        : reinterpret_cast<const float2*>(lora_a + (size_t)(row_id - 256) * DS_DIM);
-
-    float acc0 = 0.0f, acc1 = 0.0f;
-    // 2560 float2s / 32 lanes = 80 iterations
-    #pragma unroll 8
-    for (int k = 0; k < 80; ++k) {
-        int c2 = lane + k * 32;
-        float2 wv = w2_row[c2];
-        float2 x0 = __bfloat1622float2(s_x2[0][c2]);
-        float2 x1 = __bfloat1622float2(s_x2[1][c2]);
-        acc0 += wv.x * x0.x + wv.y * x0.y;
-        acc1 += wv.x * x1.x + wv.y * x1.y;
-    }
-
-    #pragma unroll
-    for (int off = 16; off > 0; off >>= 1) {
-        acc0 += __shfl_xor_sync(0xffffffff, acc0, off);
-        acc1 += __shfl_xor_sync(0xffffffff, acc1, off);
-    }
-
-    if (lane == 0) {
-        if (row_id < 256) {
-            z_out[(t_base + 0) * 256 + row_id] = acc0;
-            z_out[(t_base + 1) * 256 + row_id] = acc1;
+    if (wid == 0) {
+        float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
+        #pragma unroll
+        for (int w = 0; w < 8; ++w) {
+            sum0 += s_red[w][lane][0];
+            sum1 += s_red[w][lane][1];
+            sum2 += s_red[w][lane][2];
+            sum3 += s_red[w][lane][3];
+        }
+        int out_c0 = row_base + thread * 2 + 0;
+        int out_c1 = row_base + thread * 2 + 1;
+        if (row_base < 256) {
+            z_out[(group + 0) * 256 + out_c0] = sum0;
+            z_out[(group + 0) * 256 + out_c1] = sum1;
+            z_out[(group + 8) * 256 + out_c0] = sum2;
+            z_out[(group + 8) * 256 + out_c1] = sum3;
         } else {
-            int lr = row_id - 256;
-            saved_hlora[(t_base + 0) * 16 + lr] = acc0;
-            saved_hlora[(t_base + 1) * 16 + lr] = acc1;
+            int lr0 = out_c0 - 256;
+            int lr1 = out_c1 - 256;
+            saved_hlora[(group + 0) * 16 + lr0] = sum0;
+            saved_hlora[(group + 0) * 16 + lr1] = sum1;
+            saved_hlora[(group + 8) * 16 + lr0] = sum2;
+            saved_hlora[(group + 8) * 16 + lr1] = sum3;
         }
     }
 }
@@ -1886,7 +2033,7 @@ __global__ void __launch_bounds__(256, 2) dsv41_ncm_codebook_lookahead384_fwd_v1
     }
 }
 
-__global__ void __launch_bounds__(256, 2) dsv41_ncm_ple_lora_fwd_dec_batched_v1_kernel(
+__global__ void __launch_bounds__(128, 4) dsv41_ncm_ple_lora_fwd_dec_batched_v1_kernel(
     const float* __restrict__ ncm_state,   // [16, 256]
     const float* __restrict__ saved_uple,  // [16, 64]
     const float* __restrict__ saved_hlora, // [16, 16]
@@ -1895,56 +2042,76 @@ __global__ void __launch_bounds__(256, 2) dsv41_ncm_ple_lora_fwd_dec_batched_v1_
     const float* __restrict__ lora_b,      // [16, 5120]
     float* __restrict__ y_out              // [16, 5120]
 ) {
-    // Grid: (20, 2) -> 20 blocks x 256 threads = 5120 cols, 2 tiles of 8 tokens = 40 active blocks across 48 SMs!
-    int col    = blockIdx.x * 256 + threadIdx.x; // 0..5119 (100% coalesced 128B warp loads)
-    int t_base = blockIdx.y * 8;                 // 0 or 8
-    int tid    = threadIdx.x;
+    // Grid: (10, 4) x 128 threads -> 10 * 128 = 1280 float4s (5120 cols), 4 tiles of 4 tokens = 40 blocks!
+    int c4     = blockIdx.x * 128 + threadIdx.x; // 0..1279 (100% coalesced float4 warp loads!)
+    int t_base = blockIdx.y * 4;                 // 0, 4, 8, 12
+    int tid    = threadIdx.x;                    // 0..127
 
-    __shared__ float s_c[8][256];
-    __shared__ float s_u[8][64];
-    __shared__ float s_h[8][16];
+    __shared__ float s_c[4][256];
+    __shared__ float s_u[4][64];
+    __shared__ float s_h[4][16];
 
     #pragma unroll
-    for (int t = 0; t < 8; ++t) {
+    for (int t = 0; t < 4; ++t) {
         int gt = t_base + t;
-        s_c[t][tid] = ncm_state[gt * 256 + tid];
+        s_c[t][tid]       = ncm_state[gt * 256 + tid];
+        s_c[t][tid + 128] = ncm_state[gt * 256 + tid + 128];
         if (tid < 64) s_u[t][tid] = saved_uple[gt * 64 + tid];
         if (tid < 16) s_h[t][tid] = saved_hlora[gt * 16 + tid];
     }
     __syncthreads();
 
-    float acc[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float4 acc[4];
+    #pragma unroll
+    for (int t = 0; t < 4; ++t) acc[t] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+
+    const float4* w4_dec  = reinterpret_cast<const float4*>(w_dec);
+    const float4* v4_ple  = reinterpret_cast<const float4*>(v_ple);
+    const float4* l4_b    = reinterpret_cast<const float4*>(lora_b);
+    float4* y4_out        = reinterpret_cast<float4*>(y_out);
 
     #pragma unroll 8
     for (int j = 0; j < 256; ++j) {
-        float w = w_dec[(size_t)j * DS_DIM + col];
+        float4 w4 = w4_dec[(size_t)j * 1280 + c4];
         #pragma unroll
-        for (int t = 0; t < 8; ++t) {
-            acc[t] += s_c[t][j] * w;
+        for (int t = 0; t < 4; ++t) {
+            float c = s_c[t][j];
+            acc[t].x += c * w4.x;
+            acc[t].y += c * w4.y;
+            acc[t].z += c * w4.z;
+            acc[t].w += c * w4.w;
         }
     }
 
     #pragma unroll 8
     for (int r = 0; r < 64; ++r) {
-        float v = v_ple[(size_t)r * DS_DIM + col];
+        float4 v4 = v4_ple[(size_t)r * 1280 + c4];
         #pragma unroll
-        for (int t = 0; t < 8; ++t) {
-            acc[t] += s_u[t][r] * v;
+        for (int t = 0; t < 4; ++t) {
+            float u = s_u[t][r];
+            acc[t].x += u * v4.x;
+            acc[t].y += u * v4.y;
+            acc[t].z += u * v4.z;
+            acc[t].w += u * v4.w;
         }
     }
 
     #pragma unroll
     for (int r = 0; r < 16; ++r) {
-        float b = lora_b[(size_t)r * DS_DIM + col];
+        float4 b4 = l4_b[(size_t)r * 1280 + c4];
         #pragma unroll
-        for (int t = 0; t < 8; ++t) {
-            acc[t] += s_h[t][r] * b;
+        for (int t = 0; t < 4; ++t) {
+            float h = s_h[t][r];
+            acc[t].x += h * b4.x;
+            acc[t].y += h * b4.y;
+            acc[t].z += h * b4.z;
+            acc[t].w += h * b4.w;
         }
     }
 
     #pragma unroll
-    for (int t = 0; t < 8; ++t) {
-        y_out[(size_t)(t_base + t) * DS_DIM + col] = acc[t];
+    for (int t = 0; t < 4; ++t) {
+        y4_out[(size_t)(t_base + t) * 1280 + c4] = acc[t];
     }
 }
 
@@ -1957,22 +2124,21 @@ __global__ void __launch_bounds__(256, 2) dsv41_ncm_ple_lora_bwd_proj_batched_v1
     float* __restrict__ duple_out,    // [16, 64]
     float* __restrict__ dhlora_out    // [16, 16]
 ) {
-    // Grid: (42, 8) -> 42 blocks x 8 warps = 336 rows, 8 tiles of 2 tokens (2 * 5120 * 4B = 40 KiB smem)
-    int wid    = threadIdx.x >> 5;
-    int lane   = threadIdx.x & 31;
-    int row_id = blockIdx.x * 8 + wid; // 0..335
-    int t_base = blockIdx.y * 2;
+    // Grid: 42 blocks x 256 threads (8 warps/block).
+    // Each block computes 8 output rows (42 * 8 = 336 rows: 256 W_dec + 64 V_ple + 16 LoRA_B) across ALL 16 tokens
+    // simultaneously using SM120a Tensor Core mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32!
+    // Global memory traffic for W_dec + V_ple + LoRA_B is reduced 8x (loaded ONCE instead of 8 times)!
+    int wid      = threadIdx.x >> 5;   // 0..7
+    int lane     = threadIdx.x & 31;   // 0..31
+    int group    = lane >> 2;          // 0..7
+    int thread   = lane & 3;           // 0..3
+    int row_base = blockIdx.x * 8;     // 0..328
+    int row_id   = row_base + wid;     // 0..335
 
-    __shared__ float4 s_dy4[2][1280]; // 40 KiB
+    __shared__ uint32_t s_A[16][68];   // 16 tokens x 64 bf16x2 pairs (128 cols) + 4 pad (4.25 KiB)
+    __shared__ uint32_t s_B[8][68];    // 8 rows x 64 bf16x2 pairs (128 cols) + 4 pad (2.125 KiB)
 
     const float4* dy4_in = reinterpret_cast<const float4*>(dy_in);
-    for (int idx = threadIdx.x; idx < 2 * 1280; idx += 256) {
-        int m  = idx / 1280;
-        int c4 = idx % 1280;
-        s_dy4[m][c4] = dy4_in[(size_t)(t_base + m) * 1280 + c4];
-    }
-    __syncthreads();
-
     const float4* w4_row = nullptr;
     if (row_id < 256) {
         w4_row = reinterpret_cast<const float4*>(w_dec + (size_t)row_id * DS_DIM);
@@ -1982,36 +2148,77 @@ __global__ void __launch_bounds__(256, 2) dsv41_ncm_ple_lora_bwd_proj_batched_v1
         w4_row = reinterpret_cast<const float4*>(lora_b + (size_t)(row_id - 320) * DS_DIM);
     }
 
-    float acc0 = 0.0f, acc1 = 0.0f;
-    // 1280 float4s / 32 lanes = 40 iterations
-    #pragma unroll 8
-    for (int k = 0; k < 40; ++k) {
-        int c4 = lane + k * 32;
-        float4 w4 = w4_row[c4];
-        float4 d0 = s_dy4[0][c4];
-        float4 d1 = s_dy4[1][c4];
-        acc0 += w4.x * d0.x + w4.y * d0.y + w4.z * d0.z + w4.w * d0.w;
-        acc1 += w4.x * d1.x + w4.y * d1.y + w4.z * d1.z + w4.w * d1.w;
+    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+
+    // 5120 cols / 128 cols per tile = 40 tiles
+    #pragma unroll 4
+    for (int t = 0; t < 40; ++t) {
+        // 1. 100% coalesced load of [16, 128] FP32 dy_in (2 float4s per thread -> cvt.rn.bf16x2.f32)
+        #pragma unroll
+        for (int i = 0; i < 2; ++i) {
+            int idx  = threadIdx.x + i * 256; // 0..511
+            int m    = idx >> 5;              // 0..15
+            int c_f4 = idx & 31;              // 0..31
+            float4 dv = dy4_in[(size_t)m * 1280 + t * 32 + c_f4];
+            s_A[m][c_f4 * 2 + 0] = cr_pack_bf16x2_f32(dv.x, dv.y);
+            s_A[m][c_f4 * 2 + 1] = cr_pack_bf16x2_f32(dv.z, dv.w);
+        }
+
+        // 2. 100% coalesced 128B warp load of [8, 128] FP32 weights -> hardware cvt.rn.bf16x2.f32
+        float4 wv = w4_row[t * 32 + lane];
+        s_B[wid][lane * 2 + 0] = cr_pack_bf16x2_f32(wv.x, wv.y);
+        s_B[wid][lane * 2 + 1] = cr_pack_bf16x2_f32(wv.z, wv.w);
+        __syncthreads();
+
+        // 3. Warp wid executes SM120a Tensor Core m16n8k16 on k16 slice c_base = wid * 8
+        int c_base = wid * 8;
+        uint32_t a0 = s_A[group    ][c_base + thread];
+        uint32_t a1 = s_A[group + 8][c_base + thread];
+        uint32_t a2 = s_A[group    ][c_base + thread + 4];
+        uint32_t a3 = s_A[group + 8][c_base + thread + 4];
+        uint32_t b0 = s_B[group][c_base + thread];
+        uint32_t b1 = s_B[group][c_base + thread + 4];
+        cr_mma_m16n8k16_f32_bf16(acc0, acc1, acc2, acc3, a0, a1, a2, a3, b0, b1, acc0, acc1, acc2, acc3);
+        __syncthreads();
     }
 
-    #pragma unroll
-    for (int off = 16; off > 0; off >>= 1) {
-        acc0 += __shfl_xor_sync(0xffffffff, acc0, off);
-        acc1 += __shfl_xor_sync(0xffffffff, acc1, off);
-    }
+    __shared__ float s_red[8][32][4];
+    s_red[wid][lane][0] = acc0;
+    s_red[wid][lane][1] = acc1;
+    s_red[wid][lane][2] = acc2;
+    s_red[wid][lane][3] = acc3;
+    __syncthreads();
 
-    if (lane == 0) {
-        if (row_id < 256) {
-            dc_out[(t_base + 0) * 256 + row_id] = acc0;
-            dc_out[(t_base + 1) * 256 + row_id] = acc1;
-        } else if (row_id < 320) {
-            int pr = row_id - 256;
-            duple_out[(t_base + 0) * 64 + pr] = acc0;
-            duple_out[(t_base + 1) * 64 + pr] = acc1;
+    if (wid == 0) {
+        float sum0 = 0.0f, sum1 = 0.0f, sum2 = 0.0f, sum3 = 0.0f;
+        #pragma unroll
+        for (int w = 0; w < 8; ++w) {
+            sum0 += s_red[w][lane][0];
+            sum1 += s_red[w][lane][1];
+            sum2 += s_red[w][lane][2];
+            sum3 += s_red[w][lane][3];
+        }
+        int out_c0 = row_base + thread * 2 + 0;
+        int out_c1 = row_base + thread * 2 + 1;
+        if (row_base < 256) {
+            dc_out[(group + 0) * 256 + out_c0] = sum0;
+            dc_out[(group + 0) * 256 + out_c1] = sum1;
+            dc_out[(group + 8) * 256 + out_c0] = sum2;
+            dc_out[(group + 8) * 256 + out_c1] = sum3;
+        } else if (row_base < 320) {
+            int pr0 = out_c0 - 256;
+            int pr1 = out_c1 - 256;
+            duple_out[(group + 0) * 64 + pr0] = sum0;
+            duple_out[(group + 0) * 64 + pr1] = sum1;
+            duple_out[(group + 8) * 64 + pr0] = sum2;
+            duple_out[(group + 8) * 64 + pr1] = sum3;
         } else {
-            int lr = row_id - 320;
-            dhlora_out[(t_base + 0) * 16 + lr] = acc0;
-            dhlora_out[(t_base + 1) * 16 + lr] = acc1;
+            int lr0 = out_c0 - 320;
+            int lr1 = out_c1 - 320;
+            dhlora_out[(group + 0) * 16 + lr0] = sum0;
+            dhlora_out[(group + 0) * 16 + lr1] = sum1;
+            dhlora_out[(group + 8) * 16 + lr0] = sum2;
+            dhlora_out[(group + 8) * 16 + lr1] = sum3;
         }
     }
 }
@@ -2070,7 +2277,7 @@ __global__ void __launch_bounds__(256, 2) dsv41_ncm_codebook_bwd_16tok_v1_kernel
     dz_out[t * 256 + tid] = dz_j;
 }
 
-__global__ void __launch_bounds__(256, 2) dsv41_ncm_ple_lora_bwd_dx_batched_v1_kernel(
+__global__ void __launch_bounds__(128, 4) dsv41_ncm_ple_lora_bwd_dx_batched_v1_kernel(
     const float* __restrict__ dy_in,     // [16, 5120]
     const float* __restrict__ dz_in,     // [16, 256]
     const float* __restrict__ dhlora_in, // [16, 16]
@@ -2078,49 +2285,63 @@ __global__ void __launch_bounds__(256, 2) dsv41_ncm_ple_lora_bwd_dx_batched_v1_k
     const float* __restrict__ lora_a,    // [16, 5120]
     float* __restrict__ dx_out           // [16, 5120]
 ) {
-    // Grid: (20, 2) -> 20 blocks x 256 threads = 5120 cols, 2 tiles of 8 tokens = 40 active blocks across 48 SMs!
-    int col    = blockIdx.x * 256 + threadIdx.x;
-    int t_base = blockIdx.y * 8;
+    // Grid: (10, 4) x 128 threads -> 10 * 128 = 1280 float4s (5120 cols), 4 tiles of 4 tokens = 40 blocks!
+    int c4     = blockIdx.x * 128 + threadIdx.x; // 0..1279 (100% coalesced float4 warp loads!)
+    int t_base = blockIdx.y * 4;                 // 0, 4, 8, 12
     int tid    = threadIdx.x;
 
-    __shared__ float s_dz[8][256];
-    __shared__ float s_dh[8][16];
+    __shared__ float s_dz[4][256];
+    __shared__ float s_dh[4][16];
 
     #pragma unroll
-    for (int t = 0; t < 8; ++t) {
+    for (int t = 0; t < 4; ++t) {
         int gt = t_base + t;
-        s_dz[t][tid] = dz_in[gt * 256 + tid];
+        s_dz[t][tid]       = dz_in[gt * 256 + tid];
+        s_dz[t][tid + 128] = dz_in[gt * 256 + tid + 128];
         if (tid < 16) s_dh[t][tid] = dhlora_in[gt * 16 + tid];
     }
     __syncthreads();
 
-    float acc[8];
+    const float4* dy4_in = reinterpret_cast<const float4*>(dy_in);
+    const float4* w4_enc = reinterpret_cast<const float4*>(w_enc);
+    const float4* l4_a   = reinterpret_cast<const float4*>(lora_a);
+    float4* dx4_out      = reinterpret_cast<float4*>(dx_out);
+
+    float4 acc[4];
     #pragma unroll
-    for (int t = 0; t < 8; ++t) {
-        acc[t] = dy_in[(size_t)(t_base + t) * DS_DIM + col];
+    for (int t = 0; t < 4; ++t) {
+        acc[t] = dy4_in[(size_t)(t_base + t) * 1280 + c4];
     }
 
     #pragma unroll 8
     for (int j = 0; j < 256; ++j) {
-        float w = w_enc[(size_t)j * DS_DIM + col];
+        float4 w4 = w4_enc[(size_t)j * 1280 + c4];
         #pragma unroll
-        for (int t = 0; t < 8; ++t) {
-            acc[t] += s_dz[t][j] * w;
+        for (int t = 0; t < 4; ++t) {
+            float dz = s_dz[t][j];
+            acc[t].x += dz * w4.x;
+            acc[t].y += dz * w4.y;
+            acc[t].z += dz * w4.z;
+            acc[t].w += dz * w4.w;
         }
     }
 
     #pragma unroll
     for (int r = 0; r < 16; ++r) {
-        float a = lora_a[(size_t)r * DS_DIM + col];
+        float4 a4 = l4_a[(size_t)r * 1280 + c4];
         #pragma unroll
-        for (int t = 0; t < 8; ++t) {
-            acc[t] += s_dh[t][r] * a;
+        for (int t = 0; t < 4; ++t) {
+            float dh = s_dh[t][r];
+            acc[t].x += dh * a4.x;
+            acc[t].y += dh * a4.y;
+            acc[t].z += dh * a4.z;
+            acc[t].w += dh * a4.w;
         }
     }
 
     #pragma unroll
-    for (int t = 0; t < 8; ++t) {
-        dx_out[(size_t)(t_base + t) * DS_DIM + col] = acc[t];
+    for (int t = 0; t < 4; ++t) {
+        dx4_out[(size_t)(t_base + t) * 1280 + c4] = acc[t];
     }
 }
 
@@ -3333,14 +3554,13 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
             float* uple_u   = d_saved_uple_all.get()  + (size_t)u * T * PLE_RANK;
             float* nbias_u  = d_next_bias_all.get()   + (size_t)u * T * DS_ROUTED_EXPERTS;
 
-            dim3 g_enc(34, 8);
-            dsv41_ncm_ple_lora_fwd_enc_batched_v1_kernel<<<g_enc, 256>>>(
+            dsv41_ncm_ple_lora_fwd_enc_batched_v1_kernel<<<34, 256>>>(
                 x_norm_u, w_enc_u, lora_a_u, z_u, hlora_u
             );
             dsv41_ncm_codebook_lookahead384_fwd_v1_kernel<<<16, 256>>>(
                 z_u, e_ncm_u, w_look_u, u_ple_u, state_u, alpha_u, uple_u, nbias_u
             );
-            dsv41_ncm_ple_lora_fwd_dec_batched_v1_kernel<<<dim3(20, 2), 256>>>(
+            dsv41_ncm_ple_lora_fwd_dec_batched_v1_kernel<<<dim3(10, 4), 128>>>(
                 state_u, uple_u, hlora_u, w_dec_u, v_ple_u, lora_b_u, d_y_pred
             );
 
@@ -3348,14 +3568,13 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
                 d_y_pred, donor_y_u, d_dy, d_loss_accum, 0.08f
             );
 
-            dim3 g_bwd_proj(42, 8);
-            dsv41_ncm_ple_lora_bwd_proj_batched_v1_kernel<<<g_bwd_proj, 256>>>(
+            dsv41_ncm_ple_lora_bwd_proj_batched_v1_kernel<<<42, 256>>>(
                 d_dy, w_dec_u, v_ple_u, lora_b_u, d_dc, d_duple, d_dhlora
             );
             dsv41_ncm_codebook_bwd_16tok_v1_kernel<<<16, 256>>>(
                 d_dc, alpha_u, e_ncm_u, d_dz_bwd
             );
-            dsv41_ncm_ple_lora_bwd_dx_batched_v1_kernel<<<dim3(20, 2), 256>>>(
+            dsv41_ncm_ple_lora_bwd_dx_batched_v1_kernel<<<dim3(10, 4), 128>>>(
                 d_dy, d_dz_bwd, d_dhlora, w_enc_u, lora_a_u, d_dx
             );
 
@@ -3476,8 +3695,7 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
             float* uple_u   = d_saved_uple_all.get()  + (size_t)u * T * PLE_RANK;
             float* nbias_u  = d_next_bias_all.get()   + (size_t)u * T * DS_ROUTED_EXPERTS;
 
-            dim3 g_enc(34, 8);
-            dsv41_ncm_ple_lora_fwd_enc_batched_v1_kernel<<<g_enc, 256>>>(
+            dsv41_ncm_ple_lora_fwd_enc_batched_v1_kernel<<<34, 256>>>(
                 x_norm_u, w_enc_u, lora_a_u, z_u, hlora_u
             );
             // 3-Round Dream-RSI Latent Codebook Refinement on the upper-tail NCM state
@@ -3486,7 +3704,7 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
                     z_u, e_ncm_u, w_look_u, u_ple_u, state_u, alpha_u, uple_u, nbias_u
                 );
             }
-            dsv41_ncm_ple_lora_fwd_dec_batched_v1_kernel<<<dim3(20, 2), 256>>>(
+            dsv41_ncm_ple_lora_fwd_dec_batched_v1_kernel<<<dim3(10, 4), 128>>>(
                 state_u, uple_u, hlora_u, w_dec_u, v_ple_u, lora_b_u, d_y_pred
             );
             dsv41_stage1_mse_and_grad_v1_kernel<<<320, 256>>>(
@@ -3608,21 +3826,20 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
             float* uple_u   = d_saved_uple_all.get()  + (size_t)u * T * PLE_RANK;
             float* nbias_u  = d_next_bias_all.get()   + (size_t)u * T * DS_ROUTED_EXPERTS;
 
-            dsv41_ncm_ple_lora_fwd_dec_batched_v1_kernel<<<dim3(20, 2), 256>>>(
+            dsv41_ncm_ple_lora_fwd_dec_batched_v1_kernel<<<dim3(10, 4), 128>>>(
                 state_u, uple_u, hlora_u, w_dec_u, v_ple_u, lora_b_u, d_y_pred
             );
             dsv41_stage1_mse_and_grad_v1_kernel<<<320, 256>>>(
                 d_y_pred, donor_y_u, d_dy, d_loss_accum, rl_grad_scale
             );
 
-            dim3 g_bwd_proj(42, 8);
-            dsv41_ncm_ple_lora_bwd_proj_batched_v1_kernel<<<g_bwd_proj, 256>>>(
+            dsv41_ncm_ple_lora_bwd_proj_batched_v1_kernel<<<42, 256>>>(
                 d_dy, w_dec_u, v_ple_u, lora_b_u, d_dc, d_duple, d_dhlora
             );
             dsv41_ncm_codebook_bwd_16tok_v1_kernel<<<16, 256>>>(
                 d_dc, alpha_u, e_ncm_u, d_dz_bwd
             );
-            dsv41_ncm_ple_lora_bwd_dx_batched_v1_kernel<<<dim3(20, 2), 256>>>(
+            dsv41_ncm_ple_lora_bwd_dx_batched_v1_kernel<<<dim3(10, 4), 128>>>(
                 d_dy, d_dz_bwd, d_dhlora, w_enc_u, lora_a_u, d_dx
             );
 
@@ -3790,14 +4007,14 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_full_profile() {
     cudaDeviceProp prop;
     CHECK_CUDA(cudaGetDeviceProperties(&prop, 0));
     printf("================================================================================\n");
-    printf("MCL4-Codec Native C++/CUDA SM120 Engine for DeepSeek-V4.1-Flash-1017-NVFP4 (v6)\n");
+    printf("MCL4-Codec Native C++/CUDA SM120a Engine for DeepSeek-V4.1-Flash-1017-NVFP4 (v7)\n");
     printf("GPU: %s (SM %d.%d, %d SMs, %.2f GiB VRAM, %.2f MiB L2 Cache)\n",
            prop.name, prop.major, prop.minor, prop.multiProcessorCount,
            prop.totalGlobalMem / (1024.0 * 1024.0 * 1024.0),
            prop.l2CacheSize / (1024.0 * 1024.0));
     printf("Architecture: 40 Layers | dim=5120 | moe_inter=2304 | 384 NVFP4 Experts (top_k=6)\n");
     printf("              MLA (64 Heads x 512, 1 Shared KV, 8-Group Output LoRA) | HC (4x5120)\n");
-    printf("              DeepGEMM + DeepEP + DeepInfer PTX Hardened & RAII Memory-Safe\n");
+    printf("              DeepGEMM + DeepEP + cuda-rust SM120a mma.sync.aligned.m16n8k16 PTX\n");
     printf("================================================================================\n\n");
 
     int max_T = 16;
@@ -4033,27 +4250,25 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_full_profile() {
     };
 
     float us_ds_ncm_fwd = time_plastic([&]() {
-        dim3 g_enc(34, 8);
-        dsv41_ncm_ple_lora_fwd_enc_batched_v1_kernel<<<g_enc, 256>>>(
+        dsv41_ncm_ple_lora_fwd_enc_batched_v1_kernel<<<34, 256>>>(
             d_x_norm, d_w_enc, d_lora_a, d_dz, d_saved_hlora
         );
         dsv41_ncm_codebook_lookahead384_fwd_v1_kernel<<<16, 256>>>(
             d_dz, d_e_ncm, d_w_look, d_u_ple, d_ncm_state, d_saved_alpha, d_saved_uple, d_next_bias
         );
-        dsv41_ncm_ple_lora_fwd_dec_batched_v1_kernel<<<dim3(20, 2), 256>>>(
+        dsv41_ncm_ple_lora_fwd_dec_batched_v1_kernel<<<dim3(10, 4), 128>>>(
             d_ncm_state, d_saved_uple, d_saved_hlora, d_w_dec, d_v_ple, d_lora_b, d_moe_out
         );
     });
 
     float us_ds_ncm_bwd = time_plastic([&]() {
-        dim3 g_bwd_proj(42, 8);
-        dsv41_ncm_ple_lora_bwd_proj_batched_v1_kernel<<<g_bwd_proj, 256>>>(
+        dsv41_ncm_ple_lora_bwd_proj_batched_v1_kernel<<<42, 256>>>(
             d_dy, d_w_dec, d_v_ple, d_lora_b, d_dc, d_duple, d_dhlora
         );
         dsv41_ncm_codebook_bwd_16tok_v1_kernel<<<16, 256>>>(
             d_dc, d_saved_alpha, d_e_ncm, d_dz
         );
-        dsv41_ncm_ple_lora_bwd_dx_batched_v1_kernel<<<dim3(20, 2), 256>>>(
+        dsv41_ncm_ple_lora_bwd_dx_batched_v1_kernel<<<dim3(10, 4), 128>>>(
             d_dy, d_dz, d_dhlora, d_w_enc, d_lora_a, d_dx
         );
     });

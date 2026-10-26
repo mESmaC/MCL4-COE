@@ -15,6 +15,8 @@
 //      Engram hashes + GPU numerical parity.
 // ============================================================================
 
+pub mod cuda_rust_audit;
+
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -485,9 +487,9 @@ impl WarmExpertCacheManager {
 
 fn main() -> io::Result<()> {
     println!("================================================================================");
-    println!("MCL4-Codec Memory-Safe Rust + SM120 CUDA C++ Hybrid Runtime (v5)");
-    println!("  - Host Runtime:   Rust (100% Safe Shard Parser + Multi-Threaded Overlapped NVMe)");
-    println!("  - Compute Engine: mcl4_deepseek_v41_sm120.dll (SM120 Blackwell CUDA/PTX)");
+    println!("MCL4-Codec Memory-Safe Rust + SM120a CUDA C++ Hybrid Runtime (v7)");
+    println!("  - Host Runtime:   Rust (100% Safe Shard Parser + Multi-Threaded Overlapped NVMe + cuda-rust Audit)");
+    println!("  - Compute Engine: mcl4_deepseek_v41_sm120.dll (SM120a Blackwell Tensor Core mma.sync)");
     println!("================================================================================");
 
     // 1. Scan Z:\deepseek-nvfp4 in safe Rust
@@ -843,6 +845,81 @@ fn main() -> io::Result<()> {
         }
     }
 
+    // 6. `cuda-rust` (`cuda-oxide`) SM120a PTX & Warp AccessPlan Audit
+    let ptx_path = Path::new(r"X:\MCL4-COE\runs\mcl4_codec_sm120_deepseek_v41\mcl4_deepseek_v41_sm120a.ptx");
+    if ptx_path.exists() {
+        let audit = cuda_rust_audit::parse_and_audit_ptx_file(ptx_path)?;
+        assert_eq!(
+            audit.target, "sm_120a",
+            "Expected PTX target sm_120a, got {}",
+            audit.target
+        );
+        assert_eq!(
+            audit.total_local_spill_bytes, 0,
+            "Expected 0 .local spill bytes in SM120a PTX"
+        );
+        assert!(
+            audit.total_mma_sync > 0,
+            "Expected hardware mma.sync.aligned.m16n8k16 instructions in SM120a PTX"
+        );
+        println!(
+            "\n[7] `cuda-rust` (`cuda-oxide`) SM120a PTX & Warp Coalescing Audit:\n    -> Target: `{}` (PTX {}.{}, {}-bit) | Audited Kernels: {} | Local Spill Bytes: {}\n    -> Hardware Instructions Verified: `mma.sync.m16n8k16`={}, `cvt.rn.bf16x2`={}, `ex2.approx`={}, `rcp.approx`={}, `ld.L2::128B`={}, `ld.L1::no_allocate`={}\n    -> Compile-Time `AccessPlan` Proofs: uint4/float4 (4 lines, 0 wasted), uint2 (2 lines, 0 wasted), f32 (1 line, 0 wasted), +4 Padded Shared Memory (conflict degree = 1)",
+            audit.target,
+            audit.ptx_version.0,
+            audit.ptx_version.1,
+            audit.address_size,
+            audit.kernels.len(),
+            audit.total_local_spill_bytes,
+            audit.total_mma_sync,
+            audit.total_cvt_bf16x2,
+            audit.total_ex2_approx,
+            audit.total_rcp_approx,
+            audit.total_ld_l2_128b,
+            audit.total_ld_evict_first
+        );
+    }
+
     println!("================================================================================");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cuda_rust_audit::*;
+
+    #[test]
+    fn test_sm120a_target_spec_and_access_plans() {
+        assert_eq!(SmTarget::SM_120A.arch_name(), "sm_120a");
+        assert!(SmTarget::SM_120A.supports_mma_m16n8k16_bf16());
+        assert!(SmTarget::SM_120A.supports_sm120a_accelerated_features());
+        assert!(SmTarget::SM_120A.min_ptx_version().at_least(PtxVersion::new(8, 7)));
+
+        assert!(PLAN_U4_COALESCED.is_fully_coalesced());
+        assert_eq!(PLAN_U4_COALESCED.lines_touched(), 4);
+        assert_eq!(PLAN_U4_COALESCED.wasted_lines(), 0);
+
+        assert!(PLAN_U2_COALESCED.is_fully_coalesced());
+        assert_eq!(PLAN_U2_COALESCED.lines_touched(), 2);
+        assert_eq!(PLAN_U2_COALESCED.wasted_lines(), 0);
+
+        assert_eq!(m16n8k16_smem_stride_conflict_degree(68), 1);
+        assert_eq!(m16n8k16_smem_stride_conflict_degree(132), 1);
+    }
+
+    #[test]
+    fn test_sm120a_ptx_audit_if_present() {
+        let ptx_path = Path::new(r"X:\MCL4-COE\runs\mcl4_codec_sm120_deepseek_v41\mcl4_deepseek_v41_sm120a.ptx");
+        if ptx_path.exists() {
+            let audit = parse_and_audit_ptx_file(ptx_path).expect("failed to parse PTX");
+            assert_eq!(audit.target, "sm_120a");
+            assert_eq!(audit.address_size, 64);
+            assert_eq!(audit.total_local_spill_bytes, 0);
+            assert!(audit.kernels.len() >= 25);
+            assert!(audit.total_mma_sync > 0);
+            assert!(audit.total_cvt_bf16x2 > 0);
+            assert!(audit.total_ex2_approx > 0);
+            assert!(audit.total_rcp_approx > 0);
+        }
+    }
 }

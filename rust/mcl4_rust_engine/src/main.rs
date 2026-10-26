@@ -16,6 +16,8 @@
 // ============================================================================
 
 pub mod cuda_rust_audit;
+pub mod p4608_expert_sharder;
+pub mod python_ffi;
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -34,6 +36,7 @@ pub const DS_GATE_UP_DIM: usize = 4608;
 pub const DS_ROUTED_EXPERTS: usize = 384;
 pub const DS_TOP_K: usize = 6;
 pub const WARM_CACHE_SLOTS: usize = 365;
+pub const DS_PACKET_BYTES: usize = 19_910_656;
 
 /// Exact 4K-Page-Aligned Zero-Repack `.mcl4c` Expert Packet (19,910,656 bytes = 18.988 MiB)
 /// Matches C++ `struct alignas(4096) Dsv41Mcl4cExpertPacket` byte-for-byte!
@@ -96,6 +99,7 @@ pub struct Dsv41RsiTelemetryOut {
 // ============================================================================
 // FFI Declarations for `mcl4_deepseek_v41_sm120.dll`
 // ============================================================================
+#[link(name = "mcl4_deepseek_v41_sm120")]
 extern "C" {
     pub fn dsv41_compute_engram_hashes_cpu(
         compressed_tokens: *const i64,
@@ -485,11 +489,12 @@ impl WarmExpertCacheManager {
     }
 }
 
+#[allow(dead_code)]
 fn main() -> io::Result<()> {
     println!("================================================================================");
-    println!("MCL4-Codec Memory-Safe Rust + SM120a CUDA C++ Hybrid Runtime (v7)");
-    println!("  - Host Runtime:   Rust (100% Safe Shard Parser + Multi-Threaded Overlapped NVMe + cuda-rust Audit)");
-    println!("  - Compute Engine: mcl4_deepseek_v41_sm120.dll (SM120a Blackwell Tensor Core mma.sync)");
+    println!("MCL4-Codec Memory-Safe Rust + SM120a CUDA C++ Hybrid Runtime (v8)");
+    println!("  - Host Runtime:   Rust (P4608 Dual-NVMe X:/Z: Direct-DMA .mcl4e + cuda-rust Audit)");
+    println!("  - Compute Engine: mcl4_deepseek_v41_sm120.dll (SM120a Tensor Core MLA + MoE + Router)");
     println!("================================================================================");
 
     // 1. Scan Z:\deepseek-nvfp4 in safe Rust
@@ -569,14 +574,17 @@ fn main() -> io::Result<()> {
             .map(|_| Dsv41Mcl4cExpertPacket::new_zeroed_box())
             .collect();
 
+        let p4608_store = p4608_expert_sharder::P4608DualDriveExpertStore::default_p4608();
+        let (_new4, _cached4, _sh4_ms) = p4608_store.ensure_experts_sharded(&index, &targets)?;
+
         let t_stream = Instant::now();
         thread::scope(|s| {
             for (pkt, &(layer, exp)) in packets.iter_mut().zip(targets.iter()) {
-                let idx_ref = Arc::clone(&index);
+                let store_ref = &p4608_store;
                 s.spawn(move || {
-                    idx_ref
-                        .stream_expert_packet(layer, exp, pkt)
-                        .expect("Failed to stream expert packet via overlapped seek_read");
+                    store_ref
+                        .read_expert_single_syscall(layer, exp, pkt)
+                        .expect("Failed to stream .mcl4e expert packet via P4608 1-syscall streamer");
                 });
             }
         });
@@ -585,7 +593,7 @@ fn main() -> io::Result<()> {
         let bw_gibs = (total_mib / 1024.0) / (stream_ms / 1000.0);
 
         println!(
-            "[3] Rust 4-Thread Overlapped NVMe Streamer (`FileExt::seek_read`):\n    -> Streamed 4x 18.99 MiB Experts ({:.2} MiB total) in {:.2} ms ({:.2} GiB/s aggregate NVMe throughput!)",
+            "[3] Intel P4608 Dual-Controller (`X:` + `Z:`) `.mcl4e` 1-Syscall Streamer:\n    -> Streamed 4x 18.99 MiB Experts ({:.2} MiB total, 2 on X:, 2 on Z:) in {:.2} ms ({:.2} GiB/s aggregate throughput!)",
             total_mib, stream_ms, bw_gibs
         );
 
@@ -768,23 +776,27 @@ fn main() -> io::Result<()> {
         };
         let upper_pkts_slice = unsafe { std::slice::from_raw_parts_mut(upper_pkts_ptr, TOTAL_UT_PKTS) };
 
-        let t_ut_load = Instant::now();
-        thread::scope(|s| {
-            for (u, pkts_pair) in upper_pkts_slice.chunks_mut(PKTS_PER_UT).enumerate() {
-                let idx_ref = Arc::clone(&index);
-                let layer = 32 + u;
-                let exp0 = routed_expert_ids[u * 2 + 0] as usize;
-                let exp1 = routed_expert_ids[u * 2 + 1] as usize;
-                s.spawn(move || {
-                    idx_ref.stream_expert_packet(layer, exp0, &mut pkts_pair[0]).unwrap();
-                    idx_ref.stream_expert_packet(layer, exp1, &mut pkts_pair[1]).unwrap();
-                });
-            }
-        });
-        let ut_load_ms = t_ut_load.elapsed().as_secs_f64() * 1000.0;
+        let mut ut_targets = Vec::with_capacity(TOTAL_UT_PKTS);
+        for u in 0..NUM_UT {
+            let layer = 32 + u;
+            ut_targets.push((layer, routed_expert_ids[u * 2 + 0] as usize));
+            ut_targets.push((layer, routed_expert_ids[u * 2 + 1] as usize));
+        }
+
+        // Ensure the 16 dynamically routed Upper-Tail experts are sharded into 4K-aligned .mcl4e files
+        // striped across Intel P4608 Controller 0 (X:) and Controller 1 (Z:), then stream via Direct DMA!
+        let p4608_store = p4608_expert_sharder::P4608DualDriveExpertStore::default_p4608();
+        let (newly_sharded, cached_shards, shard_ms) =
+            p4608_store.ensure_experts_sharded(&index, &ut_targets)?;
+        let (ut_load_ms, ctrl0_x, ctrl1_z) =
+            p4608_store.stream_experts_striped(&ut_targets, upper_pkts_slice)?;
         let ut_bw_gibs = (303.81 / 1024.0) / (ut_load_ms / 1000.0);
         println!(
-            "    -> GPU Pre-Routed & Streamed 16 Dynamic Upper-Tail Experts (L32..L39 Top-2/Layer = 303.81 MiB) in {:.2} ms ({:.2} GiB/s NVMe, meta {:.2} ms)",
+            "    -> P4608 Dual-NVMe `.mcl4e` Sharder (X:={} even-layer, Z:={} odd-layer | new={}, cached={}, prep={:.2} ms)",
+            ctrl0_x, ctrl1_z, newly_sharded, cached_shards, shard_ms
+        );
+        println!(
+            "    -> P4608 1-Syscall Striped Streamed 16 Upper-Tail Experts (303.81 MiB) in {:.2} ms ({:.2} GiB/s, meta {:.2} ms)",
             ut_load_ms, ut_bw_gibs, meta_ms
         );
 
@@ -905,6 +917,18 @@ mod tests {
 
         assert_eq!(m16n8k16_smem_stride_conflict_degree(68), 1);
         assert_eq!(m16n8k16_smem_stride_conflict_degree(132), 1);
+
+        // Verify P4608 dual-controller layer-parity striping & confidence-adaptive Top-K filter
+        let store = p4608_expert_sharder::P4608DualDriveExpertStore::default_p4608();
+        assert!(store.expert_path(32, 25).to_string_lossy().starts_with(r"X:\"));
+        assert!(store.expert_path(33, 25).to_string_lossy().starts_with(r"Z:\"));
+
+        let mut idx = [10, 20, 30, 40, 50, 60];
+        let mut w = [0.60f32, 0.45, 0.32, 0.06, 0.04, 0.03]; // sum = 1.50; top-3 = 1.37 (91.3%)
+        let k_act = p4608_expert_sharder::adaptive_topk_filter(&mut idx, &mut w, 0.90, 2);
+        assert_eq!(k_act, 3);
+        let new_sum: f32 = w[..k_act].iter().sum();
+        assert!((new_sum - 1.50).abs() < 1e-5);
     }
 
     #[test]

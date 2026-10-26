@@ -1,8 +1,17 @@
 [package]
 name = "mcl4_rust_engine"
-version = "0.5.0"
+version = "0.8.0"
 edition = "2021"
-description = "MCL4-Codec Memory-Safe Rust + SM120 CUDA C++ Hybrid Runtime for DeepSeek-V4.1-Flash-1017-NVFP4"
+description = "MCL4-Codec Memory-Safe Rust + SM120a CUDA C++ Hybrid Runtime for DeepSeek-V4.1-Flash-1017-NVFP4"
+
+[lib]
+name = "mcl4_rust_loader"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "mcl4_rust_engine"
+path = "src/main.rs"
 
 [profile.release]
 opt-level = 3

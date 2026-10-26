@@ -1,6 +1,6 @@
 {
   "model": "DeepSeek-V4.1-Flash-1017-NVFP4",
-  "engine_version": "v7_sm120a_tensor_core_cuda_rust_hybrid",
+  "engine_version": "v8_sm120a_tensor_core_moe_p4608_dual_nvme_rust",
   "checkpoint_path": "Z:/deepseek-nvfp4",
   "gpu": "NVIDIA GeForce RTX 5070 (SM 12.0 / sm_120a, 48 SMs, 11.91 GiB VRAM, 48.00 MiB L2 Cache)",
   "architecture": {
@@ -40,12 +40,12 @@
     "raii_cuda_buffers_enforced": true,
     "raw_cuda_malloc_free_calls_in_engine": 0,
     "cuda_rust_ptx_instruction_counts": {
-      "mma_sync_aligned_m16n8k16_row_col_f32_bf16_bf16_f32": 28,
-      "cvt_rn_bf16x2_f32": 98,
-      "ex2_approx_f32": 71,
-      "rcp_approx_ftz_f32": 75,
-      "ld_global_nc_L2_128B": 20,
-      "ld_L1_no_allocate_L2_cache_hint": 24
+      "mma_sync_aligned_m16n8k16_row_col_f32_bf16_bf16_f32": 40,
+      "cvt_rn_bf16x2_f32": 100,
+      "ex2_approx_f32": 53,
+      "rcp_approx_ftz_f32": 53,
+      "ld_global_nc_L2_128B": 24,
+      "ld_L1_no_allocate_L2_cache_hint": 14
     },
     "cuda_rust_compile_time_access_plan_proofs": {
       "uint4_float4_coalesced_lines_touched": 4,
@@ -117,29 +117,29 @@
     "complete_40_layer_tok_per_s": 41.6
   },
   "layer_profile_t16_rollout": {
-    "hc_sinkhorn_pre_rmsnorm_us": 27.67,
-    "mla_wqa_wkv_norm_rope_us": 39.88,
-    "mla_wqb_us": 59.79,
-    "mla_shared_kv_latent_attn_sink_inv_rope_us": 81.24,
-    "mla_grouped_woa_wob_us": 155.22,
-    "hc_post_us": 6.45,
-    "mla_sublayer_total_us": 392.69,
-    "router_sqrtsoftplus_top6_384exp_us": 26.86,
-    "grouped_nvfp4_moe_14groups_m8_us": 1353.31,
-    "moe_sublayer_total_us": 1437.45,
-    "full_layer_total_us": 1848.54,
-    "complete_40_layer_compute_ms": 73.94,
-    "complete_40_layer_tok_per_s": 216.4
+    "hc_sinkhorn_pre_rmsnorm_us": 29.06,
+    "mla_wqa_wkv_norm_rope_us": 39.34,
+    "mla_wqb_us": 59.78,
+    "mla_shared_kv_latent_attn_sink_inv_rope_us": 92.59,
+    "mla_grouped_woa_wob_us": 158.26,
+    "hc_post_us": 8.62,
+    "mla_sublayer_total_us": 387.65,
+    "router_sqrtsoftplus_top6_384exp_us": 19.35,
+    "grouped_nvfp4_moe_14groups_m8_us": 541.01,
+    "moe_sublayer_total_us": 608.04,
+    "full_layer_total_us": 995.70,
+    "complete_40_layer_compute_ms": 39.83,
+    "complete_40_layer_tok_per_s": 401.7
   },
   "isolated_compute_plasticity_h5120_t16": {
-    "ncm_ple_lora_lookahead384_fwd_us_per_layer": 45.77,
-    "ncm_ple_lora_bwd_dx_us_per_layer": 35.88,
-    "single_launch_float4_register_adamw_us_per_layer": 60.49,
-    "total_plastic_overhead_us_per_layer": 144.62,
-    "static_32_layer_stem_ms": 59.15,
-    "plastic_8_layer_upper_tail_ms_per_update": 15.95,
-    "amortized_40_layer_grpo_step_ms_g8": 23.34,
-    "amortized_40_layer_grpo_train_tok_per_s": 685.5,
+    "ncm_ple_lora_lookahead384_fwd_us_per_layer": 54.37,
+    "ncm_ple_lora_bwd_dx_us_per_layer": 36.81,
+    "single_launch_float4_register_adamw_us_per_layer": 68.78,
+    "total_plastic_overhead_us_per_layer": 159.97,
+    "static_32_layer_stem_ms": 31.86,
+    "plastic_8_layer_upper_tail_ms_per_update": 9.25,
+    "amortized_40_layer_grpo_step_ms_g8": 13.23,
+    "amortized_40_layer_grpo_train_tok_per_s": 1209.5,
     "extra_vram_8_plastic_layers_mib": 288.0
   },
   "vram_codec_budget_12gb_rtx5070": {
@@ -203,7 +203,7 @@
       "total_wall_clock_ms": 137.98,
       "ms_per_step": 2.76,
       "stem_cached_upper_tail_train_tok_per_s": 46383.3,
-      "end_to_end_40_layer_amortized_grpo_tok_per_s": 685.5,
+      "end_to_end_40_layer_amortized_grpo_tok_per_s": 1209.5,
       "persistent_checkpoint_path": "runs/mcl4_codec_sm120_deepseek_v41/deepseek_v41_upper_tail_ncm_rsi.bin",
       "persistent_checkpoint_bytes": 103321600,
       "persistent_checkpoint_roundtrip_verified": true

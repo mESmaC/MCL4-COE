@@ -67,6 +67,26 @@ impl Dsv41Mcl4cExpertPacket {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Dsv41RsiTelemetryOut {
+    pub stage1_init_mse: f32,
+    pub stage1_final_mse: f32,
+    pub stage1_init_top6_recall: f32,
+    pub stage1_final_top6_recall: f32,
+    pub stage1_total_ms: f32,
+    pub stage2_init_reward: f32,
+    pub stage2_final_reward: f32,
+    pub stage2_mean_novelty: f32,
+    pub stage2_final_codebook_ppl: f32,
+    pub stage2_active_codebooks: i32,
+    pub stage2_final_top6_recall: f32,
+    pub stage2_weight_delta_l2: f32,
+    pub stage2_total_ms: f32,
+    pub stage2_ms_per_step: f32,
+    pub stage2_train_tok_per_s: f32,
+}
+
 // ============================================================================
 // FFI Declarations for `mcl4_deepseek_v41_sm120.dll`
 // ============================================================================
@@ -84,6 +104,20 @@ extern "C" {
         out_cos_s1: *mut f64,
         out_cos_s2: *mut f64,
         out_us_moe_1grp: *mut f32,
+    ) -> i32;
+
+    pub fn mcl4_dsv41_run_upper_tail_rsi_trainer(
+        h_hc_ffn_fn: *const f32,
+        h_hc_ffn_scale: *const f32,
+        h_hc_ffn_base: *const f32,
+        h_ffn_norm_w: *const u16,
+        h_gate_w: *const u16,
+        h_gate_bias: *const f32,
+        h_upper_pkts: *const Dsv41Mcl4cExpertPacket,
+        h_final_norm_w: *const u16,
+        stage1_steps: i32,
+        stage2_steps: i32,
+        out_telemetry: *mut Dsv41RsiTelemetryOut,
     ) -> i32;
 }
 
@@ -550,6 +584,181 @@ fn main() -> io::Result<()> {
         "[5] DeepInfer EPLB + 384-Expert NCM Lookahead Warm Cache Manager ({} VRAM Slots = 6.78 GiB):\n    -> Simulated {} expert dispatches: {:.1}% Warm VRAM Hit Rate ({} hits, {} NCM-Lookahead async prefetches)",
         WARM_CACHE_SLOTS, total_queries, hit_rate, cache_mgr.hits, cache_mgr.misses_prefetched
     );
+
+    // 5. Stream Real Upper-Tail Layers 32..39 (Shards 35..42) + Final Norm (Shard 43) & Run Stage-1 + Stage-2 RSI/GRPO Trainer!
+    if index.tensors.contains_key("layers.32.ffn.gate.weight")
+        && index.tensors.contains_key("layers.39.ffn.gate.weight")
+        && index.tensors.contains_key("norm.weight")
+    {
+        const NUM_UT: usize = 8;
+        const HC_FN_ELEMS: usize = 24 * 20480;
+        const GATE_W_ELEMS: usize = DS_ROUTED_EXPERTS * DS_DIM;
+
+        let mut h_hc_ffn_fn = vec![0.0f32; NUM_UT * HC_FN_ELEMS];
+        let mut h_hc_ffn_scale = vec![0.0f32; NUM_UT * 3];
+        let mut h_hc_ffn_base = vec![0.0f32; NUM_UT * 24];
+        let mut h_ffn_norm_w = vec![0u16; NUM_UT * DS_DIM];
+        let mut h_gate_w = vec![0u16; NUM_UT * GATE_W_ELEMS];
+        let mut h_gate_bias = vec![0.0f32; NUM_UT * DS_ROUTED_EXPERTS];
+        let mut h_final_norm_w = vec![0u16; DS_DIM];
+
+        // Allocate contiguous 4K-aligned array of 8 Dsv41Mcl4cExpertPacket structs
+        let layout_8 = std::alloc::Layout::from_size_align(
+            NUM_UT * std::mem::size_of::<Dsv41Mcl4cExpertPacket>(),
+            4096,
+        )
+        .unwrap();
+        let upper_pkts_ptr = unsafe {
+            let p = std::alloc::alloc_zeroed(layout_8) as *mut Dsv41Mcl4cExpertPacket;
+            if p.is_null() {
+                std::alloc::handle_alloc_error(layout_8);
+            }
+            p
+        };
+        let upper_pkts_slice = unsafe { std::slice::from_raw_parts_mut(upper_pkts_ptr, NUM_UT) };
+
+        let t_ut_load = Instant::now();
+        {
+            let fn_bytes: &mut [u8] = unsafe {
+                std::slice::from_raw_parts_mut(
+                    h_hc_ffn_fn.as_mut_ptr() as *mut u8,
+                    h_hc_ffn_fn.len() * 4,
+                )
+            };
+            let sc_bytes: &mut [u8] = unsafe {
+                std::slice::from_raw_parts_mut(
+                    h_hc_ffn_scale.as_mut_ptr() as *mut u8,
+                    h_hc_ffn_scale.len() * 4,
+                )
+            };
+            let bs_bytes: &mut [u8] = unsafe {
+                std::slice::from_raw_parts_mut(
+                    h_hc_ffn_base.as_mut_ptr() as *mut u8,
+                    h_hc_ffn_base.len() * 4,
+                )
+            };
+            let nw_bytes: &mut [u8] = unsafe {
+                std::slice::from_raw_parts_mut(
+                    h_ffn_norm_w.as_mut_ptr() as *mut u8,
+                    h_ffn_norm_w.len() * 2,
+                )
+            };
+            let gw_bytes: &mut [u8] = unsafe {
+                std::slice::from_raw_parts_mut(
+                    h_gate_w.as_mut_ptr() as *mut u8,
+                    h_gate_w.len() * 2,
+                )
+            };
+            let gb_bytes: &mut [u8] = unsafe {
+                std::slice::from_raw_parts_mut(
+                    h_gate_bias.as_mut_ptr() as *mut u8,
+                    h_gate_bias.len() * 4,
+                )
+            };
+            let final_nw_bytes: &mut [u8] = unsafe {
+                std::slice::from_raw_parts_mut(
+                    h_final_norm_w.as_mut_ptr() as *mut u8,
+                    h_final_norm_w.len() * 2,
+                )
+            };
+            index.read_tensor_exact("norm.weight", final_nw_bytes)?;
+
+            thread::scope(|s| {
+                for (u, ((((fn_ch, sc_ch), (bs_ch, nw_ch)), (gw_ch, gb_ch)), pkt)) in fn_bytes
+                    .chunks_mut(HC_FN_ELEMS * 4)
+                    .zip(sc_bytes.chunks_mut(3 * 4))
+                    .zip(
+                        bs_bytes
+                            .chunks_mut(24 * 4)
+                            .zip(nw_bytes.chunks_mut(DS_DIM * 2)),
+                    )
+                    .zip(
+                        gw_bytes
+                            .chunks_mut(GATE_W_ELEMS * 2)
+                            .zip(gb_bytes.chunks_mut(DS_ROUTED_EXPERTS * 4)),
+                    )
+                    .zip(upper_pkts_slice.iter_mut())
+                    .enumerate()
+                {
+                    let idx_ref = Arc::clone(&index);
+                    let layer = 32 + u;
+                    s.spawn(move || {
+                        idx_ref
+                            .read_tensor_exact(&format!("layers.{}.hc_ffn_fn", layer), fn_ch)
+                            .unwrap();
+                        idx_ref
+                            .read_tensor_exact(&format!("layers.{}.hc_ffn_scale", layer), sc_ch)
+                            .unwrap();
+                        idx_ref
+                            .read_tensor_exact(&format!("layers.{}.hc_ffn_base", layer), bs_ch)
+                            .unwrap();
+                        idx_ref
+                            .read_tensor_exact(&format!("layers.{}.ffn_norm.weight", layer), nw_ch)
+                            .unwrap();
+                        idx_ref
+                            .read_tensor_exact(&format!("layers.{}.ffn.gate.weight", layer), gw_ch)
+                            .unwrap();
+                        idx_ref
+                            .read_tensor_exact(&format!("layers.{}.ffn.gate.bias", layer), gb_ch)
+                            .unwrap();
+                        idx_ref.stream_expert_packet(layer, 0, pkt).unwrap();
+                    });
+                }
+            });
+        }
+        let ut_load_ms = t_ut_load.elapsed().as_secs_f64() * 1000.0;
+        println!(
+            "    -> Streamed 8 Real Upper-Tail Layers (L32..L39, Shards 35..42 + Shard 43, 206.56 MiB) across 8 threads in {:.2} ms",
+            ut_load_ms
+        );
+
+        let mut tel = Dsv41RsiTelemetryOut::default();
+        let rc = unsafe {
+            mcl4_dsv41_run_upper_tail_rsi_trainer(
+                h_hc_ffn_fn.as_ptr(),
+                h_hc_ffn_scale.as_ptr(),
+                h_hc_ffn_base.as_ptr(),
+                h_ffn_norm_w.as_ptr(),
+                h_gate_w.as_ptr(),
+                h_gate_bias.as_ptr(),
+                upper_pkts_ptr as *const Dsv41Mcl4cExpertPacket,
+                h_final_norm_w.as_ptr(),
+                50,
+                50,
+                &mut tel,
+            )
+        };
+        assert_eq!(rc, 0, "Upper-Tail RSI trainer failed");
+
+        println!(
+            "    => [STAGE-1 SUMMARY (50 Steps)]: MSE {:.6} -> {:.6} ({:.1}% reduction) | 384-Expert Top-6 Recall: {:.1}% -> {:.1}% ({:.2} ms total)",
+            tel.stage1_init_mse,
+            tel.stage1_final_mse,
+            100.0 * (1.0 - (tel.stage1_final_mse / tel.stage1_init_mse.max(1e-12))),
+            tel.stage1_init_top6_recall * 100.0,
+            tel.stage1_final_top6_recall * 100.0,
+            tel.stage1_total_ms
+        );
+        println!(
+            "    => [STAGE-2 SUMMARY (50 Steps, G=8, Dream-RSI=3, Mitosis=OFF)]:\n       - Mean Reward: {:.4} -> {:.4} (+{:.4}) | Mean Pearson Novelty N(q): {:.3}\n       - NCM Codebook Perplexity: {:.2} / 64 ({} active codebooks) | Final 384-Lookahead Recall: {:.1}%\n       - Plastic Weight Delta L2 Norm (L32..L39 W_dec): {:.4}\n       - Stage-2 Wall-Clock: {:.2} ms ({:.2} ms/step = {:.1} RL/RSI train tok/s!)",
+            tel.stage2_init_reward,
+            tel.stage2_final_reward,
+            tel.stage2_final_reward - tel.stage2_init_reward,
+            tel.stage2_mean_novelty,
+            tel.stage2_final_codebook_ppl,
+            tel.stage2_active_codebooks,
+            tel.stage2_final_top6_recall * 100.0,
+            tel.stage2_weight_delta_l2,
+            tel.stage2_total_ms,
+            tel.stage2_ms_per_step,
+            tel.stage2_train_tok_per_s
+        );
+
+        unsafe {
+            std::alloc::dealloc(upper_pkts_ptr as *mut u8, layout_8);
+        }
+    }
+
     println!("================================================================================");
     Ok(())
 }

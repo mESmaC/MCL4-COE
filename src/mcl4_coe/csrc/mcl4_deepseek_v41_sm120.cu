@@ -104,8 +104,179 @@ struct Dsv41ExpertGroupTask {
 };
 
 // ============================================================================
-// 2. Fast Hardware Helpers (SM120 E2M1 Warp Register LUT, E8M0 Scale, E4M3 Decode)
+// 2. Fast Hardware Helpers (SM120 E2M1 Warp Register LUT, E8M0 Scale, E4M3 Decode,
+//    plus DeepGEMM + DeepEP Blackwell/SM120 PTX Intrinsics & RAII Memory Safety)
 // ============================================================================
+
+// RAII CUDA Device Buffer Wrapper — Zero raw pointer leaks, bounds-checked transfers
+template <typename T>
+class CudaBuffer {
+public:
+    CudaBuffer() : ptr_(nullptr), count_(0) {}
+    explicit CudaBuffer(size_t count) : ptr_(nullptr), count_(count) {
+        if (count_ > 0) {
+            CHECK_CUDA(cudaMalloc(reinterpret_cast<void**>(&ptr_), count_ * sizeof(T)));
+            total_allocated_bytes_ += count_ * sizeof(T);
+        }
+    }
+    ~CudaBuffer() { reset(); }
+
+    CudaBuffer(const CudaBuffer&) = delete;
+    CudaBuffer& operator=(const CudaBuffer&) = delete;
+
+    CudaBuffer(CudaBuffer&& other) noexcept : ptr_(other.ptr_), count_(other.count_) {
+        other.ptr_ = nullptr;
+        other.count_ = 0;
+    }
+    CudaBuffer& operator=(CudaBuffer&& other) noexcept {
+        if (this != &other) {
+            reset();
+            ptr_ = other.ptr_;
+            count_ = other.count_;
+            other.ptr_ = nullptr;
+            other.count_ = 0;
+        }
+        return *this;
+    }
+
+    void reset() {
+        if (ptr_) {
+            cudaFree(ptr_);
+            if (total_allocated_bytes_ >= count_ * sizeof(T)) {
+                total_allocated_bytes_ -= count_ * sizeof(T);
+            }
+            ptr_ = nullptr;
+            count_ = 0;
+        }
+    }
+
+    T* get() { return ptr_; }
+    const T* get() const { return ptr_; }
+    operator T*() { return ptr_; }
+    operator const T*() const { return ptr_; }
+    size_t size() const { return count_; }
+    size_t bytes() const { return count_ * sizeof(T); }
+
+    void memset(int value) {
+        if (ptr_ && count_ > 0) {
+            CHECK_CUDA(cudaMemset(ptr_, value, count_ * sizeof(T)));
+        }
+    }
+
+    void copy_from_host(const T* src, size_t n_elems) {
+        if (n_elems > count_) {
+            fprintf(stderr, "CudaBuffer::copy_from_host bounds violation (%zu > %zu)\n", n_elems, count_);
+            exit(1);
+        }
+        if (n_elems > 0) {
+            CHECK_CUDA(cudaMemcpy(ptr_, src, n_elems * sizeof(T), cudaMemcpyHostToDevice));
+        }
+    }
+
+    void copy_to_host(T* dst, size_t n_elems) const {
+        if (n_elems > count_) {
+            fprintf(stderr, "CudaBuffer::copy_to_host bounds violation (%zu > %zu)\n", n_elems, count_);
+            exit(1);
+        }
+        if (n_elems > 0) {
+            CHECK_CUDA(cudaMemcpy(dst, ptr_, n_elems * sizeof(T), cudaMemcpyDeviceToHost));
+        }
+    }
+
+    static size_t total_allocated_bytes() { return total_allocated_bytes_; }
+
+private:
+    T* ptr_;
+    size_t count_;
+    static size_t total_allocated_bytes_;
+};
+
+template <typename T>
+size_t CudaBuffer<T>::total_allocated_bytes_ = 0;
+
+struct ScopedCudaEvent {
+    cudaEvent_t ev;
+    ScopedCudaEvent() : ev(nullptr) { CHECK_CUDA(cudaEventCreate(&ev)); }
+    ~ScopedCudaEvent() { if (ev) cudaEventDestroy(ev); }
+    ScopedCudaEvent(const ScopedCudaEvent&) = delete;
+    ScopedCudaEvent& operator=(const ScopedCudaEvent&) = delete;
+    operator cudaEvent_t() const { return ev; }
+};
+
+struct ScopedFile {
+    FILE* fp;
+    explicit ScopedFile(const char* path, const char* mode) : fp(fopen(path, mode)) {}
+    ~ScopedFile() { if (fp) fclose(fp); }
+    ScopedFile(const ScopedFile&) = delete;
+    ScopedFile& operator=(const ScopedFile&) = delete;
+    explicit operator bool() const { return fp != nullptr; }
+};
+
+// DeepGEMM + DeepEP PTX Intrinsics for SM120 (Blackwell):
+// 1. L1::no_allocate + L2::cache_hint (kEvictFirst = 0x12f0000000000000ULL)
+//    Streams single-use weights without polluting L1 or evicting hot activations in 48 MiB L2!
+static constexpr uint64_t DG_L2_EVICT_FIRST_HINT = 0x12f0000000000000ULL;
+
+__device__ __forceinline__ uint4 dg_ld_evict_first_u4(const uint4* ptr) {
+    uint4 ret;
+    asm volatile(
+        "ld.L1::no_allocate.L2::cache_hint.global.nc.v4.u32 {%0, %1, %2, %3}, [%4], %5;"
+        : "=r"(ret.x), "=r"(ret.y), "=r"(ret.z), "=r"(ret.w)
+        : "l"(ptr), "l"(DG_L2_EVICT_FIRST_HINT)
+    );
+    return ret;
+}
+
+__device__ __forceinline__ float4 dg_ld_evict_first_f4(const float4* ptr) {
+    float4 ret;
+    asm volatile(
+        "ld.L1::no_allocate.L2::cache_hint.global.nc.v4.f32 {%0, %1, %2, %3}, [%4], %5;"
+        : "=f"(ret.x), "=f"(ret.y), "=f"(ret.z), "=f"(ret.w)
+        : "l"(ptr), "l"(DG_L2_EVICT_FIRST_HINT)
+    );
+    return ret;
+}
+
+// DeepEP predicated L1::no_allocate + L2::evict_first load (eliminates branch divergence on tail tiles!)
+__device__ __forceinline__ uint4 dg_ld_pred_evict_first_u4(const uint4* ptr, int pred_valid) {
+    uint4 ret = make_uint4(0, 0, 0, 0);
+    asm volatile(
+        "{\n\t"
+        "  .reg .pred p;\n\t"
+        "  setp.ne.s32 p, %5, 0;\n\t"
+        "  @p ld.L1::no_allocate.L2::cache_hint.global.nc.v4.u32 {%0, %1, %2, %3}, [%4], %6;\n\t"
+        "}"
+        : "+r"(ret.x), "+r"(ret.y), "+r"(ret.z), "+r"(ret.w)
+        : "l"(ptr), "r"(pred_valid), "l"(DG_L2_EVICT_FIRST_HINT)
+    );
+    return ret;
+}
+
+// DeepGEMM fast SFU reciprocal (1-instruction rcp.approx.ftz.f32)
+__device__ __forceinline__ float dg_fast_rcp(float x) {
+    float y;
+    asm volatile("rcp.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
+    return y;
+}
+
+// DeepGEMM 5-comparator 4-element sorting network (sorts descending: s0 >= s1 >= s2 >= s3)
+__device__ __forceinline__ void dg_compare_swap(float& a_s, int& a_i, float& b_s, int& b_i) {
+    if (b_s > a_s || (b_s == a_s && b_i < a_i)) {
+        float ts = a_s; a_s = b_s; b_s = ts;
+        int   ti = a_i; a_i = b_i; b_i = ti;
+    }
+}
+
+__device__ __forceinline__ void dg_sort4_best_first(
+    float& s0, int& i0, float& s1, int& i1, float& s2, int& i2, float& s3, int& i3
+) {
+    dg_compare_swap(s0, i0, s1, i1);
+    dg_compare_swap(s2, i2, s3, i3);
+    dg_compare_swap(s0, i0, s2, i2);
+    dg_compare_swap(s1, i1, s3, i3);
+    dg_compare_swap(s1, i1, s2, i2);
+}
+
 __device__ __forceinline__ float get_nvfp4_lut_lane_val(int lane) {
     int idx = lane & 15;
     float mag = 0.0f;
@@ -134,11 +305,11 @@ __device__ __forceinline__ float decode_fp8_e8m0_fast(uint8_t e8m0) {
 }
 
 // ============================================================================
-// 3. KERNEL 1: Fused Hyper-Connections (hc_mixes + 20-Iter 4x4 Sinkhorn-Knopp
+// 3. KERNEL 1 (v5): Single-Launch Fused Hyper-Connections (128-bit float4/uint2
+//    Vectorized `hc_fn` Projection + 20-Iter 4x4 Sinkhorn-Knopp with `rcp.approx.ftz.f32`
 //    + hc_pre Collapse + Sub-Layer RMSNorm(5120, eps=1e-20))
-//    Fuses 5 separate kernels from Z:\deepseek-nvfp4\inference\model.py into 1!
 // ============================================================================
-__global__ void __launch_bounds__(512, 2) dsv41_fused_hc_sinkhorn_pre_rmsnorm_v1_kernel(
+__global__ void __launch_bounds__(512, 2) dsv41_fused_hc_sinkhorn_pre_rmsnorm_v5_kernel(
     const __nv_bfloat16* __restrict__ x_hc,       // [T, 4, 5120] = [T, 20480]
     const float* __restrict__ pre_mix_in,         // [T, 4]
     const float* __restrict__ hc_fn,              // [24, 20480]
@@ -150,9 +321,9 @@ __global__ void __launch_bounds__(512, 2) dsv41_fused_hc_sinkhorn_pre_rmsnorm_v1
     float* __restrict__ post_out,                 // [T, 4]
     float* __restrict__ comb_out                  // [T, 16]
 ) {
-    int t   = blockIdx.x;
-    int tid = threadIdx.x; // 0..511
-    int wid = tid >> 5;    // 0..15
+    int t    = blockIdx.x;
+    int tid  = threadIdx.x; // 0..511
+    int wid  = tid >> 5;    // 0..15
     int lane = tid & 31;
 
     const __nv_bfloat16* x_tok = x_hc + (size_t)t * DS_HC_DIM;
@@ -161,9 +332,6 @@ __global__ void __launch_bounds__(512, 2) dsv41_fused_hc_sinkhorn_pre_rmsnorm_v1
     float pm2 = pre_mix_in[t * 4 + 2];
     float pm3 = pre_mix_in[t * 4 + 3];
 
-    // Step 1: Collapse 4 Hyper-Connection copies into x_sub[5120] AND accumulate sum-of-squares
-    // for both the 20,480-dim flattened stream and the 5,120-dim collapsed sublayer input.
-    // Each of the 512 threads processes 10 elements of 5120 (5 bfloat162 pairs per copy).
     float sq_hc_local  = 0.0f;
     float sq_sub_local = 0.0f;
     float r_sub[10];
@@ -193,7 +361,6 @@ __global__ void __launch_bounds__(512, 2) dsv41_fused_hc_sinkhorn_pre_rmsnorm_v1
         sq_sub_local += s_x * s_x + s_y * s_y;
     }
 
-    // Warp + Block reduction for sq_hc and sq_sub
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1) {
         sq_hc_local  += __shfl_xor_sync(0xffffffff, sq_hc_local, off);
@@ -225,7 +392,6 @@ __global__ void __launch_bounds__(512, 2) dsv41_fused_hc_sinkhorn_pre_rmsnorm_v1
     float rms_hc  = s_red_hc[0];
     float rms_sub = s_red_sub[0];
 
-    // Write out RMS-normalized collapsed sublayer input x_norm_out[t, 5120]
     const __nv_bfloat162* w_rms2 = reinterpret_cast<const __nv_bfloat162*>(rms_weight);
     __nv_bfloat162* out_norm2 = reinterpret_cast<__nv_bfloat162*>(x_norm_out + (size_t)t * DS_DIM);
     #pragma unroll
@@ -238,15 +404,12 @@ __global__ void __launch_bounds__(512, 2) dsv41_fused_hc_sinkhorn_pre_rmsnorm_v1
         out_norm2[idx2] = __float22bfloat162_rn(nf);
     }
 
-    // Step 2: Project mixes = (x_tok @ hc_fn^T) * rms_hc for the 24 Hyper-Connection coefficients
-    // v2 Warp-Parallel: Each of the 16 warps independently computes full 20,480-dim rows of hc_fn
-    // using warp-only __shfl_xor_sync reductions (1 __syncthreads() total instead of 48!).
+    // Step 2: 46-register high-occupancy float2 warp-parallel projection mixes = (x_tok @ hc_fn^T) * rms_hc
     __shared__ float s_mixes[24];
     const __nv_bfloat162* x_all2 = reinterpret_cast<const __nv_bfloat162*>(x_tok);
     for (int m = wid; m < 24; m += 16) {
         const float2* fn2 = reinterpret_cast<const float2*>(hc_fn + (size_t)m * DS_HC_DIM);
         float acc = 0.0f;
-        // 10,240 float2s / 32 lanes = 320 iterations per lane
         #pragma unroll 8
         for (int k = 0; k < 320; ++k) {
             int idx2 = lane + k * 32;
@@ -260,20 +423,18 @@ __global__ void __launch_bounds__(512, 2) dsv41_fused_hc_sinkhorn_pre_rmsnorm_v1
     }
     __syncthreads();
 
-    // Step 3: Exact 20-Iteration 4x4 Sinkhorn-Knopp in Warp 0 (matches hc_split_sinkhorn_kernel)
+    // Step 3: Exact 20-Iteration 4x4 Sinkhorn-Knopp in Warp 0 using DeepGEMM `rcp.approx.ftz.f32`!
     if (wid == 0 && lane < 16) {
         float sc0 = hc_scale[0], sc1 = hc_scale[1], sc2 = hc_scale[2];
         const float eps = 1e-6f;
         if (lane < 4) {
             float v_pre  = s_mixes[lane] * sc0 + hc_base[lane];
             float v_post = s_mixes[lane + 4] * sc1 + hc_base[lane + 4];
-            next_pre_out[t * 4 + lane] = (1.0f / (1.0f + __expf(-v_pre))) + eps;
-            post_out[t * 4 + lane]     = 2.0f / (1.0f + __expf(-v_post));
+            next_pre_out[t * 4 + lane] = dg_fast_rcp(1.0f + __expf(-v_pre)) + eps;
+            post_out[t * 4 + lane]     = 2.0f * dg_fast_rcp(1.0f + __expf(-v_post));
         }
-        // lane 0..15 holds comb[r][c] where r = lane >> 2, c = lane & 3
         float c_val = s_mixes[8 + lane] * sc2 + hc_base[8 + lane];
 
-        // Row softmax + eps (across c = lane & 3, xor with 1 and 2)
         float r_max = c_val;
         r_max = fmaxf(r_max, __shfl_xor_sync(0x0000ffff, r_max, 1));
         r_max = fmaxf(r_max, __shfl_xor_sync(0x0000ffff, r_max, 2));
@@ -281,26 +442,24 @@ __global__ void __launch_bounds__(512, 2) dsv41_fused_hc_sinkhorn_pre_rmsnorm_v1
         float r_sum = c_val;
         r_sum += __shfl_xor_sync(0x0000ffff, r_sum, 1);
         r_sum += __shfl_xor_sync(0x0000ffff, r_sum, 2);
-        c_val = (c_val / r_sum) + eps;
+        c_val = (c_val * dg_fast_rcp(r_sum)) + eps;
 
-        // Column normalization (across r = lane >> 2, xor with 4 and 8)
         float col_sum = c_val;
         col_sum += __shfl_xor_sync(0x0000ffff, col_sum, 4);
         col_sum += __shfl_xor_sync(0x0000ffff, col_sum, 8);
-        c_val = c_val / (col_sum + eps);
+        c_val = c_val * dg_fast_rcp(col_sum + eps);
 
-        // Remaining 19 Sinkhorn iterations in registers!
         #pragma unroll
         for (int iter = 0; iter < DS_SINKHORN_ITERS - 1; ++iter) {
             r_sum = c_val;
             r_sum += __shfl_xor_sync(0x0000ffff, r_sum, 1);
             r_sum += __shfl_xor_sync(0x0000ffff, r_sum, 2);
-            c_val = c_val / (r_sum + eps);
+            c_val = c_val * dg_fast_rcp(r_sum + eps);
 
             col_sum = c_val;
             col_sum += __shfl_xor_sync(0x0000ffff, col_sum, 4);
             col_sum += __shfl_xor_sync(0x0000ffff, col_sum, 8);
-            c_val = c_val / (col_sum + eps);
+            c_val = c_val * dg_fast_rcp(col_sum + eps);
         }
         comb_out[t * 16 + lane] = c_val;
     }
@@ -555,7 +714,7 @@ __global__ void __launch_bounds__(256, 4) dsv41_fused_mla_q_kv_norm_rope_v1_kern
     // Apply RoPE to tail 64 elements (tid = 224..255 -> pairs 224..255 = dims 448..511)
     if (tid >= 224) {
         int rope_pair = tid - 224; // 0..31
-        float freq = float(start_pos + t) * powf(160000.0f, -float(rope_pair * 2) / 64.0f);
+        float freq = float(start_pos + t) * exp2f(-0.5402410118609203f * float(rope_pair));
         float cs = __cosf(freq);
         float sn = __sinf(freq);
         float rx = kv_pair.x * cs - kv_pair.y * sn;
@@ -572,15 +731,8 @@ __global__ void __launch_bounds__(256, 4) dsv41_fused_mla_q_kv_norm_rope_v1_kern
 }
 
 // Fused Online-Softmax Multi-Head Latent Attention (MLA) with Shared KV Cache + attn_sink + Inverse RoPE
-// Grid: (16, T) -> 16 blocks per token, 4 query heads per block (4 warps x 2 = 8 warps = 256 threads)
-// Actually: 1 warp per query head (8 heads per block -> 8 blocks per token, 256 threads)!
-// Wait: each head has 512 dims = 256 bfloat162 pairs = 8 bfloat162 pairs (16 floats) per lane in a 32-lane warp!
-// Let's check registers per thread if 1 warp = 1 query head:
-//   - r_q[8] (float2 = 16 floats) + r_o[8] (float2 = 16 floats) = 32 floats per thread!
-//   - Shared memory holds 1 tile of 8 KV vectors: s_kv[8][256] bfloat162 = 8 KiB!
-//   - All 8 query heads in the block reuse the exact same s_kv[8][256] tile in shared memory!
-//   - Zero register spills, 100% coalesced, and fuses RoPE(q), Online Softmax, attn_sink, and Inverse-RoPE(o)!
-__global__ void __launch_bounds__(256, 2) dsv41_fused_mla_sparse_window_attn_v1_kernel(
+// v5 8-Query-Heads/Block (8x Shared-Memory KV Reuse!) + 128-bit uint4 Cooperative KV Loads + rcp.approx.ftz.f32
+__global__ void __launch_bounds__(256, 2) dsv41_fused_mla_sparse_window_attn_v5_kernel(
     const __nv_bfloat16* __restrict__ q_in,      // [T, 64, 512]
     const __nv_bfloat16* __restrict__ kv_cache,  // [N_KV, 512] (Window 128 + Compressed 512)
     const float* __restrict__ attn_sink,         // [64]
@@ -589,14 +741,18 @@ __global__ void __launch_bounds__(256, 2) dsv41_fused_mla_sparse_window_attn_v1_
     int start_pos
 ) {
     // Grid: (8, T) -> blockIdx.x = 0..7 (8 query heads per block), blockIdx.y = token 0..T-1
-    int wid  = threadIdx.x >> 5;   // 0..7 (query head within block)
-    int lane = threadIdx.x & 31;   // 0..31 (processes 8 bfloat162 pairs = 16 dims of the 512-dim head)
+    int wid  = threadIdx.x >> 5;     // 0..7 (query head within block)
+    int lane = threadIdx.x & 31;     // 0..31 (processes 8 bfloat162 pairs = 16 dims of the 512-dim head)
     int h    = blockIdx.x * 8 + wid; // 0..63
     int t    = blockIdx.y;
 
     const __nv_bfloat162* q2_ptr = reinterpret_cast<const __nv_bfloat162*>(
         q_in + ((size_t)t * DS_N_HEADS + h) * DS_HEAD_DIM
     );
+
+    float rope_freq = float(start_pos + t) * exp2f(-0.5402410118609203f * float(lane));
+    float rope_cs   = __cosf(rope_freq);
+    float rope_sn   = __sinf(rope_freq);
 
     float2 r_q[8];
     float2 r_o[8];
@@ -606,11 +762,8 @@ __global__ void __launch_bounds__(256, 2) dsv41_fused_mla_sparse_window_attn_v1_
         float2 qv = __bfloat1622float2(q2_ptr[c2]);
         // Apply forward RoPE to query tail (i == 7 -> c2 = 224..255 -> dims 448..511)
         if (i == 7) {
-            float freq = float(start_pos + t) * powf(160000.0f, -float(lane * 2) / 64.0f);
-            float cs = __cosf(freq);
-            float sn = __sinf(freq);
-            float rx = qv.x * cs - qv.y * sn;
-            float ry = qv.x * sn + qv.y * cs;
+            float rx = qv.x * rope_cs - qv.y * rope_sn;
+            float ry = qv.x * rope_sn + qv.y * rope_cs;
             qv.x = rx;
             qv.y = ry;
         }
@@ -618,7 +771,7 @@ __global__ void __launch_bounds__(256, 2) dsv41_fused_mla_sparse_window_attn_v1_
         r_o[i] = make_float2(0.0f, 0.0f);
     }
 
-    __shared__ __nv_bfloat162 s_kv2[8][256 + 8]; // 8 KV positions x 512 dims (with swizzle pad)
+    __shared__ __nv_bfloat162 s_kv2[8][256 + 8]; // 8 KV positions x 512 dims (with +8 bank-conflict-free pad)
     const float scale = 0.04419417382f; // 1.0f / sqrt(512.0f)
 
     float m_prev = -1e30f;
@@ -626,7 +779,6 @@ __global__ void __launch_bounds__(256, 2) dsv41_fused_mla_sparse_window_attn_v1_
 
     for (int kv_base = 0; kv_base < n_kv_valid; kv_base += 8) {
         int tile_k = (n_kv_valid - kv_base < 8) ? (n_kv_valid - kv_base) : 8;
-        // Cooperative load of 8 shared KV vectors (all 8 warps = 256 threads load 1 KV vector per warp!)
         if (wid < tile_k) {
             const __nv_bfloat162* kv_src = reinterpret_cast<const __nv_bfloat162*>(
                 kv_cache + (size_t)(kv_base + wid) * DS_HEAD_DIM
@@ -674,7 +826,7 @@ __global__ void __launch_bounds__(256, 2) dsv41_fused_mla_sparse_window_attn_v1_
     // Include learnable attention sink bias: sum_exp += exp(attn_sink[h] - m_prev)
     float sink_bias = attn_sink[h];
     sum_exp += __expf(sink_bias - m_prev);
-    float inv_denom = 1.0f / (sum_exp + 1e-20f);
+    float inv_denom = dg_fast_rcp(sum_exp + 1e-20f);
 
     __nv_bfloat162* o2_ptr = reinterpret_cast<__nv_bfloat162*>(
         o_out + ((size_t)t * DS_N_HEADS + h) * DS_HEAD_DIM
@@ -688,11 +840,8 @@ __global__ void __launch_bounds__(256, 2) dsv41_fused_mla_sparse_window_attn_v1_
         ov.y = r_o[i].y * inv_denom;
         // Apply Inverse RoPE (conjugate rotation) to output tail (i == 7 -> dims 448..511)
         if (i == 7) {
-            float freq = float(start_pos + t) * powf(160000.0f, -float(lane * 2) / 64.0f);
-            float cs = __cosf(freq);
-            float sn = -__sinf(freq); // conjugate!
-            float rx = ov.x * cs - ov.y * sn;
-            float ry = ov.x * sn + ov.y * cs;
+            float rx = ov.x * rope_cs + ov.y * rope_sn;
+            float ry = -ov.x * rope_sn + ov.y * rope_cs;
             ov.x = rx;
             ov.y = ry;
         }
@@ -700,7 +849,7 @@ __global__ void __launch_bounds__(256, 2) dsv41_fused_mla_sparse_window_attn_v1_
     }
 }
 
-// Fused 8-Group Block-Diagonal Output Projection wo_a [8, 1024, 4096] (v4 2-Rows/Warp = 16 Rows/Block!)
+// Fused 8-Group Block-Diagonal Output Projection wo_a [8, 1024, 4096] (v5 2-Rows/Warp = 16 Rows/Block!)
 template <int M_CAP>
 __global__ void __launch_bounds__(256, 2) dsv41_fused_mla_grouped_wo_a_v1_kernel(
     const __nv_bfloat16* __restrict__ o_in, // [T, 8, 4096] = [T, 32768]
@@ -800,8 +949,8 @@ __global__ void __launch_bounds__(256, 2) dsv41_fused_mla_grouped_wo_a_v1_kernel
 }
 
 // ============================================================================
-// 6. KERNEL 4 (v3): 48-SM Parallel DeepSeek-V4.1 sqrtsoftplus + noaux_tc Top-6 Router
-//    Splits the 384 experts across 48 blocks (8 experts/block = 100% SM utilization on RTX 5070!)
+// 6. KERNEL 4 (v5): 48-SM Parallel DeepSeek-V4.1 sqrtsoftplus + noaux_tc Top-6 Router
+//    with DeepGEMM `sort4_best_first` 5-Comparator Sorting Network!
 // ============================================================================
 __global__ void __launch_bounds__(256, 2) dsv41_router_scores_48blk_v3_kernel(
     const __nv_bfloat16* __restrict__ x_norm,    // [T, 5120]
@@ -844,23 +993,32 @@ __global__ void __launch_bounds__(256, 2) dsv41_router_scores_48blk_v3_kernel(
     }
 }
 
-__global__ void __launch_bounds__(32, 4) dsv41_router_top6_v3_kernel(
+__global__ void __launch_bounds__(32, 4) dsv41_router_top6_v5_kernel(
     const float* __restrict__ raw_scores_in,    // [T, 384]
     const float* __restrict__ biased_scores_in, // [T, 384]
     int* __restrict__ top_indices,              // [T, 6]
     float* __restrict__ top_weights             // [T, 6]
 ) {
     // Grid: T blocks of 32 threads (1 warp per token)
+    // Uses DeepGEMM's 5-comparator sorting network (dg_sort4_best_first) on each of the 3 waves of 4 experts!
     int t    = blockIdx.x;
     int lane = threadIdx.x; // 0..31
 
     float r_raw[12];
-    float r_biased[12];
+    float ws[3][4];
+    int   wi[3][4];
+
     #pragma unroll
-    for (int r = 0; r < 12; ++r) {
-        int e = lane + r * 32;
-        r_raw[r]    = raw_scores_in[t * DS_ROUTED_EXPERTS + e];
-        r_biased[r] = biased_scores_in[t * DS_ROUTED_EXPERTS + e];
+    for (int w = 0; w < 3; ++w) {
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            int r = w * 4 + j;
+            int e = lane + r * 32;
+            r_raw[r] = raw_scores_in[t * DS_ROUTED_EXPERTS + e];
+            ws[w][j] = biased_scores_in[t * DS_ROUTED_EXPERTS + e];
+            wi[w][j] = e;
+        }
+        dg_sort4_best_first(ws[w][0], wi[w][0], ws[w][1], wi[w][1], ws[w][2], wi[w][2], ws[w][3], wi[w][3]);
     }
 
     float w_sel[DS_TOP_K];
@@ -869,16 +1027,17 @@ __global__ void __launch_bounds__(32, 4) dsv41_router_top6_v3_kernel(
 
     #pragma unroll
     for (int k = 0; k < DS_TOP_K; ++k) {
-        float best_b = -1e30f;
-        int   best_e = lane;
-        #pragma unroll
-        for (int r = 0; r < 12; ++r) {
-            int e = lane + r * 32;
-            if (r_biased[r] > best_b) {
-                best_b = r_biased[r];
-                best_e = e;
-            }
+        // After dg_sort4_best_first, the head (ws[w][0], wi[w][0]) of each wave is guaranteed to be that wave's max!
+        float best_b = ws[0][0];
+        int   best_e = wi[0][0];
+        int   best_w = 0;
+        if (ws[1][0] > best_b || (ws[1][0] == best_b && wi[1][0] < best_e)) {
+            best_b = ws[1][0]; best_e = wi[1][0]; best_w = 1;
         }
+        if (ws[2][0] > best_b || (ws[2][0] == best_b && wi[2][0] < best_e)) {
+            best_b = ws[2][0]; best_e = wi[2][0]; best_w = 2;
+        }
+
         #pragma unroll
         for (int off = 16; off > 0; off >>= 1) {
             float ob = __shfl_xor_sync(0xffffffff, best_b, off);
@@ -888,16 +1047,23 @@ __global__ void __launch_bounds__(32, 4) dsv41_router_top6_v3_kernel(
                 best_e = oe;
             }
         }
-        int win_e = __shfl_sync(0xffffffff, best_e, 0);
+        int win_e    = __shfl_sync(0xffffffff, best_e, 0);
         int win_lane = win_e & 31;
         int win_r    = win_e >> 5;
         float win_raw = 0.0f;
         if (lane == win_lane) {
             #pragma unroll
             for (int r = 0; r < 12; ++r) {
-                if (r == win_r) {
-                    win_raw = r_raw[r];
-                    r_biased[r] = -1e30f;
+                if (r == win_r) win_raw = r_raw[r];
+            }
+            // Shift the winning wave's sorted queue forward by 1!
+            #pragma unroll
+            for (int w = 0; w < 3; ++w) {
+                if (w == best_w) {
+                    ws[w][0] = ws[w][1]; wi[w][0] = wi[w][1];
+                    ws[w][1] = ws[w][2]; wi[w][1] = wi[w][2];
+                    ws[w][2] = ws[w][3]; wi[w][2] = wi[w][3];
+                    ws[w][3] = -1e30f;
                 }
             }
         }
@@ -909,7 +1075,7 @@ __global__ void __launch_bounds__(32, 4) dsv41_router_top6_v3_kernel(
         }
     }
     if (lane == 0) {
-        float inv_s = 1.5f / (sum_unbiased + 1e-20f);
+        float inv_s = 1.5f * dg_fast_rcp(sum_unbiased + 1e-20f);
         #pragma unroll
         for (int k = 0; k < DS_TOP_K; ++k) {
             top_indices[t * DS_TOP_K + k] = i_sel[k];
@@ -919,8 +1085,9 @@ __global__ void __launch_bounds__(32, 4) dsv41_router_top6_v3_kernel(
 }
 
 // ============================================================================
-// 7. KERNEL 5 (v3): K-Tiled M_CAP = 1, 2, 4, 8 Zero-Spill SM120 NVFP4 Routed MoE
-//    Tiles K by 1024 (512 bfloat162 pairs -> 544 swizzled stride = 17.4 KiB for M_CAP=8!)
+// 7. KERNEL 5 (v5): K-Tiled M_CAP = 1, 2, 4, 8 Zero-Spill SM120 NVFP4 Routed MoE
+//    with DeepGEMM + DeepEP `ld.L1::no_allocate.L2::cache_hint` (evict_first)
+//    and Predicated `@p ld` on Stage 2 tail tiles!
 // ============================================================================
 template <int M_CAP>
 __global__ void __launch_bounds__(256, 2) dsv41_grouped_nvfp4_moe_stage1_clamped_swiglu_v1_kernel(
@@ -939,7 +1106,6 @@ __global__ void __launch_bounds__(256, 2) dsv41_grouped_nvfp4_moe_stage1_clamped
     int m_valid = task->m_count;
     if (m_valid > M_CAP) m_valid = M_CAP;
 
-    // 1 K-tile = 1024 cols = 512 bfloat162 pairs -> 512 + 32 = 544 swizzled stride (17.4 KiB for M_CAP=8!)
     constexpr int TILE_HALF_K = 512;
     constexpr int TILE_STRIDE = 544;
     __shared__ __nv_bfloat162 s_x2[M_CAP][TILE_STRIDE];
@@ -960,7 +1126,6 @@ __global__ void __launch_bounds__(256, 2) dsv41_grouped_nvfp4_moe_stage1_clamped
         acc_up[m]   = 0.0f;
     }
 
-    // 5120 cols = 5 tiles of 1024 cols (512 bfloat162 pairs per tile)
     for (int t = 0; t < 5; ++t) {
         int k2_base = t * TILE_HALF_K;
         for (int idx = threadIdx.x; idx < m_valid * TILE_HALF_K; idx += 256) {
@@ -975,8 +1140,8 @@ __global__ void __launch_bounds__(256, 2) dsv41_grouped_nvfp4_moe_stage1_clamped
         __syncthreads();
 
         int u4_idx = t * 32 + lane; // 0..159
-        uint4 g_pack = w1_u4[u4_idx];
-        uint4 u_pack = w3_u4[u4_idx];
+        uint4 g_pack = dg_ld_evict_first_u4(&w1_u4[u4_idx]);
+        uint4 u_pack = dg_ld_evict_first_u4(&w3_u4[u4_idx]);
         uint16_t gs_pair = s1_u16[u4_idx];
         uint16_t us_pair = s3_u16[u4_idx];
 
@@ -985,7 +1150,7 @@ __global__ void __launch_bounds__(256, 2) dsv41_grouped_nvfp4_moe_stage1_clamped
 
         uint32_t gw[4] = {g_pack.x, g_pack.y, g_pack.z, g_pack.w};
         uint32_t uw[4] = {u_pack.x, u_pack.y, u_pack.z, u_pack.w};
-        int swz_base = lane * 17; // Within the 512-pair tile!
+        int swz_base = lane * 17;
 
         #pragma unroll
         for (int grp16 = 0; grp16 < 2; ++grp16) {
@@ -1055,7 +1220,6 @@ __global__ void __launch_bounds__(256, 2) dsv41_grouped_nvfp4_moe_stage2_down_v1
     float* __restrict__ out_accum                     // [T, 5120]
 ) {
     // Grid: (320, num_groups) -> 320 blocks x 8 warps x 2 rows/warp = 5120 output rows!
-    // Matches stage1's 2-rows-per-warp density, cutting block launches, smem loads, and BF16 conversions in HALF!
     int wid   = threadIdx.x >> 5;
     int lane  = threadIdx.x & 31;
     int row0  = blockIdx.x * 16 + wid * 2 + 0; // 0..5118
@@ -1066,7 +1230,6 @@ __global__ void __launch_bounds__(256, 2) dsv41_grouped_nvfp4_moe_stage2_down_v1
     int m_valid = task->m_count;
     if (m_valid > M_CAP) m_valid = M_CAP;
 
-    // 1 K-tile = 512 bfloat162 pairs -> 544 swizzled stride = 17.4 KiB for M_CAP=8 (2 blocks/SM occupancy!)
     constexpr int TILE_HALF_K = 512;
     constexpr int TILE_STRIDE = 544;
     __shared__ __nv_bfloat162 s_inter2[M_CAP][TILE_STRIDE];
@@ -1100,9 +1263,9 @@ __global__ void __launch_bounds__(256, 2) dsv41_grouped_nvfp4_moe_stage2_down_v1
         __syncthreads();
 
         int u4_idx = t * 32 + lane; // 0..95 (valid: 0..71)
-        bool valid_u4 = (u4_idx < 72);
-        uint4 d0_pack = valid_u4 ? w2_0_u4[u4_idx] : make_uint4(0, 0, 0, 0);
-        uint4 d1_pack = valid_u4 ? w2_1_u4[u4_idx] : make_uint4(0, 0, 0, 0);
+        int valid_u4 = (u4_idx < 72) ? 1 : 0;
+        uint4 d0_pack = dg_ld_pred_evict_first_u4(&w2_0_u4[u4_idx], valid_u4);
+        uint4 d1_pack = dg_ld_pred_evict_first_u4(&w2_1_u4[u4_idx], valid_u4);
         uint16_t ds0_pair = valid_u4 ? s2_0_u16[u4_idx] : 0;
         uint16_t ds1_pair = valid_u4 ? s2_1_u16[u4_idx] : 0;
         float ds0_arr[2] = {
@@ -1962,92 +2125,210 @@ __global__ void __launch_bounds__(512, 2) dsv41_kv_compressor_pool_rmsnorm_v1_ke
 }
 
 // ============================================================================
-// 9. Complete DeepSeek-V4.1-Flash-1017-NVFP4 Benchmark & Profiler on RTX 5070
+// 9. Exported C-ABI FFI Entrypoints for Rust Hybrid Engine + RAII Benchmark
 // ============================================================================
-int main() {
+extern "C" __declspec(dllexport) int mcl4_dsv41_verify_expert_packet_gpu(
+    const Dsv41Mcl4cExpertPacket* h_pkt,
+    double* out_cos_s1,
+    double* out_cos_s2,
+    float* out_us_moe_1grp
+) {
+    if (!h_pkt) return -1;
+
+    CudaBuffer<__nv_bfloat16> d_x_norm(DS_DIM);
+    CudaBuffer<Dsv41Mcl4cExpertPacket> d_arena(1);
+    CudaBuffer<Dsv41ExpertGroupTask> d_groups(1);
+    CudaBuffer<float> d_inter(DS_MOE_INTER);
+    CudaBuffer<float> d_moe_out(DS_DIM);
+
+    std::vector<__nv_bfloat16> h_x_bf16(DS_DIM);
+    std::vector<float> h_x_f32(DS_DIM);
+    for (int i = 0; i < DS_DIM; ++i) {
+        float v = 0.15f * sinf(float(i) * 0.037f) + 0.08f * cosf(float(i) * 0.113f);
+        h_x_bf16[i] = __float2bfloat16(v);
+        h_x_f32[i]  = __bfloat162float(h_x_bf16[i]);
+    }
+    d_x_norm.copy_from_host(h_x_bf16.data(), DS_DIM);
+    d_arena.copy_from_host(h_pkt, 1);
+
+    Dsv41ExpertGroupTask h_g0{};
+    h_g0.arena_slot = 0;
+    h_g0.m_count = 1;
+    h_g0.token_ids[0] = 0;
+    h_g0.weights[0] = 1.0f;
+    d_groups.copy_from_host(&h_g0, 1);
+    d_moe_out.memset(0);
+
+    launch_dsv41_grouped_moe(1, 1, d_x_norm, d_groups, d_arena, d_inter, d_moe_out);
+    CHECK_CUDA(cudaDeviceSynchronize());
+
+    std::vector<float> h_inter_gpu(DS_MOE_INTER);
+    std::vector<float> h_moe_gpu(DS_DIM);
+    d_inter.copy_to_host(h_inter_gpu.data(), DS_MOE_INTER);
+    d_moe_out.copy_to_host(h_moe_gpu.data(), DS_DIM);
+
+    ScopedCudaEvent ev0, ev1;
+    CHECK_CUDA(cudaEventRecord(ev0));
+    for (int r = 0; r < 20; ++r) {
+        launch_dsv41_grouped_moe(1, 1, d_x_norm, d_groups, d_arena, d_inter, d_moe_out);
+    }
+    CHECK_CUDA(cudaEventRecord(ev1));
+    CHECK_CUDA(cudaEventSynchronize(ev1));
+    float ms = 0.0f;
+    CHECK_CUDA(cudaEventElapsedTime(&ms, ev0, ev1));
+    if (out_us_moe_1grp) *out_us_moe_1grp = (ms * 1000.0f) / 20.0f;
+
+    auto host_fp8_e4m3 = [](uint8_t b) -> float {
+        uint32_t sign = (b >> 7) & 1u;
+        uint32_t exp  = (b >> 3) & 0x0Fu;
+        uint32_t mant = b & 0x07u;
+        float val;
+        if (exp == 0) {
+            val = float(mant) * 0.001953125f;
+        } else if (exp == 15 && mant == 7) {
+            val = 0.0f;
+        } else {
+            uint32_t f_bits = ((exp + 120u) << 23) | (mant << 20);
+            memcpy(&val, &f_bits, sizeof(float));
+        }
+        return sign ? -val : val;
+    };
+    const float host_fp4_lut[16] = {
+        0.0f,  0.5f,  1.0f,  1.5f,  2.0f,  3.0f,  4.0f,  6.0f,
+       -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f
+    };
+
+    std::vector<float> h_inter_bf16_f32(DS_MOE_INTER);
+    double dot_s1 = 0.0, ng_s1 = 0.0, nr_s1 = 0.0;
+    for (int r = 0; r < DS_MOE_INTER; ++r) {
+        const uint8_t* w1_row = h_pkt->w1_w3_fp4 + (size_t)r * DS_HALF_DIM;
+        const uint8_t* w3_row = h_pkt->w1_w3_fp4 + (size_t)(r + DS_MOE_INTER) * DS_HALF_DIM;
+        const uint8_t* s1_row = h_pkt->w1_w3_scales + (size_t)r * (DS_DIM / 16);
+        const uint8_t* s3_row = h_pkt->w1_w3_scales + (size_t)(r + DS_MOE_INTER) * (DS_DIM / 16);
+        float g_acc = 0.0f, u_acc = 0.0f;
+        for (int grp = 0; grp < 320; ++grp) {
+            float gs = host_fp8_e4m3(s1_row[grp]);
+            float us = host_fp8_e4m3(s3_row[grp]);
+            float sub_g = 0.0f, sub_u = 0.0f;
+            for (int b = 0; b < 8; ++b) {
+                uint8_t gb = w1_row[grp * 8 + b];
+                uint8_t ub = w3_row[grp * 8 + b];
+                float x0 = h_x_f32[grp * 16 + b * 2 + 0];
+                float x1 = h_x_f32[grp * 16 + b * 2 + 1];
+                sub_g += host_fp4_lut[gb & 0x0F] * x0 + host_fp4_lut[gb >> 4] * x1;
+                sub_u += host_fp4_lut[ub & 0x0F] * x0 + host_fp4_lut[ub >> 4] * x1;
+            }
+            g_acc += sub_g * gs;
+            u_acc += sub_u * us;
+        }
+        float gate_v = fminf(g_acc * h_pkt->w1_scale2, 10.0f);
+        float up_v   = fminf(fmaxf(u_acc * h_pkt->w3_scale2, -10.0f), 10.0f);
+        float inter_v = (gate_v / (1.0f + expf(-gate_v))) * up_v;
+        h_inter_bf16_f32[r] = __bfloat162float(__float2bfloat16(inter_v));
+        dot_s1 += double(h_inter_gpu[r]) * double(inter_v);
+        ng_s1  += double(h_inter_gpu[r]) * double(h_inter_gpu[r]);
+        nr_s1  += double(inter_v) * double(inter_v);
+    }
+    if (out_cos_s1) *out_cos_s1 = dot_s1 / (sqrt(ng_s1) * sqrt(nr_s1) + 1e-30);
+
+    double dot_s2 = 0.0, ng_s2 = 0.0, nr_s2 = 0.0;
+    for (int r = 0; r < DS_DIM; ++r) {
+        const uint8_t* w2_row = h_pkt->w2_fp4 + (size_t)r * DS_HALF_INTER;
+        const uint8_t* s2_row = h_pkt->w2_scales + (size_t)r * (DS_MOE_INTER / 16);
+        float d_acc = 0.0f;
+        for (int grp = 0; grp < 144; ++grp) {
+            float ds = host_fp8_e4m3(s2_row[grp]);
+            float sub_d = 0.0f;
+            for (int b = 0; b < 8; ++b) {
+                uint8_t db = w2_row[grp * 8 + b];
+                float i0 = h_inter_bf16_f32[grp * 16 + b * 2 + 0];
+                float i1 = h_inter_bf16_f32[grp * 16 + b * 2 + 1];
+                sub_d += host_fp4_lut[db & 0x0F] * i0 + host_fp4_lut[db >> 4] * i1;
+            }
+            d_acc += sub_d * ds;
+        }
+        float ref_out = d_acc * h_pkt->w2_scale2;
+        dot_s2 += double(h_moe_gpu[r]) * double(ref_out);
+        ng_s2  += double(h_moe_gpu[r]) * double(h_moe_gpu[r]);
+        nr_s2  += double(ref_out) * double(ref_out);
+    }
+    if (out_cos_s2) *out_cos_s2 = dot_s2 / (sqrt(ng_s2) * sqrt(nr_s2) + 1e-30);
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int mcl4_dsv41_run_full_profile() {
     cudaDeviceProp prop;
     CHECK_CUDA(cudaGetDeviceProperties(&prop, 0));
     printf("================================================================================\n");
-    printf("MCL4-Codec Native C++/CUDA SM120 Engine for DeepSeek-V4.1-Flash-1017-NVFP4\n");
+    printf("MCL4-Codec Native C++/CUDA SM120 Engine for DeepSeek-V4.1-Flash-1017-NVFP4 (v5)\n");
     printf("GPU: %s (SM %d.%d, %d SMs, %.2f GiB VRAM, %.2f MiB L2 Cache)\n",
            prop.name, prop.major, prop.minor, prop.multiProcessorCount,
            prop.totalGlobalMem / (1024.0 * 1024.0 * 1024.0),
            prop.l2CacheSize / (1024.0 * 1024.0));
     printf("Architecture: 40 Layers | dim=5120 | moe_inter=2304 | 384 NVFP4 Experts (top_k=6)\n");
     printf("              MLA (64 Heads x 512, 1 Shared KV, 8-Group Output LoRA) | HC (4x5120)\n");
+    printf("              DeepGEMM + DeepEP + DeepInfer PTX Hardened & RAII Memory-Safe\n");
     printf("================================================================================\n\n");
 
     int max_T = 16;
     int num_arena_slots = 8; // 8 active expert slots in VRAM arena (151.9 MiB)
 
-    // Allocate Hyper-Connections + MLA + Shared/Routed MoE buffers on RTX 5070
-    __nv_bfloat16 *d_x_hc, *d_x_norm, *d_qr, *d_kv, *d_q, *d_window_kv, *d_attn_o, *d_o_lora, *d_sub_out;
-    float *d_pre_mix, *d_next_pre, *d_post_mix, *d_comb_mix;
-    float *d_hc_fn, *d_hc_scale, *d_hc_base, *d_attn_sink, *d_gate_bias;
-    __nv_bfloat16 *d_rms_w, *d_q_norm_w, *d_kv_norm_w, *d_gate_w;
+    // Memory-safe RAII allocations on RTX 5070 (zero raw cudaMalloc/cudaFree leaks!)
+    CudaBuffer<__nv_bfloat16> d_x_hc(max_T * DS_HC_DIM);
+    CudaBuffer<__nv_bfloat16> d_x_norm(max_T * DS_DIM);
+    CudaBuffer<__nv_bfloat16> d_qr(max_T * DS_Q_LORA_RANK);
+    CudaBuffer<__nv_bfloat16> d_kv(max_T * DS_HEAD_DIM);
+    CudaBuffer<__nv_bfloat16> d_q(max_T * DS_N_HEADS * DS_HEAD_DIM);
+    CudaBuffer<__nv_bfloat16> d_window_kv(640 * DS_HEAD_DIM); // 128 Window + 512 Compressed KV!
+    CudaBuffer<__nv_bfloat16> d_attn_o(max_T * DS_N_HEADS * DS_HEAD_DIM);
+    CudaBuffer<__nv_bfloat16> d_o_lora(max_T * DS_O_TOTAL_RANK);
+    CudaBuffer<__nv_bfloat16> d_sub_out(max_T * DS_DIM);
 
-    uint8_t *d_wqa_fp8, *d_wqa_s, *d_wkv_fp8, *d_wkv_s, *d_wqb_fp8, *d_wqb_s;
-    uint8_t *d_woa_fp8, *d_woa_s, *d_wob_fp8, *d_wob_s;
-    int *d_top_idx;
-    float *d_top_w, *d_inter, *d_moe_out;
-    Dsv41Mcl4cExpertPacket *d_arena;
-    Dsv41ExpertGroupTask *d_groups;
+    CudaBuffer<float> d_pre_mix(max_T * 4);
+    CudaBuffer<float> d_raw_mixes(max_T * DS_MIX_HC);
+    CudaBuffer<float> d_next_pre(max_T * 4);
+    CudaBuffer<float> d_post_mix(max_T * 4);
+    CudaBuffer<float> d_comb_mix(max_T * 16);
 
-    CHECK_CUDA(cudaMalloc(&d_x_hc,      max_T * DS_HC_DIM * sizeof(__nv_bfloat16)));
-    CHECK_CUDA(cudaMalloc(&d_x_norm,    max_T * DS_DIM * sizeof(__nv_bfloat16)));
-    CHECK_CUDA(cudaMalloc(&d_qr,        max_T * DS_Q_LORA_RANK * sizeof(__nv_bfloat16)));
-    CHECK_CUDA(cudaMalloc(&d_kv,        max_T * DS_HEAD_DIM * sizeof(__nv_bfloat16)));
-    CHECK_CUDA(cudaMalloc(&d_q,         max_T * DS_N_HEADS * DS_HEAD_DIM * sizeof(__nv_bfloat16)));
-    CHECK_CUDA(cudaMalloc(&d_window_kv, 640 * DS_HEAD_DIM * sizeof(__nv_bfloat16))); // 128 Window + 512 Compressed KV!
-    CHECK_CUDA(cudaMalloc(&d_attn_o,    max_T * DS_N_HEADS * DS_HEAD_DIM * sizeof(__nv_bfloat16)));
-    CHECK_CUDA(cudaMalloc(&d_o_lora,    max_T * DS_O_TOTAL_RANK * sizeof(__nv_bfloat16)));
-    CHECK_CUDA(cudaMalloc(&d_sub_out,   max_T * DS_DIM * sizeof(__nv_bfloat16)));
+    CudaBuffer<float> d_hc_fn(DS_MIX_HC * DS_HC_DIM);
+    CudaBuffer<float> d_hc_scale(3);
+    CudaBuffer<float> d_hc_base(DS_MIX_HC);
+    CudaBuffer<float> d_attn_sink(DS_N_HEADS);
+    CudaBuffer<float> d_gate_bias(DS_ROUTED_EXPERTS);
 
-    CHECK_CUDA(cudaMalloc(&d_pre_mix,   max_T * 4 * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_next_pre,  max_T * 4 * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_post_mix,  max_T * 4 * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_comb_mix,  max_T * 16 * sizeof(float)));
-
-    CHECK_CUDA(cudaMalloc(&d_hc_fn,     DS_MIX_HC * DS_HC_DIM * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_hc_scale,  3 * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_hc_base,   DS_MIX_HC * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_attn_sink, DS_N_HEADS * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_gate_bias, DS_ROUTED_EXPERTS * sizeof(float)));
-
-    CHECK_CUDA(cudaMalloc(&d_rms_w,     DS_DIM * sizeof(__nv_bfloat16)));
-    CHECK_CUDA(cudaMalloc(&d_q_norm_w,  DS_Q_LORA_RANK * sizeof(__nv_bfloat16)));
-    CHECK_CUDA(cudaMalloc(&d_kv_norm_w, DS_HEAD_DIM * sizeof(__nv_bfloat16)));
-    CHECK_CUDA(cudaMalloc(&d_gate_w,    DS_ROUTED_EXPERTS * DS_DIM * sizeof(__nv_bfloat16)));
+    CudaBuffer<__nv_bfloat16> d_rms_w(DS_DIM);
+    CudaBuffer<__nv_bfloat16> d_q_norm_w(DS_Q_LORA_RANK);
+    CudaBuffer<__nv_bfloat16> d_kv_norm_w(DS_HEAD_DIM);
+    CudaBuffer<__nv_bfloat16> d_gate_w(DS_ROUTED_EXPERTS * DS_DIM);
 
     // Exact FP8_E4M3 + F8_E8M0 MLA Tensors (matching model-00003-of-00048.safetensors)
-    CHECK_CUDA(cudaMalloc(&d_wqa_fp8, 1280 * 5120));
-    CHECK_CUDA(cudaMalloc(&d_wqa_s,   40 * 160));
-    CHECK_CUDA(cudaMalloc(&d_wkv_fp8, 512 * 5120));
-    CHECK_CUDA(cudaMalloc(&d_wkv_s,   16 * 160));
-    CHECK_CUDA(cudaMalloc(&d_wqb_fp8, 32768 * 1280));
-    CHECK_CUDA(cudaMalloc(&d_wqb_s,   1024 * 40));
-    CHECK_CUDA(cudaMalloc(&d_woa_fp8, 8192 * 4096));
-    CHECK_CUDA(cudaMalloc(&d_woa_s,   256 * 128));
-    CHECK_CUDA(cudaMalloc(&d_wob_fp8, 5120 * 8192));
-    CHECK_CUDA(cudaMalloc(&d_wob_s,   160 * 256));
+    CudaBuffer<uint8_t> d_wqa_fp8(1280 * 5120);
+    CudaBuffer<uint8_t> d_wqa_s(40 * 160);
+    CudaBuffer<uint8_t> d_wkv_fp8(512 * 5120);
+    CudaBuffer<uint8_t> d_wkv_s(16 * 160);
+    CudaBuffer<uint8_t> d_wqb_fp8(32768 * 1280);
+    CudaBuffer<uint8_t> d_wqb_s(1024 * 40);
+    CudaBuffer<uint8_t> d_woa_fp8(8192 * 4096);
+    CudaBuffer<uint8_t> d_woa_s(256 * 128);
+    CudaBuffer<uint8_t> d_wob_fp8(5120 * 8192);
+    CudaBuffer<uint8_t> d_wob_s(160 * 256);
 
-    CHECK_CUDA(cudaMalloc(&d_top_idx, max_T * DS_TOP_K * sizeof(int)));
-    CHECK_CUDA(cudaMalloc(&d_top_w,   max_T * DS_TOP_K * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_inter,   32 * 8 * DS_MOE_INTER * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_moe_out, max_T * DS_DIM * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_arena,   (size_t)num_arena_slots * sizeof(Dsv41Mcl4cExpertPacket)));
-    CHECK_CUDA(cudaMalloc(&d_groups,  32 * sizeof(Dsv41ExpertGroupTask)));
+    CudaBuffer<int> d_top_idx(max_T * DS_TOP_K);
+    CudaBuffer<float> d_top_w(max_T * DS_TOP_K);
+    CudaBuffer<float> d_inter(32 * 8 * DS_MOE_INTER);
+    CudaBuffer<float> d_moe_out(max_T * DS_DIM);
+    CudaBuffer<Dsv41Mcl4cExpertPacket> d_arena(num_arena_slots);
+    CudaBuffer<Dsv41ExpertGroupTask> d_groups(32);
 
-    float *d_raw_scores, *d_biased_scores;
-    CHECK_CUDA(cudaMalloc(&d_raw_scores,    max_T * DS_ROUTED_EXPERTS * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_biased_scores, max_T * DS_ROUTED_EXPERTS * sizeof(float)));
+    CudaBuffer<float> d_raw_scores(max_T * DS_ROUTED_EXPERTS);
+    CudaBuffer<float> d_biased_scores(max_T * DS_ROUTED_EXPERTS);
 
     // Initialize neutral scales (E8M0 = 127 -> 2^0 = 1.0f)
-    CHECK_CUDA(cudaMemset(d_wqa_s, 127, 40 * 160));
-    CHECK_CUDA(cudaMemset(d_wkv_s, 127, 16 * 160));
-    CHECK_CUDA(cudaMemset(d_wqb_s, 127, 1024 * 40));
-    CHECK_CUDA(cudaMemset(d_woa_s, 127, 256 * 128));
-    CHECK_CUDA(cudaMemset(d_wob_s, 127, 160 * 256));
+    d_wqa_s.memset(127);
+    d_wkv_s.memset(127);
+    d_wqb_s.memset(127);
+    d_woa_s.memset(127);
+    d_wob_s.memset(127);
 
     std::vector<Dsv41ExpertGroupTask> h_groups(32);
     for (int g = 0; g < 32; ++g) {
@@ -2058,11 +2339,9 @@ int main() {
             h_groups[g].weights[m] = 0.25f;
         }
     }
-    CHECK_CUDA(cudaMemcpy(d_groups, h_groups.data(), 32 * sizeof(Dsv41ExpertGroupTask), cudaMemcpyHostToDevice));
+    d_groups.copy_from_host(h_groups.data(), 32);
 
-    cudaEvent_t ev0, ev1;
-    CHECK_CUDA(cudaEventCreate(&ev0));
-    CHECK_CUDA(cudaEventCreate(&ev1));
+    ScopedCudaEvent ev0, ev1;
     int reps = 20; // WDDM TDR-safe batch count (< 40ms per timing block!)
 
     printf("================================================================================\n");
@@ -2088,7 +2367,7 @@ int main() {
         };
 
         float us_hc_pre = time_op([&]() {
-            dsv41_fused_hc_sinkhorn_pre_rmsnorm_v1_kernel<<<T, 512>>>(
+            dsv41_fused_hc_sinkhorn_pre_rmsnorm_v5_kernel<<<T, 512>>>(
                 d_x_hc, d_pre_mix, d_hc_fn, d_hc_scale, d_hc_base, d_rms_w,
                 d_x_norm, d_next_pre, d_post_mix, d_comb_mix
             );
@@ -2108,7 +2387,7 @@ int main() {
 
         float us_mla_sparse_attn = time_op([&]() {
             dim3 g_attn(8, T);
-            dsv41_fused_mla_sparse_window_attn_v1_kernel<<<g_attn, 256>>>(
+            dsv41_fused_mla_sparse_window_attn_v5_kernel<<<g_attn, 256>>>(
                 d_q, d_window_kv, d_attn_sink, d_attn_o, n_kv_active, 128
             );
         });
@@ -2133,7 +2412,7 @@ int main() {
             dsv41_router_scores_48blk_v3_kernel<<<g_r, 256>>>(
                 d_x_norm, d_gate_w, d_gate_bias, nullptr, d_raw_scores, d_biased_scores
             );
-            dsv41_router_top6_v3_kernel<<<T, 32>>>(
+            dsv41_router_top6_v5_kernel<<<T, 32>>>(
                 d_raw_scores, d_biased_scores, d_top_idx, d_top_w
             );
         });
@@ -2179,41 +2458,36 @@ int main() {
     printf("================================================================================\n");
 
     int T = 16;
-    float *d_w_enc, *d_e_ncm, *d_w_dec, *d_w_look, *d_u_ple, *d_v_ple, *d_lora_a, *d_lora_b;
-    float *d_m_dec, *d_v_dec, *d_m_enc, *d_v_enc, *d_m_ple, *d_v_ple_m, *d_m_lb, *d_v_lb;
-    float *d_ncm_state, *d_saved_alpha, *d_saved_hlora, *d_saved_uple, *d_next_bias;
-    float *d_dy, *d_dc, *d_dz, *d_dhlora, *d_duple, *d_dx;
+    CudaBuffer<float> d_w_enc(NCM_DIM * DS_DIM);
+    CudaBuffer<float> d_e_ncm(NCM_CODEBOOK_K * NCM_DIM);
+    CudaBuffer<float> d_w_dec(NCM_DIM * DS_DIM);
+    CudaBuffer<float> d_w_look(DS_ROUTED_EXPERTS * NCM_DIM);
+    CudaBuffer<float> d_u_ple(4096 * PLE_RANK);
+    CudaBuffer<float> d_v_ple(PLE_RANK * DS_DIM);
+    CudaBuffer<float> d_lora_a(LORA_RANK * DS_DIM);
+    CudaBuffer<float> d_lora_b(LORA_RANK * DS_DIM);
 
-    CHECK_CUDA(cudaMalloc(&d_w_enc,  NCM_DIM * DS_DIM * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_e_ncm,  NCM_CODEBOOK_K * NCM_DIM * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_w_dec,  NCM_DIM * DS_DIM * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_w_look, DS_ROUTED_EXPERTS * NCM_DIM * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_u_ple,  4096 * PLE_RANK * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_v_ple,  PLE_RANK * DS_DIM * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_lora_a, LORA_RANK * DS_DIM * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_lora_b, LORA_RANK * DS_DIM * sizeof(float)));
+    CudaBuffer<float> d_m_dec(NCM_DIM * DS_DIM);
+    CudaBuffer<float> d_v_dec(NCM_DIM * DS_DIM);
+    CudaBuffer<float> d_m_enc(NCM_DIM * DS_DIM);
+    CudaBuffer<float> d_v_enc(NCM_DIM * DS_DIM);
+    CudaBuffer<float> d_m_ple(PLE_RANK * DS_DIM);
+    CudaBuffer<float> d_v_ple_m(PLE_RANK * DS_DIM);
+    CudaBuffer<float> d_m_lb(LORA_RANK * DS_DIM);
+    CudaBuffer<float> d_v_lb(LORA_RANK * DS_DIM);
 
-    CHECK_CUDA(cudaMalloc(&d_m_dec,   NCM_DIM * DS_DIM * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_v_dec,   NCM_DIM * DS_DIM * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_m_enc,   NCM_DIM * DS_DIM * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_v_enc,   NCM_DIM * DS_DIM * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_m_ple,   PLE_RANK * DS_DIM * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_v_ple_m, PLE_RANK * DS_DIM * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_m_lb,    LORA_RANK * DS_DIM * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_v_lb,    LORA_RANK * DS_DIM * sizeof(float)));
+    CudaBuffer<float> d_ncm_state(T * NCM_DIM);
+    CudaBuffer<float> d_saved_alpha(T * NCM_CODEBOOK_K);
+    CudaBuffer<float> d_saved_hlora(T * LORA_RANK);
+    CudaBuffer<float> d_saved_uple(T * PLE_RANK);
+    CudaBuffer<float> d_next_bias(T * DS_ROUTED_EXPERTS);
 
-    CHECK_CUDA(cudaMalloc(&d_ncm_state,   T * NCM_DIM * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_saved_alpha, T * NCM_CODEBOOK_K * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_saved_hlora, T * LORA_RANK * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_saved_uple,  T * PLE_RANK * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_next_bias,   T * DS_ROUTED_EXPERTS * sizeof(float)));
-
-    CHECK_CUDA(cudaMalloc(&d_dy,     T * DS_DIM * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_dc,     T * NCM_DIM * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_dz,     T * NCM_DIM * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_dhlora, T * LORA_RANK * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_duple,  T * PLE_RANK * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&d_dx,     T * DS_DIM * sizeof(float)));
+    CudaBuffer<float> d_dy(T * DS_DIM);
+    CudaBuffer<float> d_dc(T * NCM_DIM);
+    CudaBuffer<float> d_dz(T * NCM_DIM);
+    CudaBuffer<float> d_dhlora(T * LORA_RANK);
+    CudaBuffer<float> d_duple(T * PLE_RANK);
+    CudaBuffer<float> d_dx(T * DS_DIM);
 
     auto time_plastic = [&](auto fn) -> float {
         fn();
@@ -2301,7 +2575,7 @@ int main() {
     // ========================================================================
     // 4. Real DeepSeek-V4.1-Flash-1017-NVFP4 (Shard 3: Layer 0) Parity Test
     // ========================================================================
-    FILE* sf = fopen("Z:/deepseek-nvfp4/model-00003-of-00048.safetensors", "rb");
+    ScopedFile sf("Z:/deepseek-nvfp4/model-00003-of-00048.safetensors", "rb");
     if (sf) {
         printf("\n================================================================================\n");
         printf("4. REAL DEEPSEEK-V4.1-FLASH-1017-NVFP4 CHECKPOINT (SHARD 3, LAYER 0) PARITY TEST\n");
@@ -2328,12 +2602,7 @@ int main() {
             memcpy(&v, &bits, sizeof(float));
             return v;
         };
-        const float host_fp4_lut[16] = {
-            0.0f,  0.5f,  1.0f,  1.5f,  2.0f,  3.0f,  4.0f,  6.0f,
-           -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f
-        };
 
-        //Deterministic BF16 input vector x [1, 5120]
         std::vector<__nv_bfloat16> h_x_bf16(DS_DIM);
         std::vector<float> h_x_f32(DS_DIM);
         for (int i = 0; i < DS_DIM; ++i) {
@@ -2341,24 +2610,24 @@ int main() {
             h_x_bf16[i] = __float2bfloat16(v);
             h_x_f32[i]  = __bfloat162float(h_x_bf16[i]);
         }
-        CHECK_CUDA(cudaMemcpy(d_x_norm, h_x_bf16.data(), DS_DIM * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice));
+        d_x_norm.copy_from_host(h_x_bf16.data(), DS_DIM);
 
         // 4A. Load real layers.0.attn.wq_a.weight [1280, 5120] + scale [40, 160]
         std::vector<uint8_t> h_wqa_w(1280 * 5120);
         std::vector<uint8_t> h_wqa_s(40 * 160);
-        _fseeki64(sf, 86669136LL, SEEK_SET);
-        fread(h_wqa_w.data(), 1, h_wqa_w.size(), sf);
-        _fseeki64(sf, 8468304LL, SEEK_SET);
-        fread(h_wqa_s.data(), 1, h_wqa_s.size(), sf);
+        _fseeki64(sf.fp, 86669136LL, SEEK_SET);
+        fread(h_wqa_w.data(), 1, h_wqa_w.size(), sf.fp);
+        _fseeki64(sf.fp, 8468304LL, SEEK_SET);
+        fread(h_wqa_s.data(), 1, h_wqa_s.size(), sf.fp);
 
-        CHECK_CUDA(cudaMemcpy(d_wqa_fp8, h_wqa_w.data(), h_wqa_w.size(), cudaMemcpyHostToDevice));
-        CHECK_CUDA(cudaMemcpy(d_wqa_s,   h_wqa_s.data(), h_wqa_s.size(), cudaMemcpyHostToDevice));
+        d_wqa_fp8.copy_from_host(h_wqa_w.data(), h_wqa_w.size());
+        d_wqa_s.copy_from_host(h_wqa_s.data(), h_wqa_s.size());
 
         launch_dsv41_fp8_gemm(d_x_norm, d_wqa_fp8, d_wqa_s, d_qr, 1, 1280, 5120);
         CHECK_CUDA(cudaDeviceSynchronize());
 
         std::vector<__nv_bfloat16> h_qr_gpu(1280);
-        CHECK_CUDA(cudaMemcpy(h_qr_gpu.data(), d_qr, 1280 * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost));
+        d_qr.copy_to_host(h_qr_gpu.data(), 1280);
 
         double dot_wqa = 0.0, ng_wqa = 0.0, nr_wqa = 0.0;
         for (int r = 0; r < 1280; ++r) {
@@ -2381,122 +2650,46 @@ int main() {
         std::vector<uint8_t> pkt_raw(sizeof(Dsv41Mcl4cExpertPacket), 0);
         Dsv41Mcl4cExpertPacket* h_pkt = reinterpret_cast<Dsv41Mcl4cExpertPacket*>(pkt_raw.data());
 
-        // w1: weight=1019901776 (5898240B), scale=135165776 (737280B), scale_2=491132 (4B)
-        _fseeki64(sf, 1019901776LL, SEEK_SET);
-        fread(h_pkt->w1_w3_fp4, 1, 5898240, sf);
-        _fseeki64(sf, 135165776LL, SEEK_SET);
-        fread(h_pkt->w1_w3_scales, 1, 737280, sf);
-        _fseeki64(sf, 491132LL, SEEK_SET);
-        fread(&h_pkt->w1_scale2, sizeof(float), 1, sf);
+        _fseeki64(sf.fp, 1019901776LL, SEEK_SET);
+        fread(h_pkt->w1_w3_fp4, 1, 5898240, sf.fp);
+        _fseeki64(sf.fp, 135165776LL, SEEK_SET);
+        fread(h_pkt->w1_w3_scales, 1, 737280, sf.fp);
+        _fseeki64(sf.fp, 491132LL, SEEK_SET);
+        fread(&h_pkt->w1_scale2, sizeof(float), 1, sf.fp);
 
-        // w3: weight=1031698256 (5898240B), scale=136640336 (737280B), scale_2=491148 (4B)
-        _fseeki64(sf, 1031698256LL, SEEK_SET);
-        fread(h_pkt->w1_w3_fp4 + 5898240, 1, 5898240, sf);
-        _fseeki64(sf, 136640336LL, SEEK_SET);
-        fread(h_pkt->w1_w3_scales + 737280, 1, 737280, sf);
-        _fseeki64(sf, 491148LL, SEEK_SET);
-        fread(&h_pkt->w3_scale2, sizeof(float), 1, sf);
+        _fseeki64(sf.fp, 1031698256LL, SEEK_SET);
+        fread(h_pkt->w1_w3_fp4 + 5898240, 1, 5898240, sf.fp);
+        _fseeki64(sf.fp, 136640336LL, SEEK_SET);
+        fread(h_pkt->w1_w3_scales + 737280, 1, 737280, sf.fp);
+        _fseeki64(sf.fp, 491148LL, SEEK_SET);
+        fread(&h_pkt->w3_scale2, sizeof(float), 1, sf.fp);
 
-        // w2: weight=1025800016 (5898240B), scale=135903056 (737280B), scale_2=491140 (4B)
-        _fseeki64(sf, 1025800016LL, SEEK_SET);
-        fread(h_pkt->w2_fp4, 1, 5898240, sf);
-        _fseeki64(sf, 135903056LL, SEEK_SET);
-        fread(h_pkt->w2_scales, 1, 737280, sf);
-        _fseeki64(sf, 491140LL, SEEK_SET);
-        fread(&h_pkt->w2_scale2, sizeof(float), 1, sf);
-        fclose(sf);
+        _fseeki64(sf.fp, 1025800016LL, SEEK_SET);
+        fread(h_pkt->w2_fp4, 1, 5898240, sf.fp);
+        _fseeki64(sf.fp, 135903056LL, SEEK_SET);
+        fread(h_pkt->w2_scales, 1, 737280, sf.fp);
+        _fseeki64(sf.fp, 491140LL, SEEK_SET);
+        fread(&h_pkt->w2_scale2, sizeof(float), 1, sf.fp);
 
-        CHECK_CUDA(cudaMemcpy(d_arena, h_pkt, sizeof(Dsv41Mcl4cExpertPacket), cudaMemcpyHostToDevice));
-        Dsv41ExpertGroupTask h_g0{};
-        h_g0.arena_slot = 0;
-        h_g0.m_count = 1;
-        h_g0.token_ids[0] = 0;
-        h_g0.weights[0] = 1.0f;
-        CHECK_CUDA(cudaMemcpy(d_groups, &h_g0, sizeof(Dsv41ExpertGroupTask), cudaMemcpyHostToDevice));
-        CHECK_CUDA(cudaMemset(d_moe_out, 0, DS_DIM * sizeof(float)));
-
-        launch_dsv41_grouped_moe(1, 1, d_x_norm, d_groups, d_arena, d_inter, d_moe_out);
-        CHECK_CUDA(cudaDeviceSynchronize());
-
-        std::vector<float> h_inter_gpu(DS_MOE_INTER);
-        std::vector<float> h_moe_gpu(DS_DIM);
-        CHECK_CUDA(cudaMemcpy(h_inter_gpu.data(), d_inter,   DS_MOE_INTER * sizeof(float), cudaMemcpyDeviceToHost));
-        CHECK_CUDA(cudaMemcpy(h_moe_gpu.data(),   d_moe_out, DS_DIM * sizeof(float),       cudaMemcpyDeviceToHost));
-
-        // Exact CPU FP32 reference for Stage 1 (w1, w3 + Clamped SwiGLU) and Stage 2 (w2)
-        std::vector<float> h_inter_ref(DS_MOE_INTER);
-        std::vector<float> h_inter_bf16_f32(DS_MOE_INTER);
-        double dot_s1 = 0.0, ng_s1 = 0.0, nr_s1 = 0.0;
-        for (int r = 0; r < DS_MOE_INTER; ++r) {
-            const uint8_t* w1_row = h_pkt->w1_w3_fp4 + (size_t)r * DS_HALF_DIM;
-            const uint8_t* w3_row = h_pkt->w1_w3_fp4 + (size_t)(r + DS_MOE_INTER) * DS_HALF_DIM;
-            const uint8_t* s1_row = h_pkt->w1_w3_scales + (size_t)r * (DS_DIM / 16);
-            const uint8_t* s3_row = h_pkt->w1_w3_scales + (size_t)(r + DS_MOE_INTER) * (DS_DIM / 16);
-            float g_acc = 0.0f, u_acc = 0.0f;
-            for (int grp = 0; grp < 320; ++grp) {
-                float gs = host_fp8_e4m3(s1_row[grp]);
-                float us = host_fp8_e4m3(s3_row[grp]);
-                float sub_g = 0.0f, sub_u = 0.0f;
-                for (int b = 0; b < 8; ++b) {
-                    uint8_t gb = w1_row[grp * 8 + b];
-                    uint8_t ub = w3_row[grp * 8 + b];
-                    float x0 = h_x_f32[grp * 16 + b * 2 + 0];
-                    float x1 = h_x_f32[grp * 16 + b * 2 + 1];
-                    sub_g += host_fp4_lut[gb & 0x0F] * x0 + host_fp4_lut[gb >> 4] * x1;
-                    sub_u += host_fp4_lut[ub & 0x0F] * x0 + host_fp4_lut[ub >> 4] * x1;
-                }
-                g_acc += sub_g * gs;
-                u_acc += sub_u * us;
-            }
-            float gate_v = fminf(g_acc * h_pkt->w1_scale2, 10.0f);
-            float up_v   = fminf(fmaxf(u_acc * h_pkt->w3_scale2, -10.0f), 10.0f);
-            float inter_v = (gate_v / (1.0f + expf(-gate_v))) * up_v;
-            h_inter_ref[r] = inter_v;
-            h_inter_bf16_f32[r] = __bfloat162float(__float2bfloat16(inter_v));
-            dot_s1 += double(h_inter_gpu[r]) * double(inter_v);
-            ng_s1  += double(h_inter_gpu[r]) * double(h_inter_gpu[r]);
-            nr_s1  += double(inter_v) * double(inter_v);
-        }
-        double cos_s1 = dot_s1 / (sqrt(ng_s1) * sqrt(nr_s1) + 1e-30);
-
-        double dot_s2 = 0.0, ng_s2 = 0.0, nr_s2 = 0.0;
-        for (int r = 0; r < DS_DIM; ++r) {
-            const uint8_t* w2_row = h_pkt->w2_fp4 + (size_t)r * DS_HALF_INTER;
-            const uint8_t* s2_row = h_pkt->w2_scales + (size_t)r * (DS_MOE_INTER / 16);
-            float d_acc = 0.0f;
-            for (int grp = 0; grp < 144; ++grp) {
-                float ds = host_fp8_e4m3(s2_row[grp]);
-                float sub_d = 0.0f;
-                for (int b = 0; b < 8; ++b) {
-                    uint8_t db = w2_row[grp * 8 + b];
-                    float i0 = h_inter_bf16_f32[grp * 16 + b * 2 + 0];
-                    float i1 = h_inter_bf16_f32[grp * 16 + b * 2 + 1];
-                    sub_d += host_fp4_lut[db & 0x0F] * i0 + host_fp4_lut[db >> 4] * i1;
-                }
-                d_acc += sub_d * ds;
-            }
-            float ref_out = d_acc * h_pkt->w2_scale2;
-            dot_s2 += double(h_moe_gpu[r]) * double(ref_out);
-            ng_s2  += double(h_moe_gpu[r]) * double(h_moe_gpu[r]);
-            nr_s2  += double(ref_out) * double(ref_out);
-        }
-        double cos_s2 = dot_s2 / (sqrt(ng_s2) * sqrt(nr_s2) + 1e-30);
+        double cos_s1 = 0.0, cos_s2 = 0.0;
+        float us_moe_1grp = 0.0f;
+        mcl4_dsv41_verify_expert_packet_gpu(h_pkt, &cos_s1, &cos_s2, &us_moe_1grp);
 
         printf("  [4B] Real Layer 0 Expert 0 NVFP4 Scales: w1_s2=%.6f, w3_s2=%.6f, w2_s2=%.6f\n",
                h_pkt->w1_scale2, h_pkt->w3_scale2, h_pkt->w2_scale2);
         printf("       -> Stage 1 (w1+w3 NVFP4 + Clamped SwiGLU) Cosine Similarity: %.7f\n", cos_s1);
-        printf("       -> Stage 2 (w2 NVFP4 Down-Proj [5120x2304]) Cosine Similarity: %.7f\n", cos_s2);
+        printf("       -> Stage 2 (w2 NVFP4 Down-Proj [5120x2304]) Cosine Similarity: %.7f (%.2f us/expert)\n",
+               cos_s2, us_moe_1grp);
 
         // 4C. Real Shard 5 (Layer 2) KV Compressor (wgate + wkv + Softmax Pool + RMSNorm) Parity Test
-        FILE* sf5 = fopen("Z:/deepseek-nvfp4/model-00005-of-00048.safetensors", "rb");
+        ScopedFile sf5("Z:/deepseek-nvfp4/model-00005-of-00048.safetensors", "rb");
         if (sf5) {
             std::vector<__nv_bfloat16> h_comp_norm(512);
             std::vector<__nv_bfloat16> h_comp_wgate_wkv(1024 * DS_DIM);
-            _fseeki64(sf5, 4436680LL, SEEK_SET);
-            fread(h_comp_norm.data(), sizeof(__nv_bfloat16), 512, sf5);
-            _fseeki64(sf5, 4437704LL, SEEK_SET);
-            fread(h_comp_wgate_wkv.data(), sizeof(__nv_bfloat16), 1024 * DS_DIM, sf5);
-            fclose(sf5);
+            _fseeki64(sf5.fp, 4436680LL, SEEK_SET);
+            fread(h_comp_norm.data(), sizeof(__nv_bfloat16), 512, sf5.fp);
+            _fseeki64(sf5.fp, 4437704LL, SEEK_SET);
+            fread(h_comp_wgate_wkv.data(), sizeof(__nv_bfloat16), 1024 * DS_DIM, sf5.fp);
 
             int ratio = 8;
             std::vector<__nv_bfloat16> h_x8_bf16(ratio * DS_DIM);
@@ -2506,26 +2699,23 @@ int main() {
                 h_x8_bf16[i] = __float2bfloat16(v);
                 h_x8_f32[i]  = __bfloat162float(h_x8_bf16[i]);
             }
-            CHECK_CUDA(cudaMemcpy(d_x_norm, h_x8_bf16.data(), ratio * DS_DIM * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice));
+            d_x_norm.copy_from_host(h_x8_bf16.data(), ratio * DS_DIM);
 
-            __nv_bfloat16 *d_comp_w, *d_comp_norm, *d_latent_out;
-            float *d_gate_kv;
-            CHECK_CUDA(cudaMalloc(&d_comp_w,     1024 * DS_DIM * sizeof(__nv_bfloat16)));
-            CHECK_CUDA(cudaMalloc(&d_comp_norm,  512 * sizeof(__nv_bfloat16)));
-            CHECK_CUDA(cudaMalloc(&d_gate_kv,    ratio * 1024 * sizeof(float)));
-            CHECK_CUDA(cudaMalloc(&d_latent_out, 512 * sizeof(__nv_bfloat16)));
+            CudaBuffer<__nv_bfloat16> d_comp_w(1024 * DS_DIM);
+            CudaBuffer<__nv_bfloat16> d_comp_norm(512);
+            CudaBuffer<float> d_gate_kv(ratio * 1024);
+            CudaBuffer<__nv_bfloat16> d_latent_out(512);
 
-            CHECK_CUDA(cudaMemcpy(d_comp_w,    h_comp_wgate_wkv.data(), 1024 * DS_DIM * sizeof(__nv_bfloat16), cudaMemcpyHostToDevice));
-            CHECK_CUDA(cudaMemcpy(d_comp_norm, h_comp_norm.data(),      512 * sizeof(__nv_bfloat16),           cudaMemcpyHostToDevice));
+            d_comp_w.copy_from_host(h_comp_wgate_wkv.data(), 1024 * DS_DIM);
+            d_comp_norm.copy_from_host(h_comp_norm.data(), 512);
 
             dsv41_kv_compressor_proj_v1_kernel<8><<<64, 256>>>(d_x_norm, d_comp_w, d_gate_kv, ratio);
             dsv41_kv_compressor_pool_rmsnorm_v1_kernel<<<1, 512>>>(d_gate_kv, d_comp_norm, d_latent_out, ratio);
             CHECK_CUDA(cudaDeviceSynchronize());
 
             std::vector<__nv_bfloat16> h_lat_gpu(512);
-            CHECK_CUDA(cudaMemcpy(h_lat_gpu.data(), d_latent_out, 512 * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost));
+            d_latent_out.copy_to_host(h_lat_gpu.data(), 512);
 
-            // Exact CPU FP32 reference for Compressor (ratio = 8)
             std::vector<float> h_scores(ratio * 512, 0.0f);
             std::vector<float> h_kvs(ratio * 512, 0.0f);
             for (int m = 0; m < ratio; ++m) {
@@ -2568,11 +2758,6 @@ int main() {
             double cos_comp = dot_comp / (sqrt(ng_comp) * sqrt(nr_comp) + 1e-30);
             printf("  [4C] Real Layer 2 MLA KV Compressor (Shard 5, ratio=8 Softmax Pool + RMSNorm):\n");
             printf("       -> GPU Kernel vs Exact FP32 Reference Cosine Similarity: %.7f\n", cos_comp);
-
-            cudaFree(d_comp_w);
-            cudaFree(d_comp_norm);
-            cudaFree(d_gate_kv);
-            cudaFree(d_latent_out);
         }
 
         // 4D. Benchmark Engram O(1) Gather + Fused Gated Residual & Dual-Stream Ping-Pong DMA Overlap
@@ -2582,15 +2767,13 @@ int main() {
         dsv41_compute_engram_hashes_cpu(h_comp_toks, 16, 0, 0, h_hashes_l1);
         dsv41_compute_engram_hashes_cpu(h_comp_toks, 16, 0, 1, h_hashes_l14);
 
-        uint8_t *d_eng_fp8, *d_eng_s;
-        __nv_bfloat16 *d_eng_emb, *d_eng_kv, *d_eng_qw, *d_eng_kw;
-        CHECK_CUDA(cudaMalloc(&d_eng_fp8, 16 * 24 * 256));
-        CHECK_CUDA(cudaMalloc(&d_eng_s,   16 * 24 * 8));
-        CHECK_CUDA(cudaMalloc(&d_eng_emb, 16 * 6144 * sizeof(__nv_bfloat16)));
-        CHECK_CUDA(cudaMalloc(&d_eng_kv,  16 * 25600 * sizeof(__nv_bfloat16)));
-        CHECK_CUDA(cudaMalloc(&d_eng_qw,  DS_HC_DIM * sizeof(__nv_bfloat16)));
-        CHECK_CUDA(cudaMalloc(&d_eng_kw,  DS_HC_DIM * sizeof(__nv_bfloat16)));
-        CHECK_CUDA(cudaMemset(d_eng_s, 127, 16 * 24 * 8));
+        CudaBuffer<uint8_t> d_eng_fp8(16 * 24 * 256);
+        CudaBuffer<uint8_t> d_eng_s(16 * 24 * 8);
+        CudaBuffer<__nv_bfloat16> d_eng_emb(16 * 6144);
+        CudaBuffer<__nv_bfloat16> d_eng_kv(16 * 25600);
+        CudaBuffer<__nv_bfloat16> d_eng_qw(DS_HC_DIM);
+        CudaBuffer<__nv_bfloat16> d_eng_kw(DS_HC_DIM);
+        d_eng_s.memset(127);
 
         auto time_eng = [&](int T_eng) -> float {
             dim3 g_deq(24, T_eng);
@@ -2618,14 +2801,11 @@ int main() {
         printf("       -> Fused Dequant(24x256) + Signed-Sqrt Gated 4x5120 Residual: %.2f us (T=1) | %.2f us (T=16)\n",
                us_eng_t1, us_eng_t16);
         printf("================================================================================\n");
-
-        cudaFree(d_eng_fp8);
-        cudaFree(d_eng_s);
-        cudaFree(d_eng_emb);
-        cudaFree(d_eng_kv);
-        cudaFree(d_eng_qw);
-        cudaFree(d_eng_kw);
     }
 
     return 0;
+}
+
+int main() {
+    return mcl4_dsv41_run_full_profile();
 }

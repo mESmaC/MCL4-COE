@@ -1,0 +1,11 @@
+[package]
+name = "mcl4_rust_engine"
+version = "0.5.0"
+edition = "2021"
+description = "MCL4-Codec Memory-Safe Rust + SM120 CUDA C++ Hybrid Runtime for DeepSeek-V4.1-Flash-1017-NVFP4"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"

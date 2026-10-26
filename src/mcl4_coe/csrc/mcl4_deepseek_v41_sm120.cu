@@ -637,6 +637,9 @@ void launch_dsv41_fp8_gemm(
     } else if (K_DIM == 8192) {
         if (T <= 1) dsv41_fp8_e8m0_gemm_v1_kernel<1, 8192><<<blocks, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
         else        dsv41_fp8_e8m0_gemm_v1_kernel<16, 8192><<<blocks, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
+    } else if (K_DIM == 6144) {
+        if (T <= 1) dsv41_fp8_e8m0_gemm_v1_kernel<1, 6144><<<blocks, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
+        else        dsv41_fp8_e8m0_gemm_v1_kernel<16, 6144><<<blocks, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
     }
 }
 
@@ -2800,6 +2803,120 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_full_profile() {
                (long long)h_hashes_l14[3 * 24 + 0], (long long)h_hashes_l14[3 * 24 + 23]);
         printf("       -> Fused Dequant(24x256) + Signed-Sqrt Gated 4x5120 Residual: %.2f us (T=1) | %.2f us (T=16)\n",
                us_eng_t1, us_eng_t16);
+
+        // 4E. Live Real Shard 47 (Layer 1, 101.54 GB) & Shard 48 (Layer 14, 101.54 GB) O(1) NVMe Engram Parity Test
+        ScopedFile sf47("Z:/deepseek-nvfp4/model-00047-of-00048.safetensors", "rb");
+        ScopedFile sf48("Z:/deepseek-nvfp4/model-00048-of-00048.safetensors", "rb");
+        if (sf47 && sf48) {
+            constexpr int64_t SHARD47_DATA_BASE  = 664LL;
+            constexpr int64_t SHARD47_SCALE_BASE = 664LL + 98305579008LL;
+            constexpr int64_t SHARD47_QW_BASE    = 664LL + 101377628352LL;
+            constexpr int64_t SHARD47_KW_BASE    = 664LL + 101377669312LL;
+
+            constexpr int64_t SHARD48_DATA_BASE  = 672LL;
+            constexpr int64_t SHARD48_SCALE_BASE = 672LL + 98308270592LL;
+
+            std::vector<uint8_t> h_l1_fp8(24 * 256);
+            std::vector<uint8_t> h_l1_s(24 * 8);
+            std::vector<uint8_t> h_l14_fp8(24 * 256);
+            std::vector<uint8_t> h_l14_s(24 * 8);
+
+            for (int c = 0; c < 24; ++c) {
+                int64_t b1  = h_hashes_l1[3 * 24 + c];
+                int64_t b14 = h_hashes_l14[3 * 24 + c];
+                _fseeki64(sf47.fp, SHARD47_DATA_BASE  + b1 * 256LL, SEEK_SET);
+                fread(h_l1_fp8.data() + c * 256, 1, 256, sf47.fp);
+                _fseeki64(sf47.fp, SHARD47_SCALE_BASE + b1 * 8LL, SEEK_SET);
+                fread(h_l1_s.data()   + c * 8,   1, 8,   sf47.fp);
+
+                _fseeki64(sf48.fp, SHARD48_DATA_BASE  + b14 * 256LL, SEEK_SET);
+                fread(h_l14_fp8.data() + c * 256, 1, 256, sf48.fp);
+                _fseeki64(sf48.fp, SHARD48_SCALE_BASE + b14 * 8LL, SEEK_SET);
+                fread(h_l14_s.data()   + c * 8,   1, 8,   sf48.fp);
+            }
+
+            std::vector<__nv_bfloat16> h_qw(DS_HC_DIM);
+            std::vector<__nv_bfloat16> h_kw(DS_HC_DIM);
+            _fseeki64(sf47.fp, SHARD47_QW_BASE, SEEK_SET);
+            fread(h_qw.data(), sizeof(__nv_bfloat16), DS_HC_DIM, sf47.fp);
+            _fseeki64(sf47.fp, SHARD47_KW_BASE, SEEK_SET);
+            fread(h_kw.data(), sizeof(__nv_bfloat16), DS_HC_DIM, sf47.fp);
+
+            d_eng_fp8.copy_from_host(h_l1_fp8.data(), 24 * 256);
+            d_eng_s.copy_from_host(h_l1_s.data(), 24 * 8);
+            d_eng_qw.copy_from_host(h_qw.data(), DS_HC_DIM);
+            d_eng_kw.copy_from_host(h_kw.data(), DS_HC_DIM);
+
+            std::vector<__nv_bfloat16> h_xhc_in(DS_HC_DIM);
+            std::vector<__nv_bfloat16> h_kv_in(25600);
+            for (int i = 0; i < DS_HC_DIM; ++i) {
+                h_xhc_in[i] = __float2bfloat16(0.11f * sinf(float(i) * 0.019f) + 0.06f * cosf(float(i) * 0.071f));
+            }
+            for (int i = 0; i < 25600; ++i) {
+                h_kv_in[i]  = __float2bfloat16(0.09f * cosf(float(i) * 0.023f) - 0.05f * sinf(float(i) * 0.053f));
+            }
+            d_x_hc.copy_from_host(h_xhc_in.data(), DS_HC_DIM);
+            d_eng_kv.copy_from_host(h_kv_in.data(), 25600);
+
+            dim3 g_deq1(24, 1);
+            dsv41_engram_dequant_rows_v1_kernel<<<g_deq1, 256>>>(d_eng_fp8, d_eng_s, d_eng_emb);
+            dsv41_engram_gated_hc_residual_v1_kernel<<<1, 256>>>(d_x_hc, d_eng_kv, d_eng_qw, d_eng_kw);
+            CHECK_CUDA(cudaDeviceSynchronize());
+
+            std::vector<__nv_bfloat16> h_emb_gpu(6144);
+            std::vector<__nv_bfloat16> h_xhc_gpu(DS_HC_DIM);
+            d_eng_emb.copy_to_host(h_emb_gpu.data(), 6144);
+            d_x_hc.copy_to_host(h_xhc_gpu.data(), DS_HC_DIM);
+
+            double dot_deq = 0.0, ng_deq = 0.0, nr_deq = 0.0;
+            for (int i = 0; i < 6144; ++i) {
+                float wv = host_fp8_e4m3(h_l1_fp8[i]);
+                float sv = host_fp8_e8m0(h_l1_s[i >> 5]);
+                float ref = __bfloat162float(__float2bfloat16(wv * sv));
+                float gpu = __bfloat162float(h_emb_gpu[i]);
+                dot_deq += double(gpu) * double(ref);
+                ng_deq  += double(gpu) * double(gpu);
+                nr_deq  += double(ref) * double(ref);
+            }
+            double cos_deq = dot_deq / (sqrt(ng_deq) * sqrt(nr_deq) + 1e-30);
+
+            std::vector<float> h_ref_xhc(DS_HC_DIM);
+            for (int c = 0; c < 4; ++c) {
+                float sh = 0.0f, sk = 0.0f, dt = 0.0f;
+                for (int d = 0; d < DS_DIM; ++d) {
+                    int idx = c * DS_DIM + d;
+                    float hv = __bfloat162float(h_xhc_in[idx]);
+                    float kv = __bfloat162float(h_kv_in[idx]);
+                    float qw = __bfloat162float(h_qw[idx]);
+                    float kw = __bfloat162float(h_kw[idx]);
+                    sh += hv * hv;
+                    sk += kv * kv;
+                    dt += hv * qw * kw * kv;
+                }
+                float rstd = (1.0f / sqrtf(sh / 5120.0f + 1e-20f)) * (1.0f / sqrtf(sk / 5120.0f + 1e-20f));
+                float nd = dt * rstd * (1.0f / sqrtf(5120.0f));
+                float ssqrt = copysignf(sqrtf(fmaxf(fabsf(nd), 1e-6f)), nd);
+                float gate = 1.0f / (1.0f + expf(-ssqrt));
+                for (int d = 0; d < DS_DIM; ++d) {
+                    int idx = c * DS_DIM + d;
+                    float hv = __bfloat162float(h_xhc_in[idx]);
+                    float vv = __bfloat162float(h_kv_in[4 * DS_DIM + d]);
+                    h_ref_xhc[idx] = __bfloat162float(__float2bfloat16(hv + gate * vv));
+                }
+            }
+            double dot_res = 0.0, ng_res = 0.0, nr_res = 0.0;
+            for (int i = 0; i < DS_HC_DIM; ++i) {
+                float gpu = __bfloat162float(h_xhc_gpu[i]);
+                float ref = h_ref_xhc[i];
+                dot_res += double(gpu) * double(ref);
+                ng_res  += double(gpu) * double(gpu);
+                nr_res  += double(ref) * double(ref);
+            }
+            double cos_res = dot_res / (sqrt(ng_res) * sqrt(nr_res) + 1e-30);
+            printf("  [4E] Live Shard 47 (L1, 101.5 GB) & Shard 48 (L14, 101.5 GB) O(1) Engram Parity:\n");
+            printf("       -> 24-Row O(1) Gather Dequant Cosine Sim: %.7f | Signed-Sqrt Gated HC Cosine Sim: %.7f\n",
+                   cos_deq, cos_res);
+        }
         printf("================================================================================\n");
     }
 

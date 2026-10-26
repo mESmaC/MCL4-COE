@@ -314,6 +314,36 @@ impl SafetensorsShardIndex {
         pkt.expert_idx = expert as u32;
         Ok(())
     }
+
+    /// O(1) NVMe gather of 24 hashed N-gram rows (24x256 FP8_E4M3 + 24x8 F8_E8M0 = 6,336 B/token)
+    /// directly from the 101.54 GB Engram shards (`00047` for Layer 1, `00048` for Layer 14)
+    pub fn gather_engram_token_rows(
+        &self,
+        layer: usize,
+        bucket_ids_24: &[i64; 24],
+        out_fp8: &mut [u8; 24 * 256],
+        out_scales: &mut [u8; 24 * 8],
+    ) -> io::Result<()> {
+        let w_key = format!("layers.{}.engram.embed.weight", layer);
+        let s_key = format!("layers.{}.engram.embed.scale", layer);
+        let w_entry = self.tensors.get(&w_key).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("Missing {}", w_key))
+        })?;
+        let s_entry = self.tensors.get(&s_key).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("Missing {}", s_key))
+        })?;
+        let wf = &self.shard_files[w_entry.shard_idx];
+        let sf = &self.shard_files[s_entry.shard_idx];
+
+        for c in 0..24 {
+            let b = bucket_ids_24[c] as u64;
+            let w_off = w_entry.abs_offset + b * 256;
+            let s_off = s_entry.abs_offset + b * 8;
+            wf.1.seek_read(&mut out_fp8[c * 256..(c + 1) * 256], w_off)?;
+            sf.1.seek_read(&mut out_scales[c * 8..(c + 1) * 8], s_off)?;
+        }
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -411,6 +441,34 @@ fn main() -> io::Result<()> {
         hashes_l14[3 * 24],
         hashes_l14[3 * 24 + 23]
     );
+
+    if index.tensors.contains_key("layers.1.engram.embed.weight")
+        && index.tensors.contains_key("layers.14.engram.embed.weight")
+    {
+        let mut tok3_l1 = [0i64; 24];
+        let mut tok3_l14 = [0i64; 24];
+        tok3_l1.copy_from_slice(&hashes_l1[3 * 24..4 * 24]);
+        tok3_l14.copy_from_slice(&hashes_l14[3 * 24..4 * 24]);
+
+        let mut l1_fp8 = [0u8; 24 * 256];
+        let mut l1_s = [0u8; 24 * 8];
+        let mut l14_fp8 = [0u8; 24 * 256];
+        let mut l14_s = [0u8; 24 * 8];
+
+        // Warmup & time O(1) seek_read across the two 101.54 GB Engram shards
+        index.gather_engram_token_rows(1, &tok3_l1, &mut l1_fp8, &mut l1_s)?;
+        index.gather_engram_token_rows(14, &tok3_l14, &mut l14_fp8, &mut l14_s)?;
+
+        let t_eng_io = Instant::now();
+        index.gather_engram_token_rows(1, &tok3_l1, &mut l1_fp8, &mut l1_s)?;
+        index.gather_engram_token_rows(14, &tok3_l14, &mut l14_fp8, &mut l14_s)?;
+        let eng_io_us = t_eng_io.elapsed().as_secs_f64() * 1e6;
+
+        println!(
+            "    -> Live O(1) NVMe Gather from Shards 47 & 48 (203.1 GB total, 0 B VRAM): 2x 6.34 KiB read in {:.2} us (L1_s0={}, L14_s0={})",
+            eng_io_us, l1_s[0], l14_s[0]
+        );
+    }
 
     // 3. Multi-Threaded Parallel Overlapped NVMe Expert Streaming + Direct SM120 GPU FFI Execution!
     if !index.available_layers.is_empty() {

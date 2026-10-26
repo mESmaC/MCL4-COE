@@ -511,6 +511,58 @@ fn main() -> io::Result<()> {
         scan_ms
     );
 
+    // Optional CLI Bulk Sharder: `--shard-layers <l0>..<l1> [--experts <e0>..<e1>]`
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(pos) = args.iter().position(|a| a == "--shard-layers") {
+        let l_range_str = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("0..40");
+        let e_range_str = args
+            .iter()
+            .position(|a| a == "--experts")
+            .and_then(|p| args.get(p + 1))
+            .map(|s| s.as_str())
+            .unwrap_or("0..16");
+
+        let parse_range = |s: &str, default_end: usize| -> (usize, usize) {
+            if let Some((a, b)) = s.split_once("..") {
+                (a.parse().unwrap_or(0), b.parse().unwrap_or(default_end))
+            } else {
+                let end = s.parse().unwrap_or(default_end);
+                (0, end)
+            }
+        };
+        let (l0, l1) = parse_range(l_range_str, 40);
+        let (e0, e1) = parse_range(e_range_str, 384);
+        let layers: Vec<usize> = (l0..l1.min(40)).collect();
+        let experts: Vec<usize> = (e0..e1.min(384)).collect();
+
+        let store = p4608_expert_sharder::P4608DualDriveExpertStore::default_p4608();
+        println!(
+            "\n[P4608 Bulk Sharder] Striping Layers {}..{} × Experts {}..{} ({} expert shards = {:.2} GiB) across X: (Even) & Z: (Odd)...",
+            l0,
+            l1.min(40),
+            e0,
+            e1.min(384),
+            layers.len() * experts.len(),
+            (layers.len() * experts.len() * DS_PACKET_BYTES) as f64 / (1024.0 * 1024.0 * 1024.0)
+        );
+        let (new_cnt, cached_cnt, dt_ms) = store.shard_layers_parallel(&index, &layers, &experts)?;
+        let written_gib = (new_cnt * DS_PACKET_BYTES) as f64 / (1024.0 * 1024.0 * 1024.0);
+        let bw_gibs = if dt_ms > 0.0 {
+            written_gib / (dt_ms / 1000.0)
+        } else {
+            0.0
+        };
+        println!(
+            "[P4608 Bulk Sharder Complete] Written={} new shards ({:.2} GiB), Skipped={} cached shards in {:.2} s ({:.2} GiB/s)!",
+            new_cnt,
+            written_gib,
+            cached_cnt,
+            dt_ms / 1000.0,
+            bw_gibs
+        );
+        return Ok(());
+    }
+
     // 2. Verify FFI call to `dsv41_compute_engram_hashes_cpu` in `mcl4_deepseek_v41_sm120.dll`
     let comp_tokens: [i64; 16] = [101, 2054, 3319, 442, 8812, 19, 77321, 904, 512, 663, 9182, 41, 77, 12003, 55, 891];
     let mut hashes_l1 = [0i64; 16 * 24];
@@ -696,7 +748,19 @@ fn main() -> io::Result<()> {
         let mut h_gate_bias = vec![0.0f32; NUM_UT * DS_ROUTED_EXPERTS];
         let mut h_final_norm_w = vec![0u16; DS_DIM];
 
-        // Phase A: Stream Upper-Tail Router/Norm/HC Metadata (54.66 MiB) & Pre-Route on GPU to find the true Top-2 Routed Experts per Layer!
+        // Phase A: Ensure all 40 layers' 4K-aligned META.mcl4m (Router + Norm + HC, 5.64 MiB/layer)
+        // are sharded across X: (Even) and Z: (Odd), then stream L32..L39 in 1 syscall per layer!
+        let p4608_store = p4608_expert_sharder::P4608DualDriveExpertStore::default_p4608();
+        let all_40_layers: Vec<usize> = (0..40).collect();
+        let (meta_new, meta_cached, meta_prep_ms) =
+            p4608_store.ensure_layers_meta_sharded(&index, &all_40_layers)?;
+        if meta_new > 0 {
+            println!(
+                "    -> P4608 40-Layer `META.mcl4m` Sharder (225.47 MiB across X: & Z:): new={}, cached={}, time={:.2} ms",
+                meta_new, meta_cached, meta_prep_ms
+            );
+        }
+
         let t_meta = Instant::now();
         {
             let fn_bytes: &mut [u8] = unsafe {
@@ -730,15 +794,12 @@ fn main() -> io::Result<()> {
                     .zip(gw_bytes.chunks_mut(GATE_W_ELEMS * 2).zip(gb_bytes.chunks_mut(DS_ROUTED_EXPERTS * 4)))
                     .enumerate()
                 {
-                    let idx_ref = Arc::clone(&index);
+                    let store_ref = &p4608_store;
                     let layer = 32 + u;
                     s.spawn(move || {
-                        idx_ref.read_tensor_exact(&format!("layers.{}.hc_ffn_fn", layer), fn_ch).unwrap();
-                        idx_ref.read_tensor_exact(&format!("layers.{}.hc_ffn_scale", layer), sc_ch).unwrap();
-                        idx_ref.read_tensor_exact(&format!("layers.{}.hc_ffn_base", layer), bs_ch).unwrap();
-                        idx_ref.read_tensor_exact(&format!("layers.{}.ffn_norm.weight", layer), nw_ch).unwrap();
-                        idx_ref.read_tensor_exact(&format!("layers.{}.ffn.gate.weight", layer), gw_ch).unwrap();
-                        idx_ref.read_tensor_exact(&format!("layers.{}.ffn.gate.bias", layer), gb_ch).unwrap();
+                        store_ref
+                            .read_layer_meta_single_syscall(layer, fn_ch, gw_ch, nw_ch, gb_ch, bs_ch, sc_ch)
+                            .unwrap();
                     });
                 }
             });

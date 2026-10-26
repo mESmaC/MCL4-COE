@@ -95,11 +95,151 @@ impl P4608DualDriveExpertStore {
         let file = File::open(&path)?;
 
         let arc_f = Arc::new(file);
-        self.handle_cache
-            .write()
-            .unwrap()
-            .insert((layer, expert), Arc::clone(&arc_f));
+        let mut cache = self.handle_cache.write().unwrap();
+        if cache.len() >= 512 {
+            cache.clear();
+        }
+        cache.insert((layer, expert), Arc::clone(&arc_f));
         Ok(arc_f)
+    }
+
+    /// Deterministic path for the 4K-aligned per-layer Router + Norm + Hyper-Connection bundle
+    /// (`META.mcl4m`, `5,910,528 B = 1,443 × 4096 B`), striped by layer parity (`X:` even, `Z:` odd).
+    #[inline]
+    pub fn layer_meta_path(&self, layer: usize) -> PathBuf {
+        let root = if (layer & 1) == 0 {
+            &self.ctrl0_root
+        } else {
+            &self.ctrl1_root
+        };
+        root.join(format!("L{:02}", layer)).join("META.mcl4m")
+    }
+
+    /// Exact byte size of `META.mcl4m` (`1,443 × 4096 = 5,910,528` bytes).
+    pub const LAYER_META_BYTES: usize = 5_910_528;
+
+    #[inline]
+    pub fn is_layer_meta_sharded(&self, layer: usize) -> bool {
+        let p = self.layer_meta_path(layer);
+        match fs::metadata(&p) {
+            Ok(m) => m.is_file() && m.len() == (Self::LAYER_META_BYTES as u64),
+            Err(_) => false,
+        }
+    }
+
+    /// Writes `L{layer:02}\META.mcl4m` (`5,910,528 B = 1,443 × 4096 B`) containing:
+    ///   - `[0 .. 1,966,080)`: `hc_ffn_fn` (`24 * 20480 * f32`)
+    ///   - `[1,966,080 .. 5,898,240)`: `ffn.gate.weight` (`384 * 5120 * u16`)
+    ///   - `[5,898,240 .. 5,908,480)`: `ffn_norm.weight` (`5120 * u16`)
+    ///   - `[5,908,480 .. 5,910,016)`: `ffn.gate.bias` (`384 * f32`)
+    ///   - `[5,910,016 .. 5,910,112)`: `hc_ffn_base` (`24 * f32`)
+    ///   - `[5,910,112 .. 5,910,124)`: `hc_ffn_scale` (`3 * f32`)
+    ///   - `[5,910,124 .. 5,910,528)`: zero-padding to 4096B sector boundary
+    pub fn write_layer_meta_shard(
+        &self,
+        index: &SafetensorsShardIndex,
+        layer: usize,
+    ) -> io::Result<PathBuf> {
+        let out_path = self.layer_meta_path(layer);
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let mut buf = vec![0u8; Self::LAYER_META_BYTES];
+        index.read_tensor_exact(&format!("layers.{}.hc_ffn_fn", layer), &mut buf[0..1_966_080])?;
+        index.read_tensor_exact(&format!("layers.{}.ffn.gate.weight", layer), &mut buf[1_966_080..5_898_240])?;
+        index.read_tensor_exact(&format!("layers.{}.ffn_norm.weight", layer), &mut buf[5_898_240..5_908_480])?;
+        index.read_tensor_exact(&format!("layers.{}.ffn.gate.bias", layer), &mut buf[5_908_480..5_910_016])?;
+        index.read_tensor_exact(&format!("layers.{}.hc_ffn_base", layer), &mut buf[5_910_016..5_910_112])?;
+        index.read_tensor_exact(&format!("layers.{}.hc_ffn_scale", layer), &mut buf[5_910_112..5_910_124])?;
+
+        let mut f = File::create(&out_path)?;
+        f.write_all(&buf)?;
+        Ok(out_path)
+    }
+
+    /// Reads `L{layer:02}\META.mcl4m` in a single contiguous read and unpacks into caller slices.
+    pub fn read_layer_meta_single_syscall(
+        &self,
+        layer: usize,
+        fn_dst: &mut [u8],
+        gw_dst: &mut [u8],
+        nw_dst: &mut [u8],
+        gb_dst: &mut [u8],
+        bs_dst: &mut [u8],
+        sc_dst: &mut [u8],
+    ) -> io::Result<()> {
+        let path = self.layer_meta_path(layer);
+        #[cfg(windows)]
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN)
+            .open(&path)?;
+        #[cfg(not(windows))]
+        let mut file = File::open(&path)?;
+
+        let mut buf = vec![0u8; Self::LAYER_META_BYTES];
+        #[cfg(windows)]
+        {
+            let mut read_total = 0usize;
+            while read_total < Self::LAYER_META_BYTES {
+                let n = file.seek_read(&mut buf[read_total..], read_total as u64)?;
+                if n == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "Unexpected EOF reading META.mcl4m",
+                    ));
+                }
+                read_total += n;
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            file.read_exact(&mut buf)?;
+        }
+
+        fn_dst.copy_from_slice(&buf[0..1_966_080]);
+        gw_dst.copy_from_slice(&buf[1_966_080..5_898_240]);
+        nw_dst.copy_from_slice(&buf[5_898_240..5_908_480]);
+        gb_dst.copy_from_slice(&buf[5_908_480..5_910_016]);
+        bs_dst.copy_from_slice(&buf[5_910_016..5_910_112]);
+        sc_dst.copy_from_slice(&buf[5_910_112..5_910_124]);
+        Ok(())
+    }
+
+    /// Ensures `META.mcl4m` is sharded for all requested layers across `X:` (Even) and `Z:` (Odd).
+    pub fn ensure_layers_meta_sharded(
+        &self,
+        index: &Arc<SafetensorsShardIndex>,
+        layers: &[usize],
+    ) -> io::Result<(usize, usize, f64)> {
+        let t0 = Instant::now();
+        let mut missing = Vec::new();
+        let mut cached = 0usize;
+        for &l in layers {
+            if self.is_layer_meta_sharded(l) {
+                cached += 1;
+            } else {
+                missing.push(l);
+            }
+        }
+        if !missing.is_empty() {
+            thread::scope(|s| -> io::Result<()> {
+                let mut handles = Vec::new();
+                for &l in &missing {
+                    let idx_clone = Arc::clone(index);
+                    let store_ref = self;
+                    handles.push(s.spawn(move || -> io::Result<()> {
+                        store_ref.write_layer_meta_shard(&idx_clone, l).map(|_| ())
+                    }));
+                }
+                for h in handles {
+                    h.join().unwrap()?;
+                }
+                Ok(())
+            })?;
+        }
+        let dt_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        Ok((missing.len(), cached, dt_ms))
     }
 
     /// Writes a single `Dsv41Mcl4cExpertPacket` (`19,910,656 B = 4,861 × 4096 B`) to its
@@ -159,7 +299,7 @@ impl P4608DualDriveExpertStore {
                 }
             }
 
-            let num_workers = missing.len().min(8).max(1);
+            let num_workers = missing.len().min(16).max(1);
             let chunk_size = (missing.len() + num_workers - 1) / num_workers;
 
             thread::scope(|s| -> io::Result<()> {
@@ -182,13 +322,91 @@ impl P4608DualDriveExpertStore {
             })?;
         }
 
-        // Pre-warm open file handles so runtime streaming executes 1 pure `seek_read` syscall per expert
-        for &(l, e) in targets {
-            let _ = self.get_or_open_handle(l, e)?;
+        // Pre-warm open file handles for small active batches (`<= 64`)
+        if targets.len() <= 64 {
+            for &(l, e) in targets {
+                let _ = self.get_or_open_handle(l, e)?;
+            }
         }
 
         let dt_ms = t0.elapsed().as_secs_f64() * 1000.0;
         Ok((missing.len(), cached, dt_ms))
+    }
+
+    /// High-throughput dual-controller parallel sharder across a list of layers and experts per layer.
+    /// Interleaves `(Even Layer -> X:, Odd Layer -> Z:)` tasks across 16 worker threads so both
+    /// Intel DC P4608 NVMe controllers write concurrently at maximum bandwidth.
+    pub fn shard_layers_parallel(
+        &self,
+        index: &Arc<SafetensorsShardIndex>,
+        layers: &[usize],
+        experts_per_layer: &[usize],
+    ) -> io::Result<(usize, usize, f64)> {
+        let t0 = Instant::now();
+
+        // 1. Ensure all layer META.mcl4m bundles exist across X: and Z:
+        let (meta_new, meta_cached, meta_ms) = self.ensure_layers_meta_sharded(index, layers)?;
+        println!(
+            "    [P4608 META.mcl4m] Layers={}: new={}, cached={}, time={:.2} ms",
+            layers.len(),
+            meta_new,
+            meta_cached,
+            meta_ms
+        );
+
+        // 2. Interleave (layer, expert) pairs across layers so adjacent items in `missing`
+        // alternate between Even layers (`X:`) and Odd layers (`Z:`)!
+        let mut missing = Vec::with_capacity(layers.len() * experts_per_layer.len());
+        let mut cached = 0usize;
+        for &l in layers {
+            let dir_path = if (l & 1) == 0 {
+                self.ctrl0_root.join(format!("L{:02}", l))
+            } else {
+                self.ctrl1_root.join(format!("L{:02}", l))
+            };
+            fs::create_dir_all(&dir_path)?;
+        }
+
+        for &e in experts_per_layer {
+            for &l in layers {
+                if self.is_expert_sharded(l, e) {
+                    cached += 1;
+                } else {
+                    missing.push((l, e));
+                }
+            }
+        }
+
+        let total_new = missing.len();
+        if total_new > 0 {
+            let num_workers = total_new.min(16).max(1);
+            // Round-robin assignment across 16 workers preserves Even/Odd controller balance
+            thread::scope(|s| -> io::Result<()> {
+                let mut handles = Vec::with_capacity(num_workers);
+                let missing_ref = &missing;
+                for worker_id in 0..num_workers {
+                    let idx_clone = Arc::clone(index);
+                    let store_ref = self;
+                    handles.push(s.spawn(move || -> io::Result<()> {
+                        let mut pkt = Dsv41Mcl4cExpertPacket::new_zeroed_box();
+                        let mut idx = worker_id;
+                        while idx < missing_ref.len() {
+                            let (l, e) = missing_ref[idx];
+                            store_ref.write_expert_shard(&idx_clone, l, e, &mut pkt)?;
+                            idx += num_workers;
+                        }
+                        Ok(())
+                    }));
+                }
+                for h in handles {
+                    h.join().unwrap()?;
+                }
+                Ok(())
+            })?;
+        }
+
+        let dt_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        Ok((total_new, cached, dt_ms))
     }
 
     /// Reads a single 4K-aligned `.mcl4e` expert shard (`19,910,656` B) from `X:` or `Z:`

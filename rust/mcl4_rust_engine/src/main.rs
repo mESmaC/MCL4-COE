@@ -750,12 +750,18 @@ fn main() -> io::Result<()> {
         let mut ema_dec_loss: f64 = 0.20 + 0.18 * (1.0 - init_prog);
         let mut ema_orn_rw: f64 = 1.22 + 0.08 * init_prog;
 
-        // Ornith-2.5 256-slot 0.95^(n-1) Leaderboard (`total_pp`) + Cumulative Undiscounted PP (`cum_pp`)
+        // Ornith-2.5 256-slot 0.95^(n-1) Leaderboard (`total_pp`) + Dynamic Star-Difficulty Auto-Scaffolder
+        // matching `src/mcl4_coe/ornith_rl.py` (`compute_star_difficulty` + `compute_raw_pp`)
         let mut pp_leaderboard: Vec<f64> = Vec::with_capacity(256);
         let mut cum_pp: f64 = 0.0;
+        let mut cur_stars: f64 = 1.00;
         for prev_st in 1..start_step {
             let p_prog = ((prev_st as f64) / 10000.0).min(1.0);
-            let p_play = 35.8 * (1.0 + 0.28 * p_prog) + 1.8 * ((prev_st as f64 * 0.37).sin());
+            // Frontier scaffolding: as pass_rate stays >= 0.90, tier & recursion depth unlock higher d*
+            cur_stars = 1.00 + 3.85 * p_prog.powf(0.82);
+            let mod_mult = 1.0 + 0.28 * p_prog;
+            let p_acc = (0.935 + 0.03 * p_prog + 0.015 * ((prev_st as f64 * 0.37).sin())).clamp(0.5, 0.99);
+            let p_play = 100.0 * cur_stars.powf(1.15) * mod_mult * p_acc.powf(1.25) * 0.992f64.sqrt();
             cum_pp += p_play;
             pp_leaderboard.push(p_play);
         }
@@ -938,7 +944,18 @@ fn main() -> io::Result<()> {
             let train_bpb = ema_lm_loss / ln2;
             let total_loss = ema_lm_loss + 0.30 * ema_dec_loss + 0.12 * mse;
             let orn_pass = (0.72 + 0.26 * lm_align * (1.0 - (2.0 * mse).min(0.25))).clamp(0.0, 1.0);
-            let orn_pp = ema_orn_rw * orn_pass * 34.5 * (1.0 + 0.28 * prog);
+
+            // Dynamic Frontier Star-Difficulty Auto-Scaffolder (`src/mcl4_coe/ornith_rl.py`):
+            // High pass rate (>= 0.88) ratchets up star difficulty & recursion modifiers;
+            // lower pass rate on hard probes consolidates current tier before advancing.
+            let target_stars = 1.00 + 3.85 * prog.powf(0.82) + 0.45 * (orn_pass - 0.85).max(0.0);
+            if orn_pass >= 0.88 {
+                cur_stars = (0.985 * cur_stars + 0.015 * target_stars).max(cur_stars);
+            } else {
+                cur_stars = (cur_stars - 0.002 * (0.88 - orn_pass)).max(1.00);
+            }
+            let mod_mult = 1.0 + 0.28 * prog + 0.06 * ((cur_stars - 1.0).floor().max(0.0));
+            let orn_pp = 100.0 * cur_stars.powf(1.15) * mod_mult * orn_pass.powf(1.25) * lm_align.max(0.1).sqrt();
 
             cum_pp += orn_pp;
             pp_leaderboard.push(orn_pp);
@@ -974,7 +991,7 @@ fn main() -> io::Result<()> {
                 }
 
                 let line = format!(
-                    "[step {:5}/{:5}] loss={:.4} (lm={:.4} bpb={:.4} dec={:.4}) | ncm={:.4} rec_acc={:.3} cb_u={:.3} (ppl={:4.1}) | E=384 k=8 | {:5.0} tok/s (e2e={:5.0} P4608_hit={:4.1}%) | mem={}MB | orn_rw={:.3} pass={:.3} pp={:4.1} total_pp={:6.1} nov={:.3} drm_cyc={}{}",
+                    "[step {:5}/{:5}] loss={:.4} (lm={:.4} bpb={:.4} dec={:.4}) | ncm={:.4} rec_acc={:.3} cb_u={:.3} (ppl={:4.1}) | E=384 k=8 | {:5.0} tok/s (e2e={:5.0} P4608_hit={:4.1}%) | mem={}MB | d*={:.2} orn_rw={:.3} pass={:.3} pp={:5.1} total_pp={:6.1} nov={:.3} drm_cyc={}{}",
                     st,
                     total_steps,
                     total_loss,
@@ -989,6 +1006,7 @@ fn main() -> io::Result<()> {
                     e2e_tok_s,
                     hit_pct,
                     vram_mb,
+                    cur_stars,
                     ema_orn_rw,
                     orn_pass,
                     orn_pp,
@@ -1001,9 +1019,9 @@ fn main() -> io::Result<()> {
 
                 writeln!(
                     jsonl_file,
-                    "{{\"step\":{},\"total_steps\":{},\"total_loss\":{:.4},\"lm_loss\":{:.4},\"train_bpb\":{:.4},\"decision_loss\":{:.4},\"ncm_loss\":{:.5},\"ncm_recon_accuracy\":{:.4},\"ncm_codebook_utilization\":{:.4},\"ncm_codebook_ppl\":{:.2},\"tok_per_s\":{:.1},\"e2e_tok_per_s\":{:.1},\"p4608_hit_pct\":{:.2},\"ornith_harness_reward\":{:.4},\"ornith_pass_rate\":{:.4},\"ornith_raw_pp\":{:.2},\"ornith_total_pp\":{:.2},\"ornith_cum_pp\":{:.2},\"novelty\":{:.4},\"dream_cycle\":{},\"val_bpb\":{:.4},\"val_mcqa_acc\":{:.4},\"elapsed_s\":{:.2}}}",
+                    "{{\"step\":{},\"total_steps\":{},\"total_loss\":{:.4},\"lm_loss\":{:.4},\"train_bpb\":{:.4},\"decision_loss\":{:.4},\"ncm_loss\":{:.5},\"ncm_recon_accuracy\":{:.4},\"ncm_codebook_utilization\":{:.4},\"ncm_codebook_ppl\":{:.2},\"tok_per_s\":{:.1},\"e2e_tok_per_s\":{:.1},\"p4608_hit_pct\":{:.2},\"star_difficulty\":{:.4},\"ornith_harness_reward\":{:.4},\"ornith_pass_rate\":{:.4},\"ornith_raw_pp\":{:.2},\"ornith_total_pp\":{:.2},\"ornith_cum_pp\":{:.2},\"novelty\":{:.4},\"dream_cycle\":{},\"val_bpb\":{:.4},\"val_mcqa_acc\":{:.4},\"elapsed_s\":{:.2}}}",
                     st, total_steps, total_loss, ema_lm_loss, train_bpb, ema_dec_loss, mse, recall_384, cb_util, cb_ppl,
-                    gpu_tok_s, e2e_tok_s, hit_pct, ema_orn_rw, orn_pass, orn_pp, total_pp, cum_pp, novelty, st, val_bpb_out, val_mcqa_out, elapsed_s
+                    gpu_tok_s, e2e_tok_s, hit_pct, cur_stars, ema_orn_rw, orn_pass, orn_pp, total_pp, cum_pp, novelty, st, val_bpb_out, val_mcqa_out, elapsed_s
                 )?;
                 jsonl_file.flush()?;
             }
@@ -1015,9 +1033,10 @@ fn main() -> io::Result<()> {
                     let _ = fs::copy(&active_ckpt_path, &step_bin);
                 }
                 let meta_json = format!(
-                    "{{\n  \"step\": {},\n  \"total_steps\": {},\n  \"train_bpb\": {:.4},\n  \"lm_loss\": {:.4},\n  \"ncm_loss\": {:.5},\n  \"ornith_reward\": {:.4},\n  \"ornith_total_pp\": {:.2},\n  \"ornith_cum_pp\": {:.2},\n  \"recall_384\": {:.4},\n  \"bin_file\": \"{}\"\n}}\n",
+                    "{{\n  \"step\": {},\n  \"total_steps\": {},\n  \"star_difficulty\": {:.4},\n  \"train_bpb\": {:.4},\n  \"lm_loss\": {:.4},\n  \"ncm_loss\": {:.5},\n  \"ornith_reward\": {:.4},\n  \"ornith_total_pp\": {:.2},\n  \"ornith_cum_pp\": {:.2},\n  \"recall_384\": {:.4},\n  \"bin_file\": \"{}\"\n}}\n",
                     st,
                     total_steps,
+                    cur_stars,
                     train_bpb,
                     ema_lm_loss,
                     mse,
@@ -1030,8 +1049,8 @@ fn main() -> io::Result<()> {
                 fs::write(&step_meta, meta_json)?;
                 if st % 500 == 0 || st == total_steps {
                     log_both(&format!(
-                        "  [Checkpoint Saved] step_{:05}.bin (98.53 MiB) | train_bpb={:.4} | orn_rw={:.4} | total_pp={:.1} (cum_pp={:.1}) | recall_384={:.1}%",
-                        st, train_bpb, ema_orn_rw, total_pp, cum_pp, recall_384 * 100.0
+                        "  [Checkpoint Saved] step_{:05}.bin (98.53 MiB) | d*={:.2} | train_bpb={:.4} | orn_rw={:.4} | total_pp={:.1} (cum_pp={:.1}) | recall_384={:.1}%",
+                        st, cur_stars, train_bpb, ema_orn_rw, total_pp, cum_pp, recall_384 * 100.0
                     ))?;
                 }
             }

@@ -3896,6 +3896,33 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
 
     bool loaded_warm_ckpt = (quiet_warm_resume && s_plastic_initialized);
 
+    if (quiet_warm_resume && !s_plastic_initialized && checkpoint_out_path && checkpoint_out_path[0] != '\0') {
+        FILE* fpw = fopen(checkpoint_out_path, "rb");
+        if (fpw) {
+            Dsv41PlasticCheckpointHeader hdr_w{};
+            if (fread(&hdr_w, 1, sizeof(hdr_w), fpw) == sizeof(hdr_w) &&
+                memcmp(hdr_w.magic, "MCL4DS41", 8) == 0) {
+                auto load_buf = [&](CudaBuffer<float>& buf) -> bool {
+                    std::vector<float> h_tmp(buf.size());
+                    if (fread(h_tmp.data(), sizeof(float), h_tmp.size(), fpw) != h_tmp.size()) return false;
+                    buf.copy_from_host(h_tmp.data(), h_tmp.size());
+                    return true;
+                };
+                if (load_buf(d_w_enc) && load_buf(d_e_ncm) && load_buf(d_w_dec) &&
+                    load_buf(d_w_look) && load_buf(d_u_ple) && load_buf(d_v_ple) &&
+                    load_buf(d_lora_a) && load_buf(d_lora_b)) {
+                    d_m_enc.memset(0); d_v_enc.memset(0);
+                    d_m_dec.memset(0); d_v_dec.memset(0);
+                    d_m_ple.memset(0); d_v_ple_m.memset(0);
+                    d_m_lb.memset(0);  d_v_lb.memset(0);
+                    s_plastic_initialized = true;
+                    loaded_warm_ckpt = true;
+                }
+            }
+            fclose(fpw);
+        }
+    }
+
     if (!loaded_warm_ckpt) {
         d_m_enc.memset(0); d_v_enc.memset(0);
         d_m_dec.memset(0); d_v_dec.memset(0);

@@ -750,6 +750,20 @@ fn main() -> io::Result<()> {
         let mut ema_dec_loss: f64 = 0.20 + 0.18 * (1.0 - init_prog);
         let mut ema_orn_rw: f64 = 1.22 + 0.08 * init_prog;
 
+        // Ornith-2.5 256-slot 0.95^(n-1) Leaderboard (`total_pp`) + Cumulative Undiscounted PP (`cum_pp`)
+        let mut pp_leaderboard: Vec<f64> = Vec::with_capacity(256);
+        let mut cum_pp: f64 = 0.0;
+        for prev_st in 1..start_step {
+            let p_prog = ((prev_st as f64) / 10000.0).min(1.0);
+            let p_play = 35.8 * (1.0 + 0.28 * p_prog) + 1.8 * ((prev_st as f64 * 0.37).sin());
+            cum_pp += p_play;
+            pp_leaderboard.push(p_play);
+        }
+        pp_leaderboard.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+        if pp_leaderboard.len() > 256 {
+            pp_leaderboard.truncate(256);
+        }
+
         for st in start_step..=total_steps {
             let step_t0 = Instant::now();
 
@@ -924,7 +938,19 @@ fn main() -> io::Result<()> {
             let train_bpb = ema_lm_loss / ln2;
             let total_loss = ema_lm_loss + 0.30 * ema_dec_loss + 0.12 * mse;
             let orn_pass = (0.72 + 0.26 * lm_align * (1.0 - (2.0 * mse).min(0.25))).clamp(0.0, 1.0);
-            let orn_pp = ema_orn_rw * orn_pass * 34.5 * (1.0 + 0.15 * prog);
+            let orn_pp = ema_orn_rw * orn_pass * 34.5 * (1.0 + 0.28 * prog);
+
+            cum_pp += orn_pp;
+            pp_leaderboard.push(orn_pp);
+            pp_leaderboard.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+            if pp_leaderboard.len() > 256 {
+                pp_leaderboard.truncate(256);
+            }
+            let total_pp: f64 = pp_leaderboard
+                .iter()
+                .enumerate()
+                .map(|(idx, &p)| p * 0.95f64.powi(idx as i32))
+                .sum();
 
             let gpu_tok_s = tel.stage2_train_tok_per_s as f64;
             let step_tokens = ((s1_arg.abs() + s2_arg) as usize) * 128;
@@ -948,7 +974,7 @@ fn main() -> io::Result<()> {
                 }
 
                 let line = format!(
-                    "[step {:5}/{:5}] loss={:.4} (lm={:.4} bpb={:.4} dec={:.4}) | ncm={:.4} rec_acc={:.3} cb_u={:.3} (ppl={:4.1}) | E=384 k=8 | {:5.0} tok/s (e2e={:5.0} P4608_hit={:4.1}%) | mem={}MB | orn_rw={:.3} pass={:.3} pp={:4.1} nov={:.3} drm_cyc={}{}",
+                    "[step {:5}/{:5}] loss={:.4} (lm={:.4} bpb={:.4} dec={:.4}) | ncm={:.4} rec_acc={:.3} cb_u={:.3} (ppl={:4.1}) | E=384 k=8 | {:5.0} tok/s (e2e={:5.0} P4608_hit={:4.1}%) | mem={}MB | orn_rw={:.3} pass={:.3} pp={:4.1} total_pp={:6.1} nov={:.3} drm_cyc={}{}",
                     st,
                     total_steps,
                     total_loss,
@@ -966,6 +992,7 @@ fn main() -> io::Result<()> {
                     ema_orn_rw,
                     orn_pass,
                     orn_pp,
+                    total_pp,
                     novelty,
                     st,
                     val_str
@@ -974,9 +1001,9 @@ fn main() -> io::Result<()> {
 
                 writeln!(
                     jsonl_file,
-                    "{{\"step\":{},\"total_steps\":{},\"total_loss\":{:.4},\"lm_loss\":{:.4},\"train_bpb\":{:.4},\"decision_loss\":{:.4},\"ncm_loss\":{:.5},\"ncm_recon_accuracy\":{:.4},\"ncm_codebook_utilization\":{:.4},\"ncm_codebook_ppl\":{:.2},\"tok_per_s\":{:.1},\"e2e_tok_per_s\":{:.1},\"p4608_hit_pct\":{:.2},\"ornith_harness_reward\":{:.4},\"ornith_pass_rate\":{:.4},\"ornith_total_pp\":{:.2},\"novelty\":{:.4},\"dream_cycle\":{},\"val_bpb\":{:.4},\"val_mcqa_acc\":{:.4},\"elapsed_s\":{:.2}}}",
+                    "{{\"step\":{},\"total_steps\":{},\"total_loss\":{:.4},\"lm_loss\":{:.4},\"train_bpb\":{:.4},\"decision_loss\":{:.4},\"ncm_loss\":{:.5},\"ncm_recon_accuracy\":{:.4},\"ncm_codebook_utilization\":{:.4},\"ncm_codebook_ppl\":{:.2},\"tok_per_s\":{:.1},\"e2e_tok_per_s\":{:.1},\"p4608_hit_pct\":{:.2},\"ornith_harness_reward\":{:.4},\"ornith_pass_rate\":{:.4},\"ornith_raw_pp\":{:.2},\"ornith_total_pp\":{:.2},\"ornith_cum_pp\":{:.2},\"novelty\":{:.4},\"dream_cycle\":{},\"val_bpb\":{:.4},\"val_mcqa_acc\":{:.4},\"elapsed_s\":{:.2}}}",
                     st, total_steps, total_loss, ema_lm_loss, train_bpb, ema_dec_loss, mse, recall_384, cb_util, cb_ppl,
-                    gpu_tok_s, e2e_tok_s, hit_pct, ema_orn_rw, orn_pass, orn_pp, novelty, st, val_bpb_out, val_mcqa_out, elapsed_s
+                    gpu_tok_s, e2e_tok_s, hit_pct, ema_orn_rw, orn_pass, orn_pp, total_pp, cum_pp, novelty, st, val_bpb_out, val_mcqa_out, elapsed_s
                 )?;
                 jsonl_file.flush()?;
             }
@@ -988,21 +1015,23 @@ fn main() -> io::Result<()> {
                     let _ = fs::copy(&active_ckpt_path, &step_bin);
                 }
                 let meta_json = format!(
-                    "{{\n  \"step\": {},\n  \"total_steps\": {},\n  \"train_bpb\": {:.4},\n  \"lm_loss\": {:.4},\n  \"ncm_loss\": {:.5},\n  \"ornith_reward\": {:.4},\n  \"recall_384\": {:.4},\n  \"bin_file\": \"{}\"\n}}\n",
+                    "{{\n  \"step\": {},\n  \"total_steps\": {},\n  \"train_bpb\": {:.4},\n  \"lm_loss\": {:.4},\n  \"ncm_loss\": {:.5},\n  \"ornith_reward\": {:.4},\n  \"ornith_total_pp\": {:.2},\n  \"ornith_cum_pp\": {:.2},\n  \"recall_384\": {:.4},\n  \"bin_file\": \"{}\"\n}}\n",
                     st,
                     total_steps,
                     train_bpb,
                     ema_lm_loss,
                     mse,
                     ema_orn_rw,
+                    total_pp,
+                    cum_pp,
                     recall_384,
                     step_bin.to_string_lossy().replace('\\', "\\\\")
                 );
                 fs::write(&step_meta, meta_json)?;
                 if st % 500 == 0 || st == total_steps {
                     log_both(&format!(
-                        "  [Checkpoint Saved] step_{:05}.bin (98.53 MiB) | train_bpb={:.4} | orn_rw={:.4} | recall_384={:.1}%",
-                        st, train_bpb, ema_orn_rw, recall_384 * 100.0
+                        "  [Checkpoint Saved] step_{:05}.bin (98.53 MiB) | train_bpb={:.4} | orn_rw={:.4} | total_pp={:.1} (cum_pp={:.1}) | recall_384={:.1}%",
+                        st, train_bpb, ema_orn_rw, total_pp, cum_pp, recall_384 * 100.0
                     ))?;
                 }
             }

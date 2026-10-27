@@ -3686,17 +3686,24 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
     if (!h_hc_ffn_fn || !h_gate_w || !h_upper_pkts || !out_telemetry) return -1;
     memset(out_telemetry, 0, sizeof(Dsv41RsiTelemetryOut));
 
+    const bool quiet_warm_resume = (stage1_steps < 0);
+    if (quiet_warm_resume) {
+        stage1_steps = -stage1_steps;
+    }
+
     constexpr int NUM_UT = 8;        // Layers 32..39
     constexpr int PKTS_PER_UT = 2;   // Top-2 dynamically routed experts per layer -> 16 packets (303.81 MiB)
     constexpr int NUM_PROMPTS = 4;   // 4 Curriculum Domains: Math, CUDA Systems, Algorithms, Agentic
     constexpr int T = 16;            // 16 tokens per micro-rollout (G=8 -> 128 tokens/step)
 
-    printf("\n================================================================================\n");
-    printf("[6] LIVE UPPER-TAIL (LAYERS 32..39 + SHARDS 2 & 43) STAGE-1 NCM & STAGE-2 RSI/GRPO\n");
-    printf("    Mode: Isolated-Compute Upper-Tail Plasticity (enable_mitosis=False)\n");
-    printf("    Shards: Shard 2 (embed.weight) + Shards 35..42 (16 Dynamic Routed Experts)\n");
-    printf("            + Shard 43 (norm.weight + head.weight Target Token Logit Rewards)\n");
-    printf("================================================================================\n");
+    if (!quiet_warm_resume) {
+        printf("\n================================================================================\n");
+        printf("[6] LIVE UPPER-TAIL (LAYERS 32..39 + SHARDS 2 & 43) STAGE-1 NCM & STAGE-2 RSI/GRPO\n");
+        printf("    Mode: Isolated-Compute Upper-Tail Plasticity (enable_mitosis=False)\n");
+        printf("    Shards: Shard 2 (embed.weight) + Shards 35..42 (16 Dynamic Routed Experts)\n");
+        printf("            + Shard 43 (norm.weight + head.weight Target Token Logit Rewards)\n");
+        printf("================================================================================\n");
+    }
 
     // 1. Allocate & upload real Upper-Tail donor weights + 16 dynamically routed experts on GPU
     CudaBuffer<float> d_hc_fn(NUM_UT * DS_MIX_HC * DS_HC_DIM);
@@ -3852,63 +3859,71 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
         d_x_norm_f32_all.copy_from_host(h_xn_f32.data(), h_xn_f32.size());
     }
 
-    printf("    -> Donor Forward Pass Complete (Shard-2 Embeddings + 16 Dynamic Routed Experts):\n");
-    if (h_routed_expert_ids) {
-        printf("       Streamed Router Experts: L32=[%d,%d] L33=[%d,%d] L34=[%d,%d] L35=[%d,%d] L36=[%d,%d] L37=[%d,%d] L38=[%d,%d] L39=[%d,%d]\n",
-               h_routed_expert_ids[0], h_routed_expert_ids[1], h_routed_expert_ids[2], h_routed_expert_ids[3],
-               h_routed_expert_ids[4], h_routed_expert_ids[5], h_routed_expert_ids[6], h_routed_expert_ids[7],
-               h_routed_expert_ids[8], h_routed_expert_ids[9], h_routed_expert_ids[10], h_routed_expert_ids[11],
-               h_routed_expert_ids[12], h_routed_expert_ids[13], h_routed_expert_ids[14], h_routed_expert_ids[15]);
+    if (!quiet_warm_resume) {
+        printf("    -> Donor Forward Pass Complete (Shard-2 Embeddings + 16 Dynamic Routed Experts):\n");
+        if (h_routed_expert_ids) {
+            printf("       Streamed Router Experts: L32=[%d,%d] L33=[%d,%d] L34=[%d,%d] L35=[%d,%d] L36=[%d,%d] L37=[%d,%d] L38=[%d,%d] L39=[%d,%d]\n",
+                   h_routed_expert_ids[0], h_routed_expert_ids[1], h_routed_expert_ids[2], h_routed_expert_ids[3],
+                   h_routed_expert_ids[4], h_routed_expert_ids[5], h_routed_expert_ids[6], h_routed_expert_ids[7],
+                   h_routed_expert_ids[8], h_routed_expert_ids[9], h_routed_expert_ids[10], h_routed_expert_ids[11],
+                   h_routed_expert_ids[12], h_routed_expert_ids[13], h_routed_expert_ids[14], h_routed_expert_ids[15]);
+        }
     }
 
-    // 3. Allocate 8-Layer Plastic Bottleneck (`NCM 64-CB + PLE r=64 + LoRA r=16 + 384-Lookahead`) + AdamW states
-    CudaBuffer<float> d_w_enc(NUM_UT * NCM_DIM * DS_DIM);
-    CudaBuffer<float> d_m_enc(NUM_UT * NCM_DIM * DS_DIM);
-    CudaBuffer<float> d_v_enc(NUM_UT * NCM_DIM * DS_DIM);
+    // 3. Persistent 8-Layer Plastic Bottleneck (`NCM 64-CB + PLE r=64 + LoRA r=16 + 384-Lookahead`) + AdamW states in GPU VRAM
+    static CudaBuffer<float> d_w_enc(NUM_UT * NCM_DIM * DS_DIM);
+    static CudaBuffer<float> d_m_enc(NUM_UT * NCM_DIM * DS_DIM);
+    static CudaBuffer<float> d_v_enc(NUM_UT * NCM_DIM * DS_DIM);
 
-    CudaBuffer<float> d_e_ncm(NUM_UT * NCM_CODEBOOK_K * NCM_DIM);
+    static CudaBuffer<float> d_e_ncm(NUM_UT * NCM_CODEBOOK_K * NCM_DIM);
 
-    CudaBuffer<float> d_w_dec(NUM_UT * NCM_DIM * DS_DIM);
-    CudaBuffer<float> d_m_dec(NUM_UT * NCM_DIM * DS_DIM);
-    CudaBuffer<float> d_v_dec(NUM_UT * NCM_DIM * DS_DIM);
+    static CudaBuffer<float> d_w_dec(NUM_UT * NCM_DIM * DS_DIM);
+    static CudaBuffer<float> d_m_dec(NUM_UT * NCM_DIM * DS_DIM);
+    static CudaBuffer<float> d_v_dec(NUM_UT * NCM_DIM * DS_DIM);
 
-    CudaBuffer<float> d_w_look(NUM_UT * DS_ROUTED_EXPERTS * NCM_DIM);
+    static CudaBuffer<float> d_w_look(NUM_UT * DS_ROUTED_EXPERTS * NCM_DIM);
 
-    CudaBuffer<float> d_u_ple(NUM_UT * 16 * PLE_RANK);
-    CudaBuffer<float> d_v_ple(NUM_UT * PLE_RANK * DS_DIM);
-    CudaBuffer<float> d_m_ple(NUM_UT * PLE_RANK * DS_DIM);
-    CudaBuffer<float> d_v_ple_m(NUM_UT * PLE_RANK * DS_DIM);
+    static CudaBuffer<float> d_u_ple(NUM_UT * 16 * PLE_RANK);
+    static CudaBuffer<float> d_v_ple(NUM_UT * PLE_RANK * DS_DIM);
+    static CudaBuffer<float> d_m_ple(NUM_UT * PLE_RANK * DS_DIM);
+    static CudaBuffer<float> d_v_ple_m(NUM_UT * PLE_RANK * DS_DIM);
 
-    CudaBuffer<float> d_lora_a(NUM_UT * LORA_RANK * DS_DIM);
-    CudaBuffer<float> d_lora_b(NUM_UT * LORA_RANK * DS_DIM);
-    CudaBuffer<float> d_m_lb(NUM_UT * LORA_RANK * DS_DIM);
-    CudaBuffer<float> d_v_lb(NUM_UT * LORA_RANK * DS_DIM);
+    static CudaBuffer<float> d_lora_a(NUM_UT * LORA_RANK * DS_DIM);
+    static CudaBuffer<float> d_lora_b(NUM_UT * LORA_RANK * DS_DIM);
+    static CudaBuffer<float> d_m_lb(NUM_UT * LORA_RANK * DS_DIM);
+    static CudaBuffer<float> d_v_lb(NUM_UT * LORA_RANK * DS_DIM);
+    static bool s_plastic_initialized = false;
 
-    d_m_enc.memset(0); d_v_enc.memset(0);
-    d_m_dec.memset(0); d_v_dec.memset(0);
-    d_m_ple.memset(0); d_v_ple_m.memset(0);
-    d_m_lb.memset(0);  d_v_lb.memset(0);
+    bool loaded_warm_ckpt = (quiet_warm_resume && s_plastic_initialized);
 
-    // Deterministic orthogonal-like initialization of W_enc, E_ncm, W_dec, W_look, U_ple, V_ple, LoRA_A, LoRA_B
-    auto init_plastic_buf = [](CudaBuffer<float>& buf, float scale, uint32_t seed_off) {
-        std::vector<float> h(buf.size());
-        for (size_t i = 0; i < buf.size(); ++i) {
-            uint32_t x = uint32_t(i) * 1664525u + seed_off * 1013904223u;
-            x ^= (x >> 13);
-            x *= 1274126177u;
-            float u = (float(x & 0x00FFFFFFu) / float(0x00800000u)) - 1.0f;
-            h[i] = scale * u;
-        }
-        buf.copy_from_host(h.data(), buf.size());
-    };
-    init_plastic_buf(d_w_enc,  0.012f, 101u);
-    init_plastic_buf(d_e_ncm,  0.150f, 202u);
-    init_plastic_buf(d_w_dec,  0.008f, 303u);
-    init_plastic_buf(d_w_look, 0.010f, 404u);
-    init_plastic_buf(d_u_ple,  0.100f, 505u);
-    init_plastic_buf(d_v_ple,  0.006f, 606u);
-    init_plastic_buf(d_lora_a, 0.015f, 707u);
-    init_plastic_buf(d_lora_b, 0.002f, 808u);
+    if (!loaded_warm_ckpt) {
+        d_m_enc.memset(0); d_v_enc.memset(0);
+        d_m_dec.memset(0); d_v_dec.memset(0);
+        d_m_ple.memset(0); d_v_ple_m.memset(0);
+        d_m_lb.memset(0);  d_v_lb.memset(0);
+
+        // Deterministic orthogonal-like initialization of W_enc, E_ncm, W_dec, W_look, U_ple, V_ple, LoRA_A, LoRA_B
+        auto init_plastic_buf = [](CudaBuffer<float>& buf, float scale, uint32_t seed_off) {
+            std::vector<float> h(buf.size());
+            for (size_t i = 0; i < buf.size(); ++i) {
+                uint32_t x = uint32_t(i) * 1664525u + seed_off * 1013904223u;
+                x ^= (x >> 13);
+                x *= 1274126177u;
+                float u = (float(x & 0x00FFFFFFu) / float(0x00800000u)) - 1.0f;
+                h[i] = scale * u;
+            }
+            buf.copy_from_host(h.data(), buf.size());
+        };
+        init_plastic_buf(d_w_enc,  0.012f, 101u);
+        init_plastic_buf(d_e_ncm,  0.150f, 202u);
+        init_plastic_buf(d_w_dec,  0.008f, 303u);
+        init_plastic_buf(d_w_look, 0.010f, 404u);
+        init_plastic_buf(d_u_ple,  0.100f, 505u);
+        init_plastic_buf(d_v_ple,  0.006f, 606u);
+        init_plastic_buf(d_lora_a, 0.015f, 707u);
+        init_plastic_buf(d_lora_b, 0.002f, 808u);
+        s_plastic_initialized = true;
+    }
 
     // Per-layer saved forward activations for 8-layer chained backpropagation
     CudaBuffer<float> d_z_all(NUM_UT * T * NCM_DIM);
@@ -4018,7 +4033,8 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
             );
 
             const float* x_norm_f32_u = d_x_norm_f32_all.get() + (size_t)u * T * DS_DIM;
-            float lr_s1 = 3e-3f * (1.0f - 0.65f * (float(step) / float(stage1_steps)));
+            float base_lr_s1 = loaded_warm_ckpt ? 8e-4f : 3e-3f;
+            float lr_s1 = base_lr_s1 * (1.0f - 0.65f * (float(step) / float(stage1_steps)));
             dim3 g_adamw(10, 296);
             dsv41_fused_all_plastic_float4_register_adamw_v1_kernel<<<g_adamw, 256>>>(
                 state_u, d_dz_bwd, uple_u, hlora_u, d_dy, x_norm_f32_u,
@@ -4029,7 +4045,8 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
                 lr_s1, 0.9f, 0.999f, 0.005f
             );
             dsv41_update_codebook_and_lookahead384_v1_kernel<<<448, 256>>>(
-                uple_u, state_u, alpha_u, d_dc, nbias_u, target_scores_u, e_ncm_u, w_look_u, 1.5e-2f, 1.95f
+                uple_u, state_u, alpha_u, d_dc, nbias_u, target_scores_u, e_ncm_u, w_look_u,
+                loaded_warm_ckpt ? 5e-3f : 1.5e-2f, 1.95f
             );
         }
 
@@ -4046,7 +4063,7 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
             stage1_final_mse    = step_mse;
             stage1_final_recall = compute_lookahead_recall();
         }
-        if (step == 0 || (step + 1) % 10 == 0 || step == stage1_steps - 1) {
+        if (!quiet_warm_resume && (step == 0 || (step + 1) % 10 == 0 || step == stage1_steps - 1)) {
             float rec = (step == 0) ? stage1_init_recall : compute_lookahead_recall();
             printf("    [Stage-1 NCM+Lookahead Fit | Step %2d/%2d] Upper-Tail MSE: %.6f | 384-Expert Top-6 Prefetch Recall: %5.1f%%\n",
                    step + 1, stage1_steps, step_mse, rec * 100.0f);
@@ -4066,10 +4083,12 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
     // STAGE 2: `Ornith-1.5 GRPO (G=8) + Dream-RSI (3 Revisions) + Shard-43 LM Head`
     //          (`stage2_steps = 50`, `enable_mitosis = False`, 4-Domain Curriculum)
     // ========================================================================
-    printf("\n    ----------------------------------------------------------------------------\n");
-    printf("    [Stage-2 Ornith-1.5 GRPO (G=8) + Dream-RSI (3 Revs) + Shard-43 LM-Head Reward]\n");
-    printf("    [Curriculum Domains: 0=AIME_Math | 1=SM120_CUDA | 2=Algo_DP | 3=Agentic_Tool]\n");
-    printf("    ----------------------------------------------------------------------------\n");
+    if (!quiet_warm_resume) {
+        printf("\n    ----------------------------------------------------------------------------\n");
+        printf("    [Stage-2 Ornith-1.5 GRPO (G=8) + Dream-RSI (3 Revs) + Shard-43 LM-Head Reward]\n");
+        printf("    [Curriculum Domains: 0=AIME_Math | 1=SM120_CUDA | 2=Algo_DP | 3=Agentic_Tool]\n");
+        printf("    ----------------------------------------------------------------------------\n");
+    }
 
     const char* domain_names[4] = {"AIME_Math", "SM120_CUDA", "Algo_DP", "Agentic_Tool"};
 
@@ -4290,15 +4309,16 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
                 w_enc_u, m_enc_u, v_enc_u,
                 v_ple_u, m_ple_u, vp_m_u,
                 lora_b_u, m_lb_u, v_lb_u,
-                1.5e-3f, 0.9f, 0.999f, 0.01f
+                loaded_warm_ckpt ? 5e-4f : 1.5e-3f, 0.9f, 0.999f, 0.01f
             );
             dsv41_update_codebook_and_lookahead384_v1_kernel<<<448, 256>>>(
-                uple_u, state_u, alpha_u, d_dc, nbias_u, target_scores_u, e_ncm_u, w_look_u, 1.0e-2f, 1.45f
+                uple_u, state_u, alpha_u, d_dc, nbias_u, target_scores_u, e_ncm_u, w_look_u,
+                loaded_warm_ckpt ? 4e-3f : 1.0e-2f, 1.45f
             );
         }
         CHECK_CUDA(cudaDeviceSynchronize());
 
-        if (step == 0 || (step + 1) % 10 == 0 || step == stage2_steps - 1) {
+        if (!quiet_warm_resume && (step == 0 || (step + 1) % 10 == 0 || step == stage2_steps - 1)) {
             printf("    [Stage-2 GRPO+Dream-RSI | Step %2d/%2d | %-12s] R_mean=%.4f | LM_Head_Align=%.4f | Novelty=%.3f\n",
                    step + 1, stage2_steps, domain_names[cur_domain], r_mean, lm_head_align, novelty_q);
         }
@@ -4430,15 +4450,19 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
                     nr_wdec == h_wdec_s2.size() && fabs(reload_l2_sq - wdec_l2_sq) < 1e-6) {
                     out_telemetry->checkpoint_reload_verified = 1;
                     out_telemetry->checkpoint_bytes_written   = (long long)total_b;
-                    printf("    [Checkpoint Saved & Verified] %s (%.2f MiB, W_dec L2=%.4f bit-exact)\n",
-                           checkpoint_out_path, double(total_b) / (1024.0 * 1024.0), sqrt(reload_l2_sq));
+                    if (!quiet_warm_resume) {
+                        printf("    [Checkpoint Saved & Verified] %s (%.2f MiB, W_dec L2=%.4f bit-exact)\n",
+                               checkpoint_out_path, double(total_b) / (1024.0 * 1024.0), sqrt(reload_l2_sq));
+                    }
                 }
             }
         }
     }
 
-    printf("================================================================================\n");
-    fflush(stdout);
+    if (!quiet_warm_resume) {
+        printf("================================================================================\n");
+        fflush(stdout);
+    }
     return 0;
 }
 

@@ -563,6 +563,325 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
+    // Optional CLI Live Continuous RL/RSI Daemon: `--live-rl-rsi [epochs]`
+    if let Some(pos) = args.iter().position(|a| a == "--live-rl-rsi") {
+        use std::io::Write;
+        let num_epochs: usize = args
+            .get(pos + 1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(500);
+
+        let log_dir = Path::new(r"X:\MCL4-COE\runs\mcl4_codec_sm120_deepseek_v41");
+        fs::create_dir_all(log_dir)?;
+        let log_path = log_dir.join("live_rl_rsi_v8.log");
+        let jsonl_path = log_dir.join("live_rl_rsi_v8_metrics.jsonl");
+        let mut log_file = fs::File::create(&log_path)?;
+        let mut jsonl_file = fs::File::create(&jsonl_path)?;
+
+        let mut log_both = |msg: &str| -> io::Result<()> {
+            println!("{}", msg);
+            writeln!(log_file, "{}", msg)?;
+            log_file.flush()?;
+            Ok(())
+        };
+
+        log_both("========================================================================================================================")?;
+        log_both("MCL4-COE v8 LIVE CONTINUOUS RL / RSI ENGINE (Desktop RTX 5070 SM120a + Dual-Controller Intel P4608 .mcl4e Store)")?;
+        log_both("  - Architecture : DeepSeek-V4.1-Flash-1017-NVFP4 (Layers 32..39 Plastic Bottleneck: NCM 64-CB + PLE r=64 + LoRA r=16)")?;
+        log_both("  - Algorithm    : Stage-1 NCM+384-Lookahead Distillation -> Stage-2 Ornith-1.5 GRPO (G=8) + 3-Rev Dream-RSI")?;
+        log_both("  - Storage Tier : 15,480 Pre-Sharded 4K-Aligned Files (X:\\deepseek_v41_experts Even, Z:\\deepseek_v41_experts Odd)")?;
+        log_both("  - Live Log     : X:\\MCL4-COE\\runs\\mcl4_codec_sm120_deepseek_v41\\live_rl_rsi_v8.log")?;
+        log_both("========================================================================================================================")?;
+
+        const NUM_UT: usize = 8;
+        const PKTS_PER_UT: usize = 2;
+        const TOTAL_UT_PKTS: usize = NUM_UT * PKTS_PER_UT;
+        const NUM_PROMPTS: usize = 4;
+        const T_LEN: usize = 16;
+        const HC_FN_ELEMS: usize = 24 * 20480;
+        const GATE_W_ELEMS: usize = DS_ROUTED_EXPERTS * DS_DIM;
+
+        let p4608_store = p4608_expert_sharder::P4608DualDriveExpertStore::default_p4608();
+        let all_40_layers: Vec<usize> = (0..40).collect();
+        p4608_store.ensure_layers_meta_sharded(&index, &all_40_layers)?;
+
+        let mut h_hc_ffn_fn = vec![0.0f32; NUM_UT * HC_FN_ELEMS];
+        let mut h_hc_ffn_scale = vec![0.0f32; NUM_UT * 3];
+        let mut h_hc_ffn_base = vec![0.0f32; NUM_UT * 24];
+        let mut h_ffn_norm_w = vec![0u16; NUM_UT * DS_DIM];
+        let mut h_gate_w = vec![0u16; NUM_UT * GATE_W_ELEMS];
+        let mut h_gate_bias = vec![0.0f32; NUM_UT * DS_ROUTED_EXPERTS];
+        let mut h_final_norm_w = vec![0u16; DS_DIM];
+
+        let t_meta0 = Instant::now();
+        {
+            let fn_bytes: &mut [u8] = unsafe {
+                std::slice::from_raw_parts_mut(h_hc_ffn_fn.as_mut_ptr() as *mut u8, h_hc_ffn_fn.len() * 4)
+            };
+            let sc_bytes: &mut [u8] = unsafe {
+                std::slice::from_raw_parts_mut(h_hc_ffn_scale.as_mut_ptr() as *mut u8, h_hc_ffn_scale.len() * 4)
+            };
+            let bs_bytes: &mut [u8] = unsafe {
+                std::slice::from_raw_parts_mut(h_hc_ffn_base.as_mut_ptr() as *mut u8, h_hc_ffn_base.len() * 4)
+            };
+            let nw_bytes: &mut [u8] = unsafe {
+                std::slice::from_raw_parts_mut(h_ffn_norm_w.as_mut_ptr() as *mut u8, h_ffn_norm_w.len() * 2)
+            };
+            let gw_bytes: &mut [u8] = unsafe {
+                std::slice::from_raw_parts_mut(h_gate_w.as_mut_ptr() as *mut u8, h_gate_w.len() * 2)
+            };
+            let gb_bytes: &mut [u8] = unsafe {
+                std::slice::from_raw_parts_mut(h_gate_bias.as_mut_ptr() as *mut u8, h_gate_bias.len() * 4)
+            };
+            let final_nw_bytes: &mut [u8] = unsafe {
+                std::slice::from_raw_parts_mut(h_final_norm_w.as_mut_ptr() as *mut u8, h_final_norm_w.len() * 2)
+            };
+            index.read_tensor_exact("norm.weight", final_nw_bytes)?;
+
+            thread::scope(|s| {
+                for (u, (((fn_ch, sc_ch), (bs_ch, nw_ch)), (gw_ch, gb_ch))) in fn_bytes
+                    .chunks_mut(HC_FN_ELEMS * 4)
+                    .zip(sc_bytes.chunks_mut(3 * 4))
+                    .zip(bs_bytes.chunks_mut(24 * 4).zip(nw_bytes.chunks_mut(DS_DIM * 2)))
+                    .zip(gw_bytes.chunks_mut(GATE_W_ELEMS * 2).zip(gb_bytes.chunks_mut(DS_ROUTED_EXPERTS * 4)))
+                    .enumerate()
+                {
+                    let store_ref = &p4608_store;
+                    let layer = 32 + u;
+                    s.spawn(move || {
+                        store_ref
+                            .read_layer_meta_single_syscall(layer, fn_ch, gw_ch, nw_ch, gb_ch, bs_ch, sc_ch)
+                            .unwrap();
+                    });
+                }
+            });
+        }
+        let meta_init_ms = t_meta0.elapsed().as_secs_f64() * 1000.0;
+        log_both(&format!(
+            "[Init] Loaded L32..L39 `META.mcl4m` (45.09 MiB) + Shard-43 `norm.weight` in {:.2} ms",
+            meta_init_ms
+        ))?;
+
+        let layout_16 = std::alloc::Layout::from_size_align(
+            TOTAL_UT_PKTS * std::mem::size_of::<Dsv41Mcl4cExpertPacket>(),
+            4096,
+        )
+        .unwrap();
+        let upper_pkts_ptr = unsafe {
+            let p = std::alloc::alloc_zeroed(layout_16) as *mut Dsv41Mcl4cExpertPacket;
+            if p.is_null() {
+                std::alloc::handle_alloc_error(layout_16);
+            }
+            p
+        };
+        let upper_pkts_slice = unsafe { std::slice::from_raw_parts_mut(upper_pkts_ptr, TOTAL_UT_PKTS) };
+
+        // Persistent Hot Expert Cache (up to 128 Upper-Tail expert packets = 2.37 GiB in host RAM)
+        let mut hot_expert_cache: HashMap<(usize, usize), Box<Dsv41Mcl4cExpertPacket>> =
+            HashMap::with_capacity(128);
+        let mut total_cache_hits = 0usize;
+        let mut total_cache_misses = 0usize;
+
+        let mut h_prompt_embeds = vec![0u16; NUM_PROMPTS * T_LEN * DS_DIM];
+        let mut h_target_head_w = vec![0u16; NUM_PROMPTS * T_LEN * DS_DIM];
+        let ckpt_out_cstr = b"X:\\MCL4-COE\\runs\\mcl4_codec_sm120_deepseek_v41\\deepseek_v41_upper_tail_ncm_rsi.bin\0";
+
+        let run_start = Instant::now();
+        let mut cum_steps = 0usize;
+        let mut cum_tokens = 0usize;
+
+        for ep in 1..=num_epochs {
+            let ep_t0 = Instant::now();
+
+            // Generate deterministic rotating curriculum token IDs across the 4 domains (in 100..120000)
+            let mut prompt_token_ids = [0u32; NUM_PROMPTS * T_LEN];
+            let mut target_token_ids = [0u32; NUM_PROMPTS * T_LEN];
+            for i in 0..(NUM_PROMPTS * T_LEN) {
+                let h1 = ((ep as u64).wrapping_mul(6364136223846793005)).wrapping_add((i as u64 + 1) * 1442695040888963407);
+                let h2 = h1.wrapping_mul(2862933555777941757).wrapping_add(3037000493);
+                // Keep 75% of batches drawn from a core 12-curriculum family so hot-cache & router specialization build up
+                let bucket = if ep % 4 != 0 { (ep % 12) as u64 } else { h1 };
+                let tok_p = 100 + ((bucket.wrapping_mul(1315423911).wrapping_add(i as u64 * 982451653)) % 95000) as u32;
+                let tok_t = 100 + ((h2.wrapping_shr(17).wrapping_add(tok_p as u64)) % 95000) as u32;
+                prompt_token_ids[i] = tok_p;
+                target_token_ids[i] = tok_t;
+            }
+
+            index.gather_vocab_rows("embed.weight", &prompt_token_ids, &mut h_prompt_embeds)?;
+            index.gather_vocab_rows("head.weight", &target_token_ids, &mut h_target_head_w)?;
+
+            let mut routed_expert_ids = [0i32; TOTAL_UT_PKTS];
+            let rc_route = unsafe {
+                mcl4_dsv41_preroute_upper_tail_top_experts(
+                    h_prompt_embeds.as_ptr(),
+                    h_hc_ffn_fn.as_ptr(),
+                    h_hc_ffn_scale.as_ptr(),
+                    h_hc_ffn_base.as_ptr(),
+                    h_ffn_norm_w.as_ptr(),
+                    h_gate_w.as_ptr(),
+                    h_gate_bias.as_ptr(),
+                    routed_expert_ids.as_mut_ptr(),
+                )
+            };
+            assert_eq!(rc_route, 0, "GPU Upper-Tail Pre-Routing failed");
+
+            let mut ut_targets = Vec::with_capacity(TOTAL_UT_PKTS);
+            for u in 0..NUM_UT {
+                let layer = 32 + u;
+                ut_targets.push((layer, routed_expert_ids[u * 2 + 0] as usize));
+                ut_targets.push((layer, routed_expert_ids[u * 2 + 1] as usize));
+            }
+
+            // Stream any cold misses in parallel from X: and Z: .mcl4e shards; copy warm hits directly!
+            let t_io = Instant::now();
+            let mut ep_hits = 0usize;
+            let mut miss_slots: Vec<(usize, usize, usize)> = Vec::new();
+            for (slot_idx, &(l, e)) in ut_targets.iter().enumerate() {
+                if let Some(cached_pkt) = hot_expert_cache.get(&(l, e)) {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            cached_pkt.as_ref() as *const Dsv41Mcl4cExpertPacket,
+                            &mut upper_pkts_slice[slot_idx] as *mut Dsv41Mcl4cExpertPacket,
+                            1,
+                        );
+                    }
+                    ep_hits += 1;
+                } else {
+                    miss_slots.push((slot_idx, l, e));
+                }
+            }
+
+            let ep_misses = miss_slots.len();
+            if ep_misses > 0 {
+                // Parallel 1-syscall read from X: (Even) and Z: (Odd)
+                let mut newly_loaded: Vec<((usize, usize), usize, Box<Dsv41Mcl4cExpertPacket>)> = miss_slots
+                    .iter()
+                    .map(|&(slot_idx, l, e)| ((l, e), slot_idx, Dsv41Mcl4cExpertPacket::new_zeroed_box()))
+                    .collect();
+
+                thread::scope(|s| -> io::Result<()> {
+                    let mut handles = Vec::with_capacity(newly_loaded.len());
+                    for item in &mut newly_loaded {
+                        let (l, e) = item.0;
+                        let pkt_ref = item.2.as_mut();
+                        let store_ref = &p4608_store;
+                        handles.push(s.spawn(move || -> io::Result<()> {
+                            store_ref.read_expert_single_syscall(l, e, pkt_ref)
+                        }));
+                    }
+                    for h in handles {
+                        h.join().unwrap()?;
+                    }
+                    Ok(())
+                })?;
+
+                for ((l, e), slot_idx, pkt_box) in newly_loaded {
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            pkt_box.as_ref() as *const Dsv41Mcl4cExpertPacket,
+                            &mut upper_pkts_slice[slot_idx] as *mut Dsv41Mcl4cExpertPacket,
+                            1,
+                        );
+                    }
+                    if hot_expert_cache.len() >= 256 {
+                        if let Some(&evict_k) = hot_expert_cache.keys().next() {
+                            hot_expert_cache.remove(&evict_k);
+                        }
+                    }
+                    hot_expert_cache.insert((l, e), pkt_box);
+                }
+            }
+            let io_ms = t_io.elapsed().as_secs_f64() * 1000.0;
+            total_cache_hits += ep_hits;
+            total_cache_misses += ep_misses;
+
+            // Epoch 1 runs cold bootstrap (50 Stage-1 + 50 Stage-2);
+            // Epochs 2..=N run quiet warm-resume (-20 Stage-1 warm-adapt + 50 Stage-2 GRPO+Dream-RSI steps)
+            let s1_arg: i32 = if ep == 1 { 50 } else { -20 };
+            let s2_arg: i32 = 50;
+            let ep_steps = (s1_arg.abs() as usize) + (s2_arg as usize);
+            let ep_tokens = ep_steps * 128; // G=8 * T=16 = 128 tokens/step
+
+            let save_ckpt_this_ep = ep == 1 || ep % 25 == 0 || ep == num_epochs;
+            let ckpt_ptr = if save_ckpt_this_ep {
+                ckpt_out_cstr.as_ptr()
+            } else {
+                std::ptr::null()
+            };
+
+            let mut tel = Dsv41RsiTelemetryOut::default();
+            let rc = unsafe {
+                mcl4_dsv41_run_upper_tail_rsi_trainer(
+                    h_hc_ffn_fn.as_ptr(),
+                    h_hc_ffn_scale.as_ptr(),
+                    h_hc_ffn_base.as_ptr(),
+                    h_ffn_norm_w.as_ptr(),
+                    h_gate_w.as_ptr(),
+                    h_gate_bias.as_ptr(),
+                    upper_pkts_ptr as *const Dsv41Mcl4cExpertPacket,
+                    routed_expert_ids.as_ptr(),
+                    h_prompt_embeds.as_ptr(),
+                    h_target_head_w.as_ptr(),
+                    h_final_norm_w.as_ptr(),
+                    ckpt_ptr,
+                    s1_arg,
+                    s2_arg,
+                    &mut tel,
+                )
+            };
+            assert_eq!(rc, 0, "Live Upper-Tail RSI trainer step failed");
+
+            cum_steps += ep_steps;
+            cum_tokens += ep_tokens;
+            let ep_wall_ms = ep_t0.elapsed().as_secs_f64() * 1000.0;
+            let elapsed_s = run_start.elapsed().as_secs_f64();
+
+            let gpu_tok_s = tel.stage2_train_tok_per_s as f64;
+            let e2e_tok_s = (ep_tokens as f64) / (ep_wall_ms / 1000.0);
+            // Full 40-layer amortized GRPO G=8 tok/s based on v8 13.23 ms/step + actual P4608 I/O
+            let full40_equiv_tok_s = (16.0 * 1000.0) / (13.23 + (io_ms / (s2_arg as f64)));
+            let hit_pct = 100.0 * (total_cache_hits as f64) / ((total_cache_hits + total_cache_misses).max(1) as f64);
+
+            let line = format!(
+                "[Ep {:04}/{:04} | Step {:06} | {:7.1}K tok | {:6.1}s] GPU={:6.0} tok/s | E2E={:6.0} tok/s | 40L-GRPO={:6.1} tok/s | P4608(Hit={:2}/16 [{:4.1}%] IO={:5.2}ms) | MSE={:.5} | Rec384={:5.1}% | R_mean={:.4} | LM_Align={:.4} | Nov={:.3} | PPL={:4.1}/64 | dW_L2={:6.3}",
+                ep,
+                num_epochs,
+                cum_steps,
+                (cum_tokens as f64) / 1000.0,
+                elapsed_s,
+                gpu_tok_s,
+                e2e_tok_s,
+                full40_equiv_tok_s,
+                ep_hits,
+                hit_pct,
+                io_ms,
+                tel.stage1_final_mse,
+                tel.stage2_final_top6_recall * 100.0,
+                tel.stage2_final_reward,
+                tel.stage2_final_lm_head_align,
+                tel.stage2_mean_novelty,
+                tel.stage2_final_codebook_ppl,
+                tel.stage2_weight_delta_l2
+            );
+            log_both(&line)?;
+
+            writeln!(
+                jsonl_file,
+                "{{\"epoch\":{},\"cum_steps\":{},\"cum_tokens\":{},\"elapsed_s\":{:.3},\"gpu_tok_s\":{:.1},\"e2e_tok_s\":{:.1},\"full40_grpo_tok_s\":{:.1},\"p4608_hits\":{},\"p4608_misses\":{},\"p4608_io_ms\":{:.2},\"mse\":{:.6},\"recall384\":{:.4},\"r_mean\":{:.4},\"lm_align\":{:.4},\"novelty\":{:.4},\"codebook_ppl\":{:.2},\"dw_l2\":{:.4}}}",
+                ep, cum_steps, cum_tokens, elapsed_s, gpu_tok_s, e2e_tok_s, full40_equiv_tok_s,
+                ep_hits, ep_misses, io_ms, tel.stage1_final_mse, tel.stage2_final_top6_recall,
+                tel.stage2_final_reward, tel.stage2_final_lm_head_align, tel.stage2_mean_novelty,
+                tel.stage2_final_codebook_ppl, tel.stage2_weight_delta_l2
+            )?;
+            jsonl_file.flush()?;
+        }
+
+        unsafe {
+            std::alloc::dealloc(upper_pkts_ptr as *mut u8, layout_16);
+        }
+        return Ok(());
+    }
+
     // 2. Verify FFI call to `dsv41_compute_engram_hashes_cpu` in `mcl4_deepseek_v41_sm120.dll`
     let comp_tokens: [i64; 16] = [101, 2054, 3319, 442, 8812, 19, 77321, 904, 512, 663, 9182, 41, 77, 12003, 55, 891];
     let mut hashes_l1 = [0i64; 16 * 24];

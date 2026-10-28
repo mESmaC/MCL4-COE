@@ -15,6 +15,7 @@
 //      Engram hashes + GPU numerical parity.
 // ============================================================================
 
+pub mod condenser_server;
 pub mod cuda_rust_audit;
 pub mod p4608_expert_sharder;
 pub mod python_ffi;
@@ -143,6 +144,94 @@ extern "C" {
         stage1_steps: i32,
         stage2_steps: i32,
         out_telemetry: *mut Dsv41RsiTelemetryOut,
+    ) -> i32;
+
+    pub fn mcl4_dsv41_register_pinned_host_slab(
+        host_ptr: *mut std::ffi::c_void,
+        bytes: usize,
+    ) -> i32;
+
+    pub fn mcl4_dsv41_engine_init(
+        x_root: *const u8,
+        z_root: *const u8,
+        plastic_ckpt_path: *const u8,
+    ) -> i32;
+
+    pub fn mcl4_dsv41_engine_reset_kv() -> i32;
+
+    pub fn mcl4_dsv41_engine_has_vram_expert(layer_id: i32, exp_id: i32) -> i32;
+    pub fn mcl4_dsv41_engine_set_step_context(prompt_hash: u64, is_decode: i32);
+
+    pub fn mcl4_dsv41_engine_save_kv_snapshot(h_snap: *mut u8) -> i32;
+
+    pub fn mcl4_dsv41_engine_load_kv_snapshot(h_snap: *const u8) -> i32;
+
+    pub fn mcl4_dsv41_engine_step_batch_begin(
+        token_history: *const i32,
+        base_seq_len: i32,
+        batch_m: i32,
+    ) -> i32;
+
+    pub fn mcl4_dsv41_engine_step_token_begin(
+        token_history: *const i32,
+        seq_len: i32,
+    ) -> i32;
+
+    pub fn mcl4_dsv41_engine_layer_attn_and_route_batch(
+        layer_id: i32,
+        base_pos: i32,
+        batch_m: i32,
+        out_top6_indices_batch: *mut i32,
+        out_top6_weights_batch: *mut f32,
+        out_next_layer_lookahead_top6: *mut i32,
+    ) -> i32;
+
+    pub fn mcl4_dsv41_engine_prestage_vram_experts(
+        layer_id: i32,
+        h_unique_expert_ptrs: *const *const Dsv41Mcl4cExpertPacket,
+        h_unique_expert_ids: *const i32,
+        num_unique_experts: i32,
+    ) -> i32;
+
+    pub fn mcl4_dsv41_engine_layer_attn_and_route(
+        layer_id: i32,
+        pos: i32,
+        out_top6_indices: *mut i32,
+        out_top6_weights: *mut f32,
+    ) -> i32;
+
+    pub fn mcl4_dsv41_engine_layer_moe_and_post_batch(
+        layer_id: i32,
+        base_pos: i32,
+        batch_m: i32,
+        h_unique_expert_ptrs: *const *const Dsv41Mcl4cExpertPacket,
+        h_unique_expert_ids: *const i32,
+        num_unique_experts: i32,
+        h_top6_indices_batch: *const i32,
+        h_top6_weights_batch: *const f32,
+        k_active: i32,
+        plastic_alpha: f32,
+    ) -> i32;
+
+    pub fn mcl4_dsv41_engine_layer_moe_and_post(
+        layer_id: i32,
+        pos: i32,
+        h_expert_ptrs: *const *const Dsv41Mcl4cExpertPacket,
+        h_top_indices: *const i32,
+        h_top_weights: *const f32,
+        k_active: i32,
+        plastic_alpha: f32,
+    ) -> i32;
+
+    pub fn mcl4_dsv41_engine_compute_logits_for_slot(
+        batch_slot: i32,
+        out_top64_ids: *mut i32,
+        out_top64_logits: *mut f32,
+    ) -> i32;
+
+    pub fn mcl4_dsv41_engine_compute_logits(
+        out_top64_ids: *mut i32,
+        out_top64_logits: *mut f32,
     ) -> i32;
 }
 
@@ -491,6 +580,19 @@ impl WarmExpertCacheManager {
 
 #[allow(dead_code)]
 fn main() -> io::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--eval" || a == "--benchmark") {
+        let t_eval = Instant::now();
+        let (md_report, _json_report) = condenser_server::run_checkpoint_benchmark_suite();
+        let eval_ms = t_eval.elapsed().as_secs_f64() * 1000.0;
+        println!("================================================================================");
+        println!("MCL4-COE Multi-Checkpoint Read-Only Tensor & Curriculum Benchmark ({:.1} ms)", eval_ms);
+        println!("================================================================================\n");
+        println!("{}", md_report);
+        println!("\n================================================================================");
+        return Ok(());
+    }
+
     println!("================================================================================");
     println!("MCL4-Codec Memory-Safe Rust + SM120a CUDA C++ Hybrid Runtime (v8)");
     println!("  - Host Runtime:   Rust (P4608 Dual-NVMe X:/Z: Direct-DMA .mcl4e + cuda-rust Audit)");
@@ -511,8 +613,58 @@ fn main() -> io::Result<()> {
         scan_ms
     );
 
-    // Optional CLI Bulk Sharder: `--shard-layers <l0>..<l1> [--experts <e0>..<e1>]`
-    let args: Vec<String> = std::env::args().collect();
+    // Optional CLI JITI End-to-End Live Inference Benchmark (`--bench-jiti`)
+    if args.iter().any(|a| a == "--bench-jiti") {
+        let t_init0 = Instant::now();
+        let state = condenser_server::CondenserEngineState::initialize(Arc::clone(&index), None)?;
+        let init_s = t_init0.elapsed().as_secs_f64();
+        println!(
+            "[2] CondenserEngineState Initialized in {:.2} s:\n    -> Calibrated NVFP4 Expert Kernel: cos_s1={:.7}, cos_s2={:.7}, latency={:.2} us/expert",
+            init_s, state.calibrated_cos_s1, state.calibrated_cos_s2, state.calibrated_us_moe
+        );
+
+        let large_prompt = "Context: We are designing a high-throughput PCIe Gen5 x16 NVMe-to-GPU streaming engine in Rust and CUDA C++ for an RTX 5070 with 12 GB GDDR7 VRAM and dual Intel DC P4608 SSDs.\nQuestion: Why does grouping tokens by unique expert ID before launching the NVFP4 MoE kernel improve memory bandwidth utilization? Answer concisely in 2 sentences.";
+        for (pass, (label, prompt, max_new, top_k)) in [
+            ("Pass 1 (Cold Natural EOS Test, budget=128, top_k=4)", "What is the capital of France? Answer in one short sentence.", 128usize, 4usize),
+            ("Pass 2 (Warm Natural EOS Test, budget=128, top_k=4)", "What is the capital of France? Answer in one short sentence.", 128usize, 4usize),
+            ("Pass 3 (Cold Long Code Output + EOS, budget=96, top_k=6)", "Write ONLY a Rust function fn gcd(mut a: u64, mut b: u64) -> u64 with no explanation.", 96usize, 6usize),
+            ("Pass 4 (Warm Long Code Output + EOS, budget=96, top_k=6)", "Write ONLY a Rust function fn gcd(mut a: u64, mut b: u64) -> u64 with no explanation.", 96usize, 6usize),
+            ("Pass 5 (Cold Large Input Prompt ~80 toks + 48-Tok Output, top_k=4)", large_prompt, 48usize, 4usize),
+            ("Pass 6 (Warm Large Input Prompt ~80 toks + 48-Tok Output, top_k=4)", large_prompt, 48usize, 4usize),
+        ].iter().enumerate() {
+            let res = state.execute_native_turn(prompt, "balanced", *top_k, 1, *max_new, 0.0, None, None)?;
+            println!(
+                "\n[{}] {}:\n  - Prompt        : {:?}\n  - Prompt Tokens : {}\n  - Gen Tokens    : {}\n  - Total Latency : {:.2} ms\n  - Decode Speed  : {:.2} tok/s\n  - Telemetry     : {}\n  - Answer        : {:?}",
+                pass + 1,
+                label,
+                prompt,
+                res.prompt_tokens,
+                res.generated_tokens,
+                res.latency_ms,
+                res.tok_per_s,
+                res.thought,
+                res.answer
+            );
+        }
+        return Ok(());
+    }
+
+    // Optional CLI Condenser Native HTTP Server (`--serve [--port 7861] [--checkpoint <id>]`)
+    if args.iter().any(|a| a == "--serve" || a == "--serve-condenser") {
+        let port: u16 = args
+            .iter()
+            .position(|a| a == "--port")
+            .and_then(|p| args.get(p + 1))
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(7861);
+        let ckpt = args
+            .iter()
+            .position(|a| a == "--checkpoint" || a == "--ckpt")
+            .and_then(|p| args.get(p + 1))
+            .map(|s| s.as_str());
+        return condenser_server::run_condenser_http_server(index, port, ckpt);
+    }
+
     if let Some(pos) = args.iter().position(|a| a == "--shard-layers") {
         let l_range_str = args.get(pos + 1).map(|s| s.as_str()).unwrap_or("0..40");
         let e_range_str = args

@@ -34,6 +34,8 @@ use crate::{Dsv41Mcl4cExpertPacket, SafetensorsShardIndex, DS_PACKET_BYTES};
 
 #[cfg(windows)]
 const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
+#[cfg(windows)]
+const FILE_FLAG_NO_BUFFERING: u32 = 0x2000_0000;
 
 /// Manages striped 4K-aligned single-expert `.mcl4e` shards across the two NVMe controllers
 /// of the Intel DC P4608 (`X:` = Controller 0 for Even Layers, `Z:` = Controller 1 for Odd Layers).
@@ -89,14 +91,14 @@ impl P4608DualDriveExpertStore {
         #[cfg(windows)]
         let file = OpenOptions::new()
             .read(true)
-            .custom_flags(FILE_FLAG_SEQUENTIAL_SCAN)
+            .custom_flags(FILE_FLAG_NO_BUFFERING | FILE_FLAG_SEQUENTIAL_SCAN)
             .open(&path)?;
         #[cfg(not(windows))]
         let file = File::open(&path)?;
 
         let arc_f = Arc::new(file);
         let mut cache = self.handle_cache.write().unwrap();
-        if cache.len() >= 512 {
+        if cache.len() >= 2048 {
             cache.clear();
         }
         cache.insert((layer, expert), Arc::clone(&arc_f));

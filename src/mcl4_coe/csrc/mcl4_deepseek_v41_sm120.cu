@@ -7401,7 +7401,16 @@ struct Mcl4Dsv41FullEngine {
     float* d_plastic_nbias = nullptr; // [384]
     float* d_plastic_delta = nullptr; // [DS_MAX_BATCH_M, 5120]
 
-    // Runtime Activations & KV Caches across 40 Layers (Sized for DS_MAX_BATCH_M = 8)
+    // Runtime Activations & KV Caches across 40 Layers (Sized for DS_MAX_BATCH_M = 8, DS_MAX_PREFILL_M = 256)
+    static constexpr int DS_MAX_PREFILL_M = 256;
+    __nv_bfloat16* d_pf_x_hc      = nullptr; // [DS_MAX_PREFILL_M, 4, 5120] BF16 (10.0 MiB)
+    __nv_bfloat16* d_pf_x_norm    = nullptr; // [DS_MAX_PREFILL_M, 5120] BF16 (2.5 MiB)
+    float*         d_pf_pre_mix   = nullptr; // [DS_MAX_PREFILL_M, 4] FP32
+    float*         d_pf_post_mix  = nullptr; // [DS_MAX_PREFILL_M, 4] FP32
+    float*         d_pf_comb_mix  = nullptr; // [DS_MAX_PREFILL_M, 16] FP32
+    uint8_t*       d_pf_eng_fp8   = nullptr; // [2, DS_MAX_PREFILL_M, 24 * 256] (3.0 MiB)
+    uint8_t*       d_pf_eng_scale = nullptr; // [2, DS_MAX_PREFILL_M, 24 * 8] (96 KiB)
+
     __nv_bfloat16* d_window_kv_all = nullptr; // [40, 128, 512] BF16 (5.0 MiB)
     __nv_bfloat16* d_embed_row     = nullptr; // [DS_MAX_BATCH_M, 5120] BF16
     __nv_bfloat16* h_pinned_emb    = nullptr; // Pinned host staging [DS_MAX_BATCH_M, 5120]
@@ -7435,14 +7444,17 @@ struct Mcl4Dsv41FullEngine {
     cudaEvent_t    ev_moe_done          = nullptr;
     bool           pending_prefetch_dma = false;
     int            inflight_moe_layer   = -1;
+    uint64_t       moe_dispatch_seq     = 0;
+    uint64_t       moe_synced_seq       = 0;
 
     Dsv41Mcl4cExpertPacket* d_arena        = nullptr; // [num_arena_slots] up to 168 in VRAM (~3.19 GiB)
-    Dsv41ExpertGroupTask*   h_pinned_tasks = nullptr; // Pinned host staging [DS_MAX_MOE_GROUPS]
+    Dsv41ExpertGroupTask*   h_pinned_tasks = nullptr; // Pinned host staging [32 * DS_MAX_MOE_GROUPS] ring
     Dsv41ExpertGroupTask*   d_groups       = nullptr; // [DS_MAX_MOE_GROUPS]
     float*                  d_inter        = nullptr; // [DS_MAX_MOE_GROUPS * DS_MAX_BATCH_M, 2304]
     float*                  d_moe_out      = nullptr; // [DS_MAX_BATCH_M, 5120]
     float*                  d_shared_out   = nullptr; // [DS_MAX_BATCH_M, 5120]
     int                     num_arena_slots = 6;
+    uint32_t                task_ring_idx   = 0;
     uint64_t                arena_tick      = 1;
     uint64_t                cur_prompt_hash = 0;
     int                     cur_is_decode   = 0;
@@ -7451,6 +7463,7 @@ struct Mcl4Dsv41FullEngine {
     uint64_t                arena_lru_tick[176];
     uint64_t                arena_prompt_hash[176];
     int32_t                 arena_is_decode[176];
+    uint64_t                arena_last_dispatch[176];
 };
 
 static Mcl4Dsv41FullEngine g_engine;
@@ -7499,6 +7512,14 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_init(
     g_engine.pending_prefetch_dma = false;
 
     // 1. Allocate Runtime Scratch, Batched MLA Activations, KV Caches, and Pinned Host Staging
+    CHECK_CUDA(cudaMalloc(&g_engine.d_pf_x_hc,      (size_t)Mcl4Dsv41FullEngine::DS_MAX_PREFILL_M * DS_HC_DIM * sizeof(__nv_bfloat16)));
+    CHECK_CUDA(cudaMalloc(&g_engine.d_pf_x_norm,    (size_t)Mcl4Dsv41FullEngine::DS_MAX_PREFILL_M * DS_DIM * sizeof(__nv_bfloat16)));
+    CHECK_CUDA(cudaMalloc(&g_engine.d_pf_pre_mix,   (size_t)Mcl4Dsv41FullEngine::DS_MAX_PREFILL_M * 4 * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&g_engine.d_pf_post_mix,  (size_t)Mcl4Dsv41FullEngine::DS_MAX_PREFILL_M * 4 * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&g_engine.d_pf_comb_mix,  (size_t)Mcl4Dsv41FullEngine::DS_MAX_PREFILL_M * 16 * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&g_engine.d_pf_eng_fp8,   2ULL * Mcl4Dsv41FullEngine::DS_MAX_PREFILL_M * 24 * 256));
+    CHECK_CUDA(cudaMalloc(&g_engine.d_pf_eng_scale, 2ULL * Mcl4Dsv41FullEngine::DS_MAX_PREFILL_M * 24 * 8));
+
     CHECK_CUDA(cudaMalloc(&g_engine.d_window_kv_all, 40ULL * DS_WINDOW_SIZE * DS_HEAD_DIM * sizeof(__nv_bfloat16)));
     CHECK_CUDA(cudaMalloc(&g_engine.d_embed_row,     DS_MAX_BATCH_M * DS_DIM * sizeof(__nv_bfloat16)));
     CHECK_CUDA(cudaMallocHost(&g_engine.h_pinned_emb, DS_MAX_BATCH_M * DS_DIM * sizeof(__nv_bfloat16)));
@@ -7533,8 +7554,9 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_init(
         g_engine.arena_lru_tick[i]      = 0;
         g_engine.arena_prompt_hash[i]   = 0;
         g_engine.arena_is_decode[i]     = 0;
+        g_engine.arena_last_dispatch[i] = 0;
     }
-    CHECK_CUDA(cudaMallocHost(&g_engine.h_pinned_tasks, DS_MAX_MOE_GROUPS * sizeof(Dsv41ExpertGroupTask)));
+    CHECK_CUDA(cudaMallocHost(&g_engine.h_pinned_tasks, 32 * DS_MAX_MOE_GROUPS * sizeof(Dsv41ExpertGroupTask)));
     CHECK_CUDA(cudaMalloc(&g_engine.d_groups,           DS_MAX_MOE_GROUPS * sizeof(Dsv41ExpertGroupTask)));
     CHECK_CUDA(cudaMalloc(&g_engine.d_inter,            DS_MAX_MOE_GROUPS * DS_MAX_BATCH_M * DS_MOE_INTER * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&g_engine.d_moe_out,          DS_MAX_BATCH_M * DS_TOP_K * DS_DIM * sizeof(float)));
@@ -7792,7 +7814,7 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_init(
 
     size_t free_before_arena = 0, total_vram = 0;
     cudaMemGetInfo(&free_before_arena, &total_vram);
-    size_t reserve_headroom = 320ULL * 1024ULL * 1024ULL;
+    size_t reserve_headroom = 304ULL * 1024ULL * 1024ULL;
     int max_slots = 6;
     if (free_before_arena > reserve_headroom + 6 * sizeof(Dsv41Mcl4cExpertPacket)) {
         size_t avail = free_before_arena - reserve_headroom;
@@ -8535,6 +8557,7 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_attn_and_route_batc
     // Single stream synchronization instead of 2-3 separate unpinned WDDM cudaMemcpy calls!
     CHECK_CUDA(cudaStreamSynchronize(0));
     g_engine.inflight_moe_layer = -1;
+    g_engine.moe_synced_seq     = g_engine.moe_dispatch_seq;
     memcpy(out_top6_indices_batch, g_engine.h_pinned_top_idx, (size_t)batch_m * DS_TOP_K * sizeof(int32_t));
     memcpy(out_top6_weights_batch, g_engine.h_pinned_top_w,   (size_t)batch_m * DS_TOP_K * sizeof(float));
     if (out_next_layer_lookahead_top6 && layer_id + 1 < 40) {
@@ -8556,7 +8579,6 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_prestage_vram_experts(
     int ring_base = ded_slots * 40;
     int chosen_slots[DS_MAX_MOE_GROUPS];
     bool any_async_dma = false;
-    bool waited_moe_done = false;
 
     for (int u = 0; u < num_unique_experts; ++u) {
         int32_t exp_id = h_unique_expert_ids[u];
@@ -8640,8 +8662,7 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_prestage_vram_experts(
                             }
                         }
                         if (!pinned_in_step) {
-                            uint64_t prio = (g_engine.inflight_moe_layer >= 0 &&
-                                             g_engine.arena_cached_layer[s] == g_engine.inflight_moe_layer)
+                            uint64_t prio = (g_engine.arena_last_dispatch[s] > g_engine.moe_synced_seq)
                                 ? (g_engine.arena_lru_tick[s] | (1ULL << 62))
                                 : g_engine.arena_lru_tick[s];
                             if (prio < best_tick) {
@@ -8653,12 +8674,10 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_prestage_vram_experts(
                 }
             }
             if (best_slot >= 0) {
-                if (best_slot >= ring_base && !waited_moe_done &&
-                    g_engine.inflight_moe_layer >= 0 &&
-                    g_engine.arena_cached_layer[best_slot] == g_engine.inflight_moe_layer) {
+                if (g_engine.arena_last_dispatch[best_slot] > g_engine.moe_synced_seq) {
                     CHECK_CUDA(cudaStreamWaitEvent(g_engine.stream_prefetch, g_engine.ev_moe_done, 0));
                     g_engine.inflight_moe_layer = -1;
-                    waited_moe_done = true;
+                    g_engine.moe_synced_seq     = g_engine.moe_dispatch_seq;
                 }
                 CHECK_CUDA(cudaMemcpyAsync(
                     &g_engine.d_arena[best_slot],
@@ -8715,10 +8734,11 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_moe_and_post_batch(
     if (num_unique_experts > DS_MAX_MOE_GROUPS) num_unique_experts = DS_MAX_MOE_GROUPS;
 
     // 1. Resolve or Asynchronously Upload unique .mcl4e NVFP4 expert packets into VRAM Arena on stream_prefetch!
-    Dsv41ExpertGroupTask* h_tasks = g_engine.h_pinned_tasks;
+    Dsv41ExpertGroupTask* h_tasks = g_engine.h_pinned_tasks + (size_t)(g_engine.task_ring_idx++ & 31u) * DS_MAX_MOE_GROUPS;
     memset(h_tasks, 0, num_unique_experts * sizeof(Dsv41ExpertGroupTask));
     int chosen_slots[DS_MAX_MOE_GROUPS];
     bool any_async_dma = false;
+    uint64_t cur_dispatch_seq = ++g_engine.moe_dispatch_seq;
 
     int ded_slots = (g_engine.num_arena_slots >= 136) ? 3 : ((g_engine.num_arena_slots >= 80) ? 2 : 0);
     int ring_base = ded_slots * 40;
@@ -8767,7 +8787,6 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_moe_and_post_batch(
     }
 
     // Pass 2: Allocate VRAM slots for misses (`chosen_slots[u] < 0`) and stage H2D transfers
-    bool waited_moe_done = false;
     for (int u = 0; u < num_unique_experts; ++u) {
         int32_t exp_id = h_unique_expert_ids[u];
         if (chosen_slots[u] < 0) {
@@ -8798,7 +8817,7 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_moe_and_post_batch(
                         }
                     }
                 }
-                // 2. If all dedicated slots are locked in decode (or active in this batch step), use the Ring Buffer [ring_base..]!
+                // 2. If all dedicated slots are locked (or active in this batch step), use the Ring Buffer [ring_base..]!
                 if (best_slot < 0) {
                     best_tick = UINT64_MAX;
                     for (int s = ring_base; s < g_engine.num_arena_slots; ++s) {
@@ -8834,12 +8853,9 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_moe_and_post_batch(
                 }
             }
             if (h_unique_expert_ptrs && h_unique_expert_ptrs[u]) {
-                if (best_slot >= ring_base && !waited_moe_done &&
-                    g_engine.inflight_moe_layer >= 0 &&
-                    g_engine.arena_cached_layer[best_slot] == g_engine.inflight_moe_layer) {
+                if (g_engine.arena_last_dispatch[best_slot] > g_engine.moe_synced_seq) {
                     CHECK_CUDA(cudaStreamWaitEvent(g_engine.stream_prefetch, g_engine.ev_moe_done, 0));
-                    g_engine.inflight_moe_layer = -1;
-                    waited_moe_done = true;
+                    g_engine.moe_synced_seq = cur_dispatch_seq - 1;
                 }
                 const Dsv41Mcl4cExpertPacket* src_ptr = h_unique_expert_ptrs[u];
                 CHECK_CUDA(cudaMemcpyAsync(
@@ -8857,6 +8873,9 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_moe_and_post_batch(
                 g_engine.arena_is_decode[best_slot]     = (best_slot < ring_base) ? g_engine.cur_is_decode : 0;
             }
             chosen_slots[u] = best_slot;
+        }
+        if (chosen_slots[u] >= 0) {
+            g_engine.arena_last_dispatch[chosen_slots[u]] = cur_dispatch_seq;
         }
 
         h_tasks[u].arena_slot = chosen_slots[u];
@@ -9152,6 +9171,298 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_compute_logits_for_slot(
     CHECK_CUDA(cudaStreamSynchronize(0));
     memcpy(out_top64_ids,    g_engine.h_pinned_top64_ids,  64 * sizeof(int32_t));
     memcpy(out_top64_logits, g_engine.h_pinned_top64_vals, 64 * sizeof(float));
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int mcl4_dsv41_engine_prefill_init_batch(
+    const int32_t* token_history,
+    int base_seq_len,
+    int prefill_m
+) {
+    if (!g_engine.initialized || !token_history || base_seq_len < 0 ||
+        prefill_m < 1 || prefill_m > Mcl4Dsv41FullEngine::DS_MAX_PREFILL_M) return -1;
+
+    if (!g_eng_cache_inited) {
+        for (int e = 0; e < 2; ++e) {
+            for (int i = 0; i <= ENG_CACHE_MASK; ++i) {
+                g_eng_cache[e][i].bucket_id = -1;
+            }
+        }
+        g_eng_cache_inited = true;
+    }
+    static PfnPrefetchVirtualMemory pfn_prefetch = reinterpret_cast<PfnPrefetchVirtualMemory>(
+        GetProcAddress(GetModuleHandleA("kernel32.dll"), "PrefetchVirtualMemory")
+    );
+
+    // 1. High-QD scatter-gather OS page prefetch across all prefill_m tokens for EMBED + Shard47 + Shard48!
+    if (pfn_prefetch) {
+        std::vector<Mcl4Win32MemRange> ranges;
+        ranges.reserve((size_t)prefill_m * 97);
+        for (int m = 0; m < prefill_m; ++m) {
+            int pos_m   = base_seq_len + m;
+            int seq_len = pos_m + 1;
+            int32_t cur_tok = token_history[pos_m];
+            if (cur_tok < 0 || cur_tok >= 129280) cur_tok = 0;
+
+            size_t emb_off = (size_t)cur_tok * DS_DIM * sizeof(__nv_bfloat16);
+            if (g_engine.mmap_embed.base && emb_off + DS_DIM * sizeof(__nv_bfloat16) <= g_engine.mmap_embed.size) {
+                ranges.push_back({ const_cast<uint8_t*>(g_engine.mmap_embed.base + emb_off), DS_DIM * sizeof(__nv_bfloat16) });
+            }
+
+            int start_idx = (seq_len > 4) ? (seq_len - 4) : 0;
+            int win_len   = seq_len - start_idx;
+            int64_t comp_toks[4] = {2, 2, 2, 2};
+            for (int i = 0; i < win_len; ++i) {
+                int32_t raw_id = token_history[start_idx + i];
+                if (raw_id >= 0 && raw_id < 129280) {
+                    comp_toks[i] = g_engine.h_engram_token_map[raw_id];
+                }
+            }
+            int64_t hashes[2][4 * 24];
+            dsv41_compute_engram_hashes_cpu(comp_toks, win_len, 2, 0, hashes[0]);
+            dsv41_compute_engram_hashes_cpu(comp_toks, win_len, 2, 1, hashes[1]);
+
+            for (int eng_idx = 0; eng_idx < 2; ++eng_idx) {
+                const Win32MmapFile& mm = (eng_idx == 0) ? g_engine.mmap_shard47 : g_engine.mmap_shard48;
+                if (!mm.base) continue;
+                const int64_t data_base  = (eng_idx == 0) ? 664LL : 672LL;
+                const int64_t scale_base = (eng_idx == 0) ? (664LL + 98305579008LL) : (672LL + 98308270592LL);
+                const int64_t* h_row = &hashes[eng_idx][(win_len - 1) * 24];
+                for (int c = 0; c < 24; ++c) {
+                    int64_t bucket = h_row[c];
+                    int slot = (int)((uint64_t)bucket * 11400714819323198485ULL >> 51) & ENG_CACHE_MASK;
+                    if (g_eng_cache[eng_idx][slot].bucket_id != bucket) {
+                        ranges.push_back({ const_cast<uint8_t*>(mm.base + data_base  + bucket * 256LL), 256 });
+                        ranges.push_back({ const_cast<uint8_t*>(mm.base + scale_base + bucket * 8LL),   8   });
+                    }
+                }
+            }
+        }
+        if (!ranges.empty()) {
+            pfn_prefetch(GetCurrentProcess(), (ULONG_PTR)ranges.size(), ranges.data(), 0);
+        }
+    }
+
+    // 2. Initialize all 8-token chunks into d_pf_x_hc, d_pf_pre_mix, d_pf_eng_fp8, d_pf_eng_scale
+    for (int off = 0; off < prefill_m; off += DS_MAX_BATCH_M) {
+        int chunk_m = (prefill_m - off < DS_MAX_BATCH_M) ? (prefill_m - off) : DS_MAX_BATCH_M;
+        int rc = mcl4_dsv41_engine_step_batch_begin(token_history, base_seq_len + off, chunk_m);
+        if (rc != 0) return rc;
+
+        CHECK_CUDA(cudaMemcpyAsync(
+            g_engine.d_pf_x_hc + (size_t)off * DS_HC_DIM,
+            g_engine.d_x_hc,
+            (size_t)chunk_m * DS_HC_DIM * sizeof(__nv_bfloat16),
+            cudaMemcpyDeviceToDevice,
+            0
+        ));
+        CHECK_CUDA(cudaMemcpyAsync(
+            g_engine.d_pf_pre_mix + (size_t)off * 4,
+            g_engine.d_pre_mix,
+            (size_t)chunk_m * 4 * sizeof(float),
+            cudaMemcpyDeviceToDevice,
+            0
+        ));
+        for (int e = 0; e < 2; ++e) {
+            CHECK_CUDA(cudaMemcpyAsync(
+                g_engine.d_pf_eng_fp8 + ((size_t)e * Mcl4Dsv41FullEngine::DS_MAX_PREFILL_M + off) * (24 * 256),
+                g_engine.d_eng_fp8    + ((size_t)e * DS_MAX_BATCH_M) * (24 * 256),
+                (size_t)chunk_m * (24 * 256),
+                cudaMemcpyDeviceToDevice,
+                0
+            ));
+            CHECK_CUDA(cudaMemcpyAsync(
+                g_engine.d_pf_eng_scale + ((size_t)e * Mcl4Dsv41FullEngine::DS_MAX_PREFILL_M + off) * (24 * 8),
+                g_engine.d_eng_scale    + ((size_t)e * DS_MAX_BATCH_M) * (24 * 8),
+                (size_t)chunk_m * (24 * 8),
+                cudaMemcpyDeviceToDevice,
+                0
+            ));
+        }
+        CHECK_CUDA(cudaStreamSynchronize(0));
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int mcl4_dsv41_engine_prefill_layer_attn_and_route(
+    int layer_id,
+    int base_pos,
+    int prefill_m,
+    int32_t* out_top6_indices_all, // [prefill_m, 6]
+    float* out_top6_weights_all    // [prefill_m, 6]
+) {
+    if (!g_engine.initialized || layer_id < 0 || layer_id >= 40 ||
+        prefill_m < 1 || prefill_m > Mcl4Dsv41FullEngine::DS_MAX_PREFILL_M) return -1;
+
+    for (int off = 0; off < prefill_m; off += DS_MAX_BATCH_M) {
+        int chunk_m = (prefill_m - off < DS_MAX_BATCH_M) ? (prefill_m - off) : DS_MAX_BATCH_M;
+        CHECK_CUDA(cudaMemcpyAsync(
+            g_engine.d_x_hc,
+            g_engine.d_pf_x_hc + (size_t)off * DS_HC_DIM,
+            (size_t)chunk_m * DS_HC_DIM * sizeof(__nv_bfloat16),
+            cudaMemcpyDeviceToDevice,
+            0
+        ));
+        CHECK_CUDA(cudaMemcpyAsync(
+            g_engine.d_pre_mix,
+            g_engine.d_pf_pre_mix + (size_t)off * 4,
+            (size_t)chunk_m * 4 * sizeof(float),
+            cudaMemcpyDeviceToDevice,
+            0
+        ));
+        if (layer_id == 1 || layer_id == 14) {
+            int e = (layer_id == 1) ? 0 : 1;
+            CHECK_CUDA(cudaMemcpyAsync(
+                g_engine.d_eng_fp8 + ((size_t)e * DS_MAX_BATCH_M) * (24 * 256),
+                g_engine.d_pf_eng_fp8 + ((size_t)e * Mcl4Dsv41FullEngine::DS_MAX_PREFILL_M + off) * (24 * 256),
+                (size_t)chunk_m * (24 * 256),
+                cudaMemcpyDeviceToDevice,
+                0
+            ));
+            CHECK_CUDA(cudaMemcpyAsync(
+                g_engine.d_eng_scale + ((size_t)e * DS_MAX_BATCH_M) * (24 * 8),
+                g_engine.d_pf_eng_scale + ((size_t)e * Mcl4Dsv41FullEngine::DS_MAX_PREFILL_M + off) * (24 * 8),
+                (size_t)chunk_m * (24 * 8),
+                cudaMemcpyDeviceToDevice,
+                0
+            ));
+        }
+
+        int rc = mcl4_dsv41_engine_layer_attn_and_route_batch(
+            layer_id,
+            base_pos + off,
+            chunk_m,
+            out_top6_indices_all + (size_t)off * DS_TOP_K,
+            out_top6_weights_all + (size_t)off * DS_TOP_K,
+            nullptr
+        );
+        if (rc != 0) return rc;
+
+        CHECK_CUDA(cudaMemcpyAsync(
+            g_engine.d_pf_x_hc + (size_t)off * DS_HC_DIM,
+            g_engine.d_x_hc,
+            (size_t)chunk_m * DS_HC_DIM * sizeof(__nv_bfloat16),
+            cudaMemcpyDeviceToDevice,
+            0
+        ));
+        CHECK_CUDA(cudaMemcpyAsync(
+            g_engine.d_pf_pre_mix + (size_t)off * 4,
+            g_engine.d_pre_mix,
+            (size_t)chunk_m * 4 * sizeof(float),
+            cudaMemcpyDeviceToDevice,
+            0
+        ));
+        CHECK_CUDA(cudaMemcpyAsync(
+            g_engine.d_pf_x_norm + (size_t)off * DS_DIM,
+            g_engine.d_x_norm,
+            (size_t)chunk_m * DS_DIM * sizeof(__nv_bfloat16),
+            cudaMemcpyDeviceToDevice,
+            0
+        ));
+        CHECK_CUDA(cudaMemcpyAsync(
+            g_engine.d_pf_post_mix + (size_t)off * 4,
+            g_engine.d_post_mix,
+            (size_t)chunk_m * 4 * sizeof(float),
+            cudaMemcpyDeviceToDevice,
+            0
+        ));
+        CHECK_CUDA(cudaMemcpyAsync(
+            g_engine.d_pf_comb_mix + (size_t)off * 16,
+            g_engine.d_comb_mix,
+            (size_t)chunk_m * 16 * sizeof(float),
+            cudaMemcpyDeviceToDevice,
+            0
+        ));
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int mcl4_dsv41_engine_prefill_layer_moe_chunk(
+    int layer_id,
+    int base_pos,
+    int off,
+    int chunk_m,
+    const Dsv41Mcl4cExpertPacket* const* h_unique_expert_ptrs,
+    const int32_t* h_unique_expert_ids,
+    int num_unique_experts,
+    const int32_t* h_top6_indices_chunk,
+    const float* h_top6_weights_chunk,
+    int k_active,
+    float plastic_alpha
+) {
+    if (!g_engine.initialized || off < 0 || chunk_m < 1 || chunk_m > DS_MAX_BATCH_M ||
+        off + chunk_m > Mcl4Dsv41FullEngine::DS_MAX_PREFILL_M) return -1;
+
+    CHECK_CUDA(cudaMemcpyAsync(
+        g_engine.d_x_hc,
+        g_engine.d_pf_x_hc + (size_t)off * DS_HC_DIM,
+        (size_t)chunk_m * DS_HC_DIM * sizeof(__nv_bfloat16),
+        cudaMemcpyDeviceToDevice,
+        0
+    ));
+    CHECK_CUDA(cudaMemcpyAsync(
+        g_engine.d_x_norm,
+        g_engine.d_pf_x_norm + (size_t)off * DS_DIM,
+        (size_t)chunk_m * DS_DIM * sizeof(__nv_bfloat16),
+        cudaMemcpyDeviceToDevice,
+        0
+    ));
+    CHECK_CUDA(cudaMemcpyAsync(
+        g_engine.d_post_mix,
+        g_engine.d_pf_post_mix + (size_t)off * 4,
+        (size_t)chunk_m * 4 * sizeof(float),
+        cudaMemcpyDeviceToDevice,
+        0
+    ));
+    CHECK_CUDA(cudaMemcpyAsync(
+        g_engine.d_comb_mix,
+        g_engine.d_pf_comb_mix + (size_t)off * 16,
+        (size_t)chunk_m * 16 * sizeof(float),
+        cudaMemcpyDeviceToDevice,
+        0
+    ));
+
+    int rc = mcl4_dsv41_engine_layer_moe_and_post_batch(
+        layer_id,
+        base_pos + off,
+        chunk_m,
+        h_unique_expert_ptrs,
+        h_unique_expert_ids,
+        num_unique_experts,
+        h_top6_indices_chunk,
+        h_top6_weights_chunk,
+        k_active,
+        plastic_alpha
+    );
+    if (rc != 0) return rc;
+
+    CHECK_CUDA(cudaMemcpyAsync(
+        g_engine.d_pf_x_hc + (size_t)off * DS_HC_DIM,
+        g_engine.d_x_hc,
+        (size_t)chunk_m * DS_HC_DIM * sizeof(__nv_bfloat16),
+        cudaMemcpyDeviceToDevice,
+        0
+    ));
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int mcl4_dsv41_engine_prefill_finish_batch(int prefill_m) {
+    if (!g_engine.initialized || prefill_m < 1 || prefill_m > Mcl4Dsv41FullEngine::DS_MAX_PREFILL_M) return -1;
+    int last = prefill_m - 1;
+    CHECK_CUDA(cudaMemcpyAsync(
+        g_engine.d_x_hc,
+        g_engine.d_pf_x_hc + (size_t)last * DS_HC_DIM,
+        DS_HC_DIM * sizeof(__nv_bfloat16),
+        cudaMemcpyDeviceToDevice,
+        0
+    ));
+    CHECK_CUDA(cudaMemcpyAsync(
+        g_engine.d_pre_mix,
+        g_engine.d_pf_pre_mix + (size_t)last * 4,
+        4 * sizeof(float),
+        cudaMemcpyDeviceToDevice,
+        0
+    ));
     return 0;
 }
 

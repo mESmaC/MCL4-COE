@@ -32,6 +32,8 @@ use crate::{
     mcl4_dsv41_engine_compute_logits_for_slot, mcl4_dsv41_engine_has_vram_expert,
     mcl4_dsv41_engine_init, mcl4_dsv41_engine_layer_attn_and_route_batch,
     mcl4_dsv41_engine_layer_moe_and_post_batch, mcl4_dsv41_engine_load_kv_snapshot,
+    mcl4_dsv41_engine_prefill_finish_batch, mcl4_dsv41_engine_prefill_init_batch,
+    mcl4_dsv41_engine_prefill_layer_attn_and_route, mcl4_dsv41_engine_prefill_layer_moe_chunk,
     mcl4_dsv41_engine_prestage_vram_experts, mcl4_dsv41_engine_reset_kv,
     mcl4_dsv41_engine_save_kv_snapshot, mcl4_dsv41_engine_set_step_context,
     mcl4_dsv41_engine_step_batch_begin,
@@ -72,6 +74,7 @@ pub struct CachedExpertEntry {
     pub last_tick: u64,
     pub prompt_hash: u64,
     pub first_decode_step: u32,
+    pub use_count: u32,
 }
 
 pub struct Dsv41BpeVocab {
@@ -870,6 +873,7 @@ impl CondenserEngineState {
                     last_tick: 50,
                     prompt_hash: 0,
                     first_decode_step: u32::MAX,
+                    use_count: 0,
                 },
             );
         }
@@ -953,9 +957,17 @@ impl CondenserEngineState {
         let step_u32 = decode_step_idx.map(|s| s as u32).unwrap_or(u32::MAX);
 
         // 1. Check 168-slot GPU VRAM Expert Cache first (0 B PCIe transfer!)
+        //    During multi-chunk Layer-First Prefill (`decode_step_idx.is_none()`), only treat locked
+        //    dedicated VRAM slots (`== 2`) as VRAM-only hits so that if Chunk 0/1 evicts a ring-buffer
+        //    slot needed by Chunk 2/3, Chunk 2/3 always has a valid host pointer!
         let mut vram_hit_exps: Vec<usize> = Vec::new();
         for (slot_idx, &exp) in exp_ids.iter().enumerate() {
-            let in_vram = unsafe { mcl4_dsv41_engine_has_vram_expert(layer as i32, exp as i32) != 0 };
+            let vram_state = unsafe { mcl4_dsv41_engine_has_vram_expert(layer as i32, exp as i32) };
+            let in_vram = if decode_step_idx.is_some() {
+                vram_state != 0
+            } else {
+                vram_state == 2
+            };
             if in_vram {
                 self.cache_hits.fetch_add(1, Ordering::Relaxed);
                 vram_hit_exps.push(exp);
@@ -973,8 +985,12 @@ impl CondenserEngineState {
                         if entry.prompt_hash != cur_prompt_hash {
                             entry.prompt_hash = cur_prompt_hash;
                             entry.first_decode_step = step_u32;
+                            entry.use_count = if step_u32 < u32::MAX { 1 } else { 0 };
                         } else {
                             entry.first_decode_step = entry.first_decode_step.min(step_u32);
+                            if step_u32 < u32::MAX {
+                                entry.use_count = entry.use_count.saturating_add(1);
+                            }
                         }
                     }
                 }
@@ -991,8 +1007,12 @@ impl CondenserEngineState {
                     if entry.prompt_hash != cur_prompt_hash {
                         entry.prompt_hash = cur_prompt_hash;
                         entry.first_decode_step = step_u32;
+                        entry.use_count = if step_u32 < u32::MAX { 1 } else { 0 };
                     } else {
                         entry.first_decode_step = entry.first_decode_step.min(step_u32);
+                        if step_u32 < u32::MAX {
+                            entry.use_count = entry.use_count.saturating_add(1);
+                        }
                     }
                 }
             }
@@ -1002,20 +1022,18 @@ impl CondenserEngineState {
                     if entry.prompt_hash != cur_prompt_hash {
                         entry.prompt_hash = cur_prompt_hash;
                         entry.first_decode_step = step_u32;
+                        entry.use_count = if step_u32 < u32::MAX { 1 } else { 0 };
                     } else {
                         entry.first_decode_step = entry.first_decode_step.min(step_u32);
+                        if step_u32 < u32::MAX {
+                            entry.use_count = entry.use_count.saturating_add(1);
+                        }
                     }
                     results[slot_idx] = Some(Arc::clone(&entry.pkt));
                     self.cache_hits.fetch_add(1, Ordering::Relaxed);
                 } else {
                     self.cache_misses.fetch_add(1, Ordering::Relaxed);
-                    // Belady OPT Loop-Pinning Eviction (836 Pinned Host RAM slots + 120 Locked Decode VRAM slots + 48 Ring VRAM slots):
-                    // - Tier 0: Entries from OTHER prompts (`v.prompt_hash != cur_prompt_hash`) in LRU order.
-                    // - Tier 1: Current prompt PREFILL-ONLY entries (`v.first_decode_step == u32::MAX`, already saved in PrefixKvSnapshot!).
-                    // - Tier 2: Current prompt DECODE entries that are PERMANENTLY LOCKED in GPU VRAM (`has_vram_expert == 2`),
-                    //   freeing 120 Host RAM slots from duplicating VRAM-locked experts!
-                    // - Tier 3: Current prompt non-VRAM DECODE entries (`v.first_decode_step < u32::MAX`), evicting the LARGEST `first_decode_step`
-                    //   (`u32::MAX - v.first_decode_step`) so Decode Steps 1..N stay permanently locked across passes!
+                    let cur_tick = CACHE_LRU_TICK.load(Ordering::Relaxed);
                     let mut recycled_slab: Option<Box<Dsv41Mcl4cExpertPacket>> = None;
                     while cache.len() + missing_slots.len() >= 940 {
                         let evict_cand = cache
@@ -1032,8 +1050,26 @@ impl CondenserEngineState {
                                     };
                                     if locked_vram {
                                         (2u8, 0u32, v.last_tick)
+                                    } else if step_u32 >= 64 && step_u32 < u32::MAX {
+                                        if cur_tick.saturating_sub(v.last_tick) < 256 {
+                                            (4u8, v.use_count, v.last_tick)
+                                        } else {
+                                            (
+                                                3u8,
+                                                if v.use_count <= 1 && v.first_decode_step >= 24 {
+                                                    0u32
+                                                } else {
+                                                    v.use_count.min(16)
+                                                },
+                                                (u32::MAX - v.first_decode_step) as u64,
+                                            )
+                                        }
                                     } else {
-                                        (3u8, u32::MAX - v.first_decode_step, u64::MAX - v.last_tick)
+                                        (
+                                            3u8,
+                                            u32::MAX - v.first_decode_step,
+                                            u64::MAX - v.last_tick,
+                                        )
                                     }
                                 }
                             })
@@ -1097,6 +1133,7 @@ impl CondenserEngineState {
                         last_tick: CACHE_LRU_TICK.fetch_add(1, Ordering::Relaxed),
                         prompt_hash: cur_prompt_hash,
                         first_decode_step: step_u32,
+                        use_count: if step_u32 < u32::MAX { 1 } else { 0 },
                     },
                 );
                 results[slot_idx] = Some(arc_pkt);
@@ -1161,6 +1198,7 @@ impl CondenserEngineState {
                             last_tick: CACHE_LRU_TICK.fetch_add(1, Ordering::Relaxed),
                             prompt_hash: 0,
                             first_decode_step: u32::MAX,
+                            use_count: 0,
                         },
                     );
                 }
@@ -1445,6 +1483,7 @@ impl CondenserEngineState {
                                     last_tick: CACHE_LRU_TICK.fetch_add(1, Ordering::Relaxed),
                                     prompt_hash: cur_prompt_hash,
                                     first_decode_step: step_u32,
+                                    use_count: 1,
                                 },
                             );
                         }
@@ -1720,20 +1759,216 @@ impl CondenserEngineState {
         }
 
         while start_pos < prompt_tok_count {
-            let chunk_m = (prompt_tok_count - start_pos).min(8);
-            let end_pos = start_pos + chunk_m;
-            let (ut_r, disp_r) = step_batch_all_40_layers(
-                &token_seq[0..end_pos],
-                start_pos,
-                chunk_m,
-                prompt_tok_count - 1,
-                None,
-            )?;
-            upper_tail_routes = ut_r[chunk_m - 1];
-            for m in 0..chunk_m {
-                total_routed_dispatches += disp_r[m];
+            let prefill_m = (prompt_tok_count - start_pos).min(256);
+            let end_pos = start_pos + prefill_m;
+            if prefill_m <= 8 {
+                let (ut_r, disp_r) = step_batch_all_40_layers(
+                    &token_seq[0..end_pos],
+                    start_pos,
+                    prefill_m,
+                    prompt_tok_count - 1,
+                    None,
+                )?;
+                upper_tail_routes = ut_r[prefill_m - 1];
+                for m in 0..prefill_m {
+                    total_routed_dispatches += disp_r[m];
+                }
+                last_batch_slot = prefill_m - 1;
+            } else {
+                // True Layer-First Two-Phase Prefill (`prefill_m <= 256`):
+                // Sweeps all 40 layers ONCE (`40` high-QD NVMe barriers instead of `40 * ceil(prefill_m / 8)` barriers!),
+                // keeping each layer's routed experts hot in the 43 VRAM slots across all chunks of the prompt!
+                unsafe {
+                    mcl4_dsv41_engine_set_step_context(cur_prompt_hash, 0);
+                }
+                let rc_init = unsafe {
+                    mcl4_dsv41_engine_prefill_init_batch(
+                        token_seq.as_ptr(),
+                        start_pos as i32,
+                        prefill_m as i32,
+                    )
+                };
+                if rc_init != 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("mcl4_dsv41_engine_prefill_init_batch failed rc={rc_init}"),
+                    ));
+                }
+
+                let mut raw_idx_all = vec![-1i32; prefill_m * 6];
+                let mut raw_w_all = vec![0.0f32; prefill_m * 6];
+                let final_tok_pos = prompt_tok_count - 1;
+
+                for layer in 0..40usize {
+                    let rc_attn = unsafe {
+                        mcl4_dsv41_engine_prefill_layer_attn_and_route(
+                            layer as i32,
+                            start_pos as i32,
+                            prefill_m as i32,
+                            raw_idx_all.as_mut_ptr(),
+                            raw_w_all.as_mut_ptr(),
+                        )
+                    };
+                    if rc_attn != 0 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            format!("mcl4_dsv41_engine_prefill_layer_attn_and_route L{layer} failed rc={rc_attn}"),
+                        ));
+                    }
+
+                    if layer >= 32 {
+                        let u = layer - 32;
+                        let last_m = prefill_m - 1;
+                        upper_tail_routes[u * 2] = raw_idx_all[last_m * 6];
+                        upper_tail_routes[u * 2 + 1] = raw_idx_all[last_m * 6 + 1];
+                    }
+
+                    let mut layer_unique_exps: Vec<usize> = Vec::with_capacity(64);
+                    let mut tok_chosen: Vec<Vec<usize>> = Vec::with_capacity(prefill_m);
+
+                    for m in 0..prefill_m {
+                        let pos_m = start_pos + m;
+                        let is_non_final = pos_m < final_tok_pos;
+                        let is_distant_prefix = is_non_final && (pos_m + 16 < final_tok_pos);
+                        let base_k = if is_distant_prefix {
+                            if layer >= 32 {
+                                2usize.min(max_k_cap)
+                            } else {
+                                1usize
+                            }
+                        } else {
+                            2usize.min(max_k_cap)
+                        };
+                        let w_thresh = if is_distant_prefix {
+                            0.40f32
+                        } else if is_non_final {
+                            0.36f32
+                        } else {
+                            0.26f32
+                        };
+
+                        let mut chosen_eids: Vec<usize> = Vec::with_capacity(max_k_cap);
+                        let mut chosen_ws: Vec<f32> = Vec::with_capacity(max_k_cap);
+
+                        for k in 0..max_k_cap {
+                            let eid = (raw_idx_all[m * 6 + k] as usize).min(383);
+                            let w = raw_w_all[m * 6 + k];
+                            if k < base_k || w >= w_thresh {
+                                chosen_eids.push(eid);
+                                chosen_ws.push(w);
+                            } else {
+                                break;
+                            }
+                        }
+                        if chosen_eids.is_empty() {
+                            chosen_eids.push((raw_idx_all[m * 6] as usize).min(383));
+                            chosen_ws.push(raw_w_all[m * 6]);
+                        }
+
+                        let k_adaptive = chosen_eids.len();
+                        let sub_sum: f32 = chosen_ws.iter().sum();
+                        if sub_sum > 1e-12 {
+                            let renorm = 1.5f32 / sub_sum;
+                            for w in &mut chosen_ws {
+                                *w *= renorm;
+                            }
+                        }
+
+                        for k in 0..6 {
+                            if k < k_adaptive {
+                                let eid = chosen_eids[k];
+                                raw_idx_all[m * 6 + k] = eid as i32;
+                                raw_w_all[m * 6 + k] = chosen_ws[k];
+                                if !layer_unique_exps.contains(&eid) {
+                                    layer_unique_exps.push(eid);
+                                }
+                            } else {
+                                raw_idx_all[m * 6 + k] = -1;
+                                raw_w_all[m * 6 + k] = 0.0;
+                            }
+                        }
+                        total_routed_dispatches += k_adaptive;
+                        tok_chosen.push(chosen_eids);
+                    }
+
+                    {
+                        let mut pred_map = self.step_route_predictor.lock().unwrap();
+                        if pred_map.len() >= 16384 {
+                            pred_map.clear();
+                        }
+                        for m in 0..prefill_m {
+                            pred_map.insert(
+                                (cur_prompt_hash, start_pos + m, layer),
+                                tok_chosen[m].clone(),
+                            );
+                        }
+                    }
+
+                    // Phase B: Single High-QD Parallel NVMe Fetch for ALL unique experts routed across the prompt at `layer`!
+                    let layer_arcs = self.fetch_layer_expert_arcs(
+                        layer,
+                        &layer_unique_exps,
+                        cur_prompt_hash,
+                        None,
+                    )?;
+
+                    // Phase C: Execute MoE + Post across all 8-token chunks at `layer` (reusing `d_arena` VRAM slots across chunks!)
+                    for off in (0..prefill_m).step_by(8) {
+                        let chunk_m = (prefill_m - off).min(8);
+                        let mut chunk_unique_exps: Vec<usize> = Vec::with_capacity(chunk_m * max_k_cap);
+                        for m in off..(off + chunk_m) {
+                            for &eid in &tok_chosen[m] {
+                                if !chunk_unique_exps.contains(&eid) {
+                                    chunk_unique_exps.push(eid);
+                                }
+                            }
+                        }
+                        let mut unique_ptrs = [std::ptr::null::<Dsv41Mcl4cExpertPacket>(); 48];
+                        let mut unique_ids_i32 = [0i32; 48];
+                        let n_uniq = chunk_unique_exps.len().min(48);
+                        for u in 0..n_uniq {
+                            let eid = chunk_unique_exps[u];
+                            unique_ids_i32[u] = eid as i32;
+                            if let Some(pos_in_layer) = layer_unique_exps.iter().position(|&e| e == eid) {
+                                if let Some(ref arc_box) = layer_arcs[pos_in_layer] {
+                                    unique_ptrs[u] = arc_box.as_ref().as_ref() as *const Dsv41Mcl4cExpertPacket;
+                                }
+                            }
+                        }
+
+                        let rc_moe = unsafe {
+                            mcl4_dsv41_engine_prefill_layer_moe_chunk(
+                                layer as i32,
+                                start_pos as i32,
+                                off as i32,
+                                chunk_m as i32,
+                                unique_ptrs.as_ptr(),
+                                unique_ids_i32.as_ptr(),
+                                n_uniq as i32,
+                                raw_idx_all[off * 6..].as_ptr(),
+                                raw_w_all[off * 6..].as_ptr(),
+                                6,
+                                plastic_alpha,
+                            )
+                        };
+                        if rc_moe != 0 {
+                            return Err(io::Error::new(
+                                io::ErrorKind::Other,
+                                format!("mcl4_dsv41_engine_prefill_layer_moe_chunk L{layer} failed rc={rc_moe}"),
+                            ));
+                        }
+                    }
+                }
+
+                let rc_fin = unsafe { mcl4_dsv41_engine_prefill_finish_batch(prefill_m as i32) };
+                if rc_fin != 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("mcl4_dsv41_engine_prefill_finish_batch failed rc={rc_fin}"),
+                    ));
+                }
+                last_batch_slot = 0;
             }
-            last_batch_slot = chunk_m - 1;
             start_pos = end_pos;
         }
 

@@ -28,6 +28,7 @@ use std::time::Instant;
 
 use crate::p4608_expert_sharder::P4608DualDriveExpertStore;
 use crate::{
+    mcl4_dsv41_engine_commit_batch_prefix, mcl4_dsv41_engine_compute_logits_batch,
     mcl4_dsv41_engine_compute_logits_for_slot, mcl4_dsv41_engine_has_vram_expert,
     mcl4_dsv41_engine_init, mcl4_dsv41_engine_layer_attn_and_route_batch,
     mcl4_dsv41_engine_layer_moe_and_post_batch, mcl4_dsv41_engine_load_kv_snapshot,
@@ -669,6 +670,7 @@ pub struct CondenserEngineState {
     pub prefix_kv_cache: Mutex<VecDeque<PrefixKvSnapshot>>,
     pub route_cache: Mutex<HashMap<u64, [i32; TOTAL_UT_PKTS]>>,
     pub step_route_predictor: Mutex<HashMap<(u64, usize, usize), Vec<usize>>>,
+    pub ncm_trajectory_cache: Mutex<HashMap<(u64, usize, i32), i32>>,
     pub gpu_forward_lock: Mutex<()>,
     pub turn_counter: AtomicU64,
     pub cache_hits: AtomicU64,
@@ -910,6 +912,7 @@ impl CondenserEngineState {
             prefix_kv_cache: Mutex::new(VecDeque::with_capacity(48)),
             route_cache: Mutex::new(HashMap::with_capacity(256)),
             step_route_predictor: Mutex::new(HashMap::with_capacity(4096)),
+            ncm_trajectory_cache: Mutex::new(HashMap::with_capacity(4096)),
             gpu_forward_lock: Mutex::new(()),
             turn_counter: AtomicU64::new(1),
             cache_hits: AtomicU64::new(0),
@@ -925,7 +928,7 @@ impl CondenserEngineState {
             return slab;
         }
         let mut slab = Dsv41Mcl4cExpertPacket::new_zeroed_box();
-        if REGISTERED_PINNED_SLABS.fetch_add(1, Ordering::Relaxed) < 900 {
+        if REGISTERED_PINNED_SLABS.fetch_add(1, Ordering::Relaxed) < 968 {
             unsafe {
                 let _ = mcl4_dsv41_register_pinned_host_slab(
                     slab.as_mut() as *mut Dsv41Mcl4cExpertPacket as *mut std::ffi::c_void,
@@ -1014,7 +1017,7 @@ impl CondenserEngineState {
                     // - Tier 3: Current prompt non-VRAM DECODE entries (`v.first_decode_step < u32::MAX`), evicting the LARGEST `first_decode_step`
                     //   (`u32::MAX - v.first_decode_step`) so Decode Steps 1..N stay permanently locked across passes!
                     let mut recycled_slab: Option<Box<Dsv41Mcl4cExpertPacket>> = None;
-                    while cache.len() >= 860 {
+                    while cache.len() + missing_slots.len() >= 940 {
                         let evict_cand = cache
                             .iter()
                             .filter(|(&(l, _), _)| l != layer)
@@ -1040,9 +1043,11 @@ impl CondenserEngineState {
                                 if let Ok(boxed_slab) = Arc::try_unwrap(evicted_entry.pkt) {
                                     if recycled_slab.is_none() {
                                         recycled_slab = Some(boxed_slab);
-                                        break;
                                     } else {
                                         self.free_slab_pool.lock().unwrap().push(boxed_slab);
+                                    }
+                                    if cache.len() + missing_slots.len() < 940 {
+                                        break;
                                     }
                                 }
                             }
@@ -1300,10 +1305,8 @@ impl CondenserEngineState {
                                         base_pos: usize,
                                         batch_m: usize,
                                         final_tok_pos: usize,
-                                        _decode_step_idx: Option<usize>,
-                                        ut_routes_out: &mut [i32; TOTAL_UT_PKTS],
-                                        dispatches_accum: &mut usize|
-         -> io::Result<()> {
+                                        _decode_step_idx: Option<usize>|
+         -> io::Result<([[i32; TOTAL_UT_PKTS]; 8], [usize; 8])> {
             unsafe {
                 mcl4_dsv41_engine_set_step_context(
                     cur_prompt_hash,
@@ -1325,28 +1328,37 @@ impl CondenserEngineState {
             }
 
             let step_u32 = _decode_step_idx.map(|s| s as u32).unwrap_or(u32::MAX);
+            let mut slot_ut_routes = [[0i32; TOTAL_UT_PKTS]; 8];
+            let mut slot_dispatches = [0usize; 8];
 
             for layer in 0..40usize {
-                // 0. Cross-Attention PCIe H2D Pre-Stage:
+                // 0. Cross-Attention PCIe H2D Pre-Stage across all `m in 0..batch_m`:
                 //    Before launching Layer `layer`'s Attention + Router on Stream 0 (`~0.42 ms`),
-                //    if `step_route_predictor` knows this step's exact experts AND at least one is in Pinned Host RAM
-                //    but NOT yet in the 168-slot VRAM cache (`any_need_dma`), pre-stage it on `stream_prefetch`!
-                let predicted_exps = self
-                    .step_route_predictor
-                    .lock()
-                    .unwrap()
-                    .get(&(cur_prompt_hash, base_pos, layer))
-                    .cloned();
-                let has_exact_pred = predicted_exps.is_some();
+                //    gather predicted experts across `base_pos .. base_pos + batch_m` and pre-stage on `stream_prefetch`!
+                let mut pred_union: Vec<usize> = Vec::new();
+                let mut slot_has_pred = [false; 8];
+                {
+                    let pred_map = self.step_route_predictor.lock().unwrap();
+                    for m in 0..batch_m {
+                        if let Some(exps) = pred_map.get(&(cur_prompt_hash, base_pos + m, layer)) {
+                            slot_has_pred[m] = true;
+                            for &e in exps {
+                                if !pred_union.contains(&e) && pred_union.len() < 48 {
+                                    pred_union.push(e);
+                                }
+                            }
+                        }
+                    }
+                }
 
                 let mut _prestaged_arcs: Vec<Arc<Box<Dsv41Mcl4cExpertPacket>>> = Vec::new();
-                if let Some(ref pred_list) = predicted_exps {
+                if !pred_union.is_empty() {
                     let mut pre_ptrs = [std::ptr::null::<Dsv41Mcl4cExpertPacket>(); 48];
                     let mut pre_ids = [0i32; 48];
                     let mut pre_n = 0usize;
                     let mut any_need_dma = false;
                     let mut cache = self.hot_expert_cache.lock().unwrap();
-                    for &exp in pred_list.iter().take(48) {
+                    for &exp in pred_union.iter().take(48) {
                         let in_vram = unsafe {
                             mcl4_dsv41_engine_has_vram_expert(layer as i32, exp as i32) != 0
                         };
@@ -1407,21 +1419,23 @@ impl CondenserEngineState {
 
                 if layer >= 32 {
                     let u = layer - 32;
-                    let last_m = batch_m - 1;
-                    ut_routes_out[u * 2] = raw_idx_batch[last_m * 6];
-                    ut_routes_out[u * 2 + 1] = raw_idx_batch[last_m * 6 + 1];
+                    for m in 0..batch_m {
+                        slot_ut_routes[m][u * 2] = raw_idx_batch[m * 6];
+                        slot_ut_routes[m][u * 2 + 1] = raw_idx_batch[m * 6 + 1];
+                    }
                 }
 
-                // JITI Deterministic Router-Confidence Coalition (168 VRAM Slots + 1,000 Host RAM Slots = 1,168 Total):
+                // JITI Deterministic Router-Confidence Coalition (168 VRAM Slots + 860 Host RAM Slots):
                 // - Pure function of router weights `raw_w_batch` in strict rank order `0..max_k_cap` (100% cache-state invariant!).
                 // - Preserves full Top-2 expert coalition across all 40 layers + router-confident Top-3..6 (`w >= w_thresh`).
                 let mut unique_exps: Vec<usize> = Vec::with_capacity(batch_m * max_k_cap);
+                let mut slot_chosen: [Vec<usize>; 8] = Default::default();
                 for m in 0..batch_m {
                     let pos_m = base_pos + m;
-                    let is_non_final = pos_m < final_tok_pos;
+                    let is_non_final = _decode_step_idx.is_none() && (pos_m < final_tok_pos);
                     let is_distant_prefix = is_non_final && (pos_m + 16 < final_tok_pos);
                     let is_long_decode_lower = match _decode_step_idx {
-                        Some(step) => step > 8 && layer < 32,
+                        Some(step) => (step + m) > 8 && layer < 32,
                         None => false,
                     };
                     let base_k = if is_distant_prefix {
@@ -1486,15 +1500,23 @@ impl CondenserEngineState {
                             raw_w_batch[m * 6 + k] = 0.0;
                         }
                     }
-                    *dispatches_accum += k_adaptive;
+                    slot_dispatches[m] += k_adaptive;
+                    slot_chosen[m] = chosen_eids;
                 }
 
-                if !has_exact_pred {
+                if slot_has_pred[..batch_m].iter().any(|&h| !h) {
                     let mut pred_map = self.step_route_predictor.lock().unwrap();
                     if pred_map.len() >= 16384 {
                         pred_map.clear();
                     }
-                    pred_map.insert((cur_prompt_hash, base_pos, layer), unique_exps.clone());
+                    for m in 0..batch_m {
+                        if !slot_has_pred[m] {
+                            pred_map.insert(
+                                (cur_prompt_hash, base_pos + m, layer),
+                                slot_chosen[m].clone(),
+                            );
+                        }
+                    }
                 }
 
                 // Fetch all unique routed experts for this layer in one parallel batch!
@@ -1537,10 +1559,10 @@ impl CondenserEngineState {
                     ));
                 }
             }
-            Ok(())
+            Ok((slot_ut_routes, slot_dispatches))
         };
 
-        // 3. Layer-First Batched Prefill (`batch_m <= 8` in `n8` of `m16n8k64`), restoring longest cached Prefix KV Snapshot first!
+        // 3. Layer-First Batched Prefill (`batch_m <= 8`), restoring longest cached Prefix KV Snapshot first!
         let mut start_pos = 0usize;
         if let Some(snap) = self.find_longest_prefix_snapshot(&token_seq) {
             unsafe {
@@ -1554,15 +1576,15 @@ impl CondenserEngineState {
         let mut last_batch_slot = 0usize;
         if start_pos == 0 && prompt_tok_count >= 2 {
             // Step the 2-token shared chat template prefix `<｜begin▁of▁sentence｜><｜User｜>` (`batch_m = 2`) in 1 pass and cache it!
-            step_batch_all_40_layers(
+            let (ut_r, disp_r) = step_batch_all_40_layers(
                 &token_seq[0..2],
                 0,
                 2,
                 prompt_tok_count - 1,
                 None,
-                &mut upper_tail_routes,
-                &mut total_routed_dispatches,
             )?;
+            upper_tail_routes = ut_r[1];
+            total_routed_dispatches += disp_r[0] + disp_r[1];
             self.store_kv_snapshot(
                 &token_seq[0..2],
                 [0i32; 64],
@@ -1579,15 +1601,17 @@ impl CondenserEngineState {
         while start_pos < prompt_tok_count {
             let chunk_m = (prompt_tok_count - start_pos).min(8);
             let end_pos = start_pos + chunk_m;
-            step_batch_all_40_layers(
+            let (ut_r, disp_r) = step_batch_all_40_layers(
                 &token_seq[0..end_pos],
                 start_pos,
                 chunk_m,
                 prompt_tok_count - 1,
                 None,
-                &mut upper_tail_routes,
-                &mut total_routed_dispatches,
             )?;
+            upper_tail_routes = ut_r[chunk_m - 1];
+            for m in 0..chunk_m {
+                total_routed_dispatches += disp_r[m];
+            }
             last_batch_slot = chunk_m - 1;
             start_pos = end_pos;
         }
@@ -1595,65 +1619,22 @@ impl CondenserEngineState {
         let prefill_ms = t0.elapsed().as_secs_f64() * 1000.0;
         let t_decode = Instant::now();
 
-        // 4. Autoregressive Decode Loop: sample real token IDs from the 129,280-vocab LM head up to `max_new_tokens` (up to 4096)!
+        // 4. NCM Multi-Token Coalesced Speculative Decode Loop (`batch_m <= 8`):
+        //    Preserves 100% bit-for-bit identical token sampling, repetition penalty, router choices, and EOS detection!
         let gen_budget = max_new_tokens.clamp(1, 4096);
         let mut generated_ids: Vec<i32> = Vec::with_capacity(gen_budget.min(1024));
         let mut first_step_top5: Vec<(i32, String, f32)> = Vec::with_capacity(5);
         let mut rng_state = 0x9E3779B97F4A7C15u64 ^ (turn_id.wrapping_mul(0xBF58476D1CE4E5B9));
         let mut hit_eos = false;
 
-        for step_idx in 0..gen_budget {
-            let mut top64_ids = [0i32; 64];
-            let mut top64_logits = [0.0f32; 64];
-
-            if step_idx == 0 {
-                if let Some(exact_snap) = self.find_snapshot_exact(&token_seq).filter(|s| s.has_logits) {
-                    top64_ids = exact_snap.top64_ids;
-                    top64_logits = exact_snap.top64_logits;
-                    upper_tail_routes = exact_snap.upper_tail_routes;
-                } else {
-                    let rc_log = unsafe {
-                        mcl4_dsv41_engine_compute_logits_for_slot(
-                            last_batch_slot as i32,
-                            top64_ids.as_mut_ptr(),
-                            top64_logits.as_mut_ptr(),
-                        )
-                    };
-                    if rc_log != 0 {
-                        return Err(io::Error::new(
-                            io::ErrorKind::Other,
-                            format!("mcl4_dsv41_engine_compute_logits_for_slot failed rc={rc_log}"),
-                        ));
-                    }
-                    self.store_kv_snapshot(
-                        &token_seq,
-                        top64_ids,
-                        top64_logits,
-                        true,
-                        true,
-                        upper_tail_routes,
-                        total_routed_dispatches,
-                    );
-                }
-            } else {
-                let rc_log = unsafe {
-                    mcl4_dsv41_engine_compute_logits_for_slot(
-                        0,
-                        top64_ids.as_mut_ptr(),
-                        top64_logits.as_mut_ptr(),
-                    )
-                };
-                if rc_log != 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("mcl4_dsv41_engine_compute_logits_for_slot failed rc={rc_log}"),
-                    ));
-                }
-            }
-
+        let sample_token_from_top64 = |top64_ids: &[i32; 64],
+                                       top64_logits: &mut [f32; 64],
+                                       gen_so_far: &[i32],
+                                       rng: &mut u64|
+         -> i32 {
             // Apply gentle local repetition penalty only on non-structural tokens repeating >= 2x in last 16 tokens
             // (never penalize newlines, punctuation, short identifiers < 300, closing ``` fences 9854, or EOS 1!)
-            let recent_window = &generated_ids[generated_ids.len().saturating_sub(16)..];
+            let recent_window = &gen_so_far[gen_so_far.len().saturating_sub(16)..];
             for c in 0..64 {
                 let cid = top64_ids[c];
                 if cid >= 300 && cid != 9854 && cid != 128798 && cid != 128799 {
@@ -1668,16 +1649,7 @@ impl CondenserEngineState {
                 }
             }
 
-            if step_idx == 0 {
-                for c in 0..5 {
-                    let tid = top64_ids[c];
-                    let t_str = self.bpe_vocab.decode(&[tid]);
-                    first_step_top5.push((tid, t_str, top64_logits[c]));
-                }
-            }
-
-            // Select next token (greedy if temperature <= 0.05, else top-p=0.90 nucleus sampling over top-16)
-            let next_tok = if temperature <= 0.05 {
+            if temperature <= 0.05 {
                 let mut best_k = 0usize;
                 for c in 1..16 {
                     if top64_logits[c] > top64_logits[best_k] {
@@ -1702,7 +1674,6 @@ impl CondenserEngineState {
                 for c in 0..16 {
                     probs[c] /= sum_p.max(1e-12);
                 }
-                // Top-p = 0.88 nucleus filter
                 let mut cum_p = 0.0f32;
                 let mut cutoff = 16usize;
                 for c in 0..16 {
@@ -1712,10 +1683,10 @@ impl CondenserEngineState {
                         break;
                     }
                 }
-                rng_state ^= rng_state >> 12;
-                rng_state ^= rng_state << 25;
-                rng_state ^= rng_state >> 27;
-                let u01 = ((rng_state.wrapping_mul(0x2545F4914F6CDD1D) >> 40) as f32)
+                *rng ^= *rng >> 12;
+                *rng ^= *rng << 25;
+                *rng ^= *rng >> 27;
+                let u01 = ((rng.wrapping_mul(0x2545F4914F6CDD1D) >> 40) as f32)
                     / ((1u64 << 24) as f32);
                 let target = u01 * cum_p;
                 let mut acc = 0.0f32;
@@ -1728,28 +1699,203 @@ impl CondenserEngineState {
                     }
                 }
                 chosen
-            };
+            }
+        };
 
-            // Stop on EOS (<｜end▁of▁sentence｜> = 1) or role turn boundary (<｜User｜> = 128803)
+        // Step 0: Sample first token from end-of-prefill logits (or cachedPrefixKvSnapshot)
+        let mut pending_tok: Option<i32> = None;
+        {
+            let mut top64_ids = [0i32; 64];
+            let mut top64_logits = [0.0f32; 64];
+            if let Some(exact_snap) = self.find_snapshot_exact(&token_seq).filter(|s| s.has_logits) {
+                top64_ids = exact_snap.top64_ids;
+                top64_logits = exact_snap.top64_logits;
+                upper_tail_routes = exact_snap.upper_tail_routes;
+            } else {
+                let rc_log = unsafe {
+                    mcl4_dsv41_engine_compute_logits_for_slot(
+                        last_batch_slot as i32,
+                        top64_ids.as_mut_ptr(),
+                        top64_logits.as_mut_ptr(),
+                    )
+                };
+                if rc_log != 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("mcl4_dsv41_engine_compute_logits_for_slot failed rc={rc_log}"),
+                    ));
+                }
+                self.store_kv_snapshot(
+                    &token_seq,
+                    top64_ids,
+                    top64_logits,
+                    true,
+                    true,
+                    upper_tail_routes,
+                    total_routed_dispatches,
+                );
+            }
+
+            let next_tok = sample_token_from_top64(
+                &top64_ids,
+                &mut top64_logits,
+                &generated_ids,
+                &mut rng_state,
+            );
+            for c in 0..5 {
+                let tid = top64_ids[c];
+                let t_str = self.bpe_vocab.decode(&[tid]);
+                first_step_top5.push((tid, t_str, top64_logits[c]));
+            }
             if next_tok == 1 || next_tok == 128803 || next_tok == 128804 {
                 hit_eos = true;
+            } else {
+                generated_ids.push(next_tok);
+                if generated_ids.len() < gen_budget {
+                    pending_tok = Some(next_tok);
+                }
+            }
+        }
+
+        // Coalesced NCM Multi-Token Speculative Verification Loop (`batch_m <= 8`)
+        let mut ncm_steps = 0usize;
+        let mut ncm_drafted = 0usize;
+        let mut ncm_accepted = 0usize;
+        while let Some(cur_tok) = pending_tok.take() {
+            if generated_ids.len() >= gen_budget {
                 break;
             }
-            generated_ids.push(next_tok);
+            let step_base = generated_ids.len(); // 1-indexed decode step matching original `Some(step_idx + 1)`
+            let base_pos = token_seq.len();
+            token_seq.push(cur_tok);
 
-            // Step `next_tok` through all 40 layers on the GPU (`batch_m = 1`)
-            if step_idx + 1 < gen_budget {
-                let next_pos = token_seq.len();
-                token_seq.push(next_tok);
-                step_batch_all_40_layers(
-                    &token_seq,
-                    next_pos,
-                    1,
-                    next_pos,
-                    Some(step_idx + 1),
-                    &mut upper_tail_routes,
-                    &mut total_routed_dispatches,
-                )?;
+            // Draft up to `max_gamma <= 7` tokens (`batch_m = 1 + gamma <= 8`) from
+            // NCM Turn Trajectory Memory (`ncm_trajectory_cache`)
+            let rem_budget = gen_budget - generated_ids.len();
+            let max_gamma = rem_budget.saturating_sub(1).min(7);
+            if max_gamma > 0 && temperature <= 0.05 {
+                let traj_map = self.ncm_trajectory_cache.lock().unwrap();
+                for g in 0..max_gamma {
+                    let cur_pos = base_pos + g;
+                    let last_t = token_seq[cur_pos];
+                    if let Some(&pred_tok) = traj_map.get(&(cur_prompt_hash, cur_pos, last_t)) {
+                        if pred_tok == 1 || pred_tok == 128803 || pred_tok == 128804 {
+                            // Next token is EOS; stop drafting so `last_t` is the final slot in the batch!
+                            break;
+                        }
+                        token_seq.push(pred_tok);
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            let batch_m = token_seq.len() - base_pos;
+            ncm_steps += 1;
+            ncm_drafted += batch_m;
+            let (slot_ut_routes, slot_dispatches) = step_batch_all_40_layers(
+                &token_seq,
+                base_pos,
+                batch_m,
+                base_pos + batch_m - 1,
+                Some(step_base),
+            )?;
+
+            let mut top64_ids_batch = [0i32; 8 * 64];
+            let mut top64_logits_batch = [0.0f32; 8 * 64];
+            let rc_log = if batch_m == 1 {
+                unsafe {
+                    mcl4_dsv41_engine_compute_logits_for_slot(
+                        0,
+                        top64_ids_batch.as_mut_ptr(),
+                        top64_logits_batch.as_mut_ptr(),
+                    )
+                }
+            } else {
+                unsafe {
+                    mcl4_dsv41_engine_compute_logits_batch(
+                        batch_m as i32,
+                        top64_ids_batch.as_mut_ptr(),
+                        top64_logits_batch.as_mut_ptr(),
+                    )
+                }
+            };
+            if rc_log != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("mcl4_dsv41_engine_compute_logits_batch failed rc={rc_log}"),
+                ));
+            }
+
+            let mut k_accepted = 0usize;
+            for m in 0..batch_m {
+                k_accepted = m + 1;
+                let mut slot_ids = [0i32; 64];
+                let mut slot_logits = [0.0f32; 64];
+                slot_ids.copy_from_slice(&top64_ids_batch[m * 64..(m + 1) * 64]);
+                slot_logits.copy_from_slice(&top64_logits_batch[m * 64..(m + 1) * 64]);
+
+                let verified_tok = sample_token_from_top64(
+                    &slot_ids,
+                    &mut slot_logits,
+                    &generated_ids,
+                    &mut rng_state,
+                );
+
+                if temperature <= 0.05 {
+                    let mut traj_map = self.ncm_trajectory_cache.lock().unwrap();
+                    if traj_map.len() >= 16384 {
+                        traj_map.clear();
+                    }
+                    traj_map.insert(
+                        (cur_prompt_hash, base_pos + m, token_seq[base_pos + m]),
+                        verified_tok,
+                    );
+                }
+
+                // Check for EOS (<｜end▁of▁sentence｜> = 1) or role turn boundary (<｜User｜> = 128803)
+                if verified_tok == 1 || verified_tok == 128803 || verified_tok == 128804 {
+                    hit_eos = true;
+                    break;
+                }
+
+                generated_ids.push(verified_tok);
+                if generated_ids.len() >= gen_budget {
+                    break;
+                }
+
+                if m + 1 < batch_m {
+                    let draft_tok = token_seq[base_pos + m + 1];
+                    if verified_tok != draft_tok {
+                        // Draft mismatch at slot `m + 1`: accept `0..=m`, roll back `m + 1..batch_m`,
+                        // and use the verified bonus token `verified_tok` to start the next batch!
+                        pending_tok = Some(verified_tok);
+                        break;
+                    }
+                } else {
+                    // All `batch_m` slots in the batch were accepted, and slot `batch_m - 1` produced
+                    // the bonus verified token `verified_tok` for the start of the next batch!
+                    pending_tok = Some(verified_tok);
+                }
+            }
+
+            ncm_accepted += k_accepted;
+            if batch_m > 1 {
+                unsafe {
+                    mcl4_dsv41_engine_commit_batch_prefix(
+                        base_pos as i32,
+                        batch_m as i32,
+                        k_accepted as i32,
+                    );
+                }
+            }
+            token_seq.truncate(base_pos + k_accepted);
+            upper_tail_routes = slot_ut_routes[k_accepted - 1];
+            for m in 0..k_accepted {
+                total_routed_dispatches += slot_dispatches[m];
+            }
+            if hit_eos {
+                break;
             }
         }
 
@@ -1808,7 +1954,7 @@ impl CondenserEngineState {
             thought.push('\n');
         }
         thought.push_str(&format!(
-            "[MCL4-COE 40-Layer Autoregressive Forward Pass | {} (step={}) | Prompt={} BPE toks ({:.1}ms) -> Gen={} toks (EOS={}, {:.1}ms, {:.1} decode tok/s) | \
+            "[MCL4-COE 40-Layer Autoregressive Forward Pass | {} (step={}) | Prompt={} BPE toks ({:.1}ms) -> Gen={} toks (EOS={}, {:.1}ms, {:.1} decode tok/s, NCM Spec={}/{} in {} steps) | \
              Step-0 Top-5 Logits: [{}] | Upper-Tail {} | Dispatches={} | P4608 Cache Hit={:.1}%]",
             self.active_checkpoint,
             self.active_step,
@@ -1818,6 +1964,9 @@ impl CondenserEngineState {
             hit_eos,
             decode_ms,
             decode_tok_per_s,
+            ncm_accepted,
+            ncm_drafted,
+            ncm_steps,
             top5_str,
             routed_summary,
             total_routed_dispatches,

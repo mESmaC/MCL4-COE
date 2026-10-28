@@ -832,24 +832,165 @@ __global__ void __launch_bounds__(256, 2) dsv41_fp8_e8m0_gemm_v1_kernel(
     }
 }
 
+void launch_dsv41_fp8_gemm_batch_exact(
+    const __nv_bfloat16* d_x, const uint8_t* d_w, const uint8_t* d_s,
+    __nv_bfloat16* d_y, int T, int N_OUT, int K_DIM, cudaStream_t stream = 0
+);
+
+template <int M_CAP, int K_DIM>
+__global__ void __launch_bounds__(256, 3) dsv41_fp8_e8m0_gemm_batch_4row_v2_kernel(
+    const __nv_bfloat16* __restrict__ x_in, // [M_CAP, K_DIM]
+    const uint8_t* __restrict__ w_fp8,      // [N_OUT, K_DIM] (F8_E4M3)
+    const uint8_t* __restrict__ s_e8m0,     // [N_OUT/32, K_DIM/32] (F8_E8M0)
+    __nv_bfloat16* __restrict__ y_out,      // [M_CAP, N_OUT]
+    int m_valid,
+    int N_OUT
+) {
+    int wid  = threadIdx.x >> 5;
+    int lane = threadIdx.x & 31;
+    int row0 = blockIdx.x * 32 + wid * 4 + 0;
+    int row1 = row0 + 1;
+    int row2 = row0 + 2;
+    int row3 = row0 + 3;
+
+    constexpr int NUM_TILES   = K_DIM / 512;
+    constexpr int TILE_HALF_K = 256;
+    constexpr int TILE_STRIDE = 288;
+    __shared__ __nv_bfloat162 s_x2[M_CAP][TILE_STRIDE];
+
+    float acc0[M_CAP], acc1[M_CAP], acc2[M_CAP], acc3[M_CAP];
+    #pragma unroll
+    for (int m = 0; m < M_CAP; ++m) {
+        acc0[m] = 0.0f; acc1[m] = 0.0f; acc2[m] = 0.0f; acc3[m] = 0.0f;
+    }
+
+    const uint4* w0_u4 = reinterpret_cast<const uint4*>(w_fp8 + (size_t)row0 * K_DIM);
+    const uint4* w1_u4 = reinterpret_cast<const uint4*>(w_fp8 + (size_t)row1 * K_DIM);
+    const uint4* w2_u4 = reinterpret_cast<const uint4*>(w_fp8 + (size_t)row2 * K_DIM);
+    const uint4* w3_u4 = reinterpret_cast<const uint4*>(w_fp8 + (size_t)row3 * K_DIM);
+    const uint8_t* s0_row = s_e8m0 + (size_t)(row0 >> 5) * (K_DIM >> 5);
+    int swz_base = lane * 9;
+    int c = threadIdx.x;
+    int c_swz = c + (c >> 3);
+
+    #pragma unroll 1
+    for (int t = 0; t < NUM_TILES; ++t) {
+        #pragma unroll
+        for (int m = 0; m < M_CAP; ++m) {
+            if (m < m_valid) {
+                const __nv_bfloat162* x2_m = reinterpret_cast<const __nv_bfloat162*>(x_in + (size_t)m * K_DIM);
+                s_x2[m][c_swz] = x2_m[t * TILE_HALF_K + c];
+            }
+        }
+        __syncthreads();
+
+        if (row3 < N_OUT) {
+            int u4_idx = t * 32 + lane;
+            uint4 pk0 = dg_ld_l2_128b_u4(&w0_u4[u4_idx]);
+            uint4 pk1 = dg_ld_l2_128b_u4(&w1_u4[u4_idx]);
+            uint4 pk2 = dg_ld_l2_128b_u4(&w2_u4[u4_idx]);
+            uint4 pk3 = dg_ld_l2_128b_u4(&w3_u4[u4_idx]);
+            float blk_scale = decode_fp8_e8m0_fast(s0_row[u4_idx >> 1]);
+
+            uint32_t words0[4] = {pk0.x, pk0.y, pk0.z, pk0.w};
+            uint32_t words1[4] = {pk1.x, pk1.y, pk1.z, pk1.w};
+            uint32_t words2[4] = {pk2.x, pk2.y, pk2.z, pk2.w};
+            uint32_t words3[4] = {pk3.x, pk3.y, pk3.z, pk3.w};
+
+            float sub0[M_CAP], sub1[M_CAP], sub2[M_CAP], sub3[M_CAP];
+            #pragma unroll
+            for (int m = 0; m < M_CAP; ++m) {
+                sub0[m] = 0.0f; sub1[m] = 0.0f; sub2[m] = 0.0f; sub3[m] = 0.0f;
+            }
+
+            #pragma unroll
+            for (int w = 0; w < 4; ++w) {
+                uint32_t p0 = words0[w], p1 = words1[w], p2 = words2[w], p3 = words3[w];
+                float w0_0 = decode_fp8_e4m3_fast(p0 & 0xFF), w0_1 = decode_fp8_e4m3_fast((p0 >> 8) & 0xFF),
+                      w0_2 = decode_fp8_e4m3_fast((p0 >> 16) & 0xFF), w0_3 = decode_fp8_e4m3_fast((p0 >> 24) & 0xFF);
+                float w1_0 = decode_fp8_e4m3_fast(p1 & 0xFF), w1_1 = decode_fp8_e4m3_fast((p1 >> 8) & 0xFF),
+                      w1_2 = decode_fp8_e4m3_fast((p1 >> 16) & 0xFF), w1_3 = decode_fp8_e4m3_fast((p1 >> 24) & 0xFF);
+                float w2_0 = decode_fp8_e4m3_fast(p2 & 0xFF), w2_1 = decode_fp8_e4m3_fast((p2 >> 8) & 0xFF),
+                      w2_2 = decode_fp8_e4m3_fast((p2 >> 16) & 0xFF), w2_3 = decode_fp8_e4m3_fast((p2 >> 24) & 0xFF);
+                float w3_0 = decode_fp8_e4m3_fast(p3 & 0xFF), w3_1 = decode_fp8_e4m3_fast((p3 >> 8) & 0xFF),
+                      w3_2 = decode_fp8_e4m3_fast((p3 >> 16) & 0xFF), w3_3 = decode_fp8_e4m3_fast((p3 >> 24) & 0xFF);
+
+                #pragma unroll
+                for (int m = 0; m < M_CAP; ++m) {
+                    float2 x01 = __bfloat1622float2(s_x2[m][swz_base + w * 2 + 0]);
+                    float2 x23 = __bfloat1622float2(s_x2[m][swz_base + w * 2 + 1]);
+                    sub0[m] += w0_0 * x01.x + w0_1 * x01.y + w0_2 * x23.x + w0_3 * x23.y;
+                    sub1[m] += w1_0 * x01.x + w1_1 * x01.y + w1_2 * x23.x + w1_3 * x23.y;
+                    sub2[m] += w2_0 * x01.x + w2_1 * x01.y + w2_2 * x23.x + w2_3 * x23.y;
+                    sub3[m] += w3_0 * x01.x + w3_1 * x01.y + w3_2 * x23.x + w3_3 * x23.y;
+                }
+            }
+            #pragma unroll
+            for (int m = 0; m < M_CAP; ++m) {
+                acc0[m] += sub0[m] * blk_scale;
+                acc1[m] += sub1[m] * blk_scale;
+                acc2[m] += sub2[m] * blk_scale;
+                acc3[m] += sub3[m] * blk_scale;
+            }
+        }
+        __syncthreads();
+    }
+
+    if (row3 >= N_OUT) return;
+    #pragma unroll
+    for (int m = 0; m < M_CAP; ++m) {
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) {
+            acc0[m] += __shfl_xor_sync(0xffffffff, acc0[m], off);
+            acc1[m] += __shfl_xor_sync(0xffffffff, acc1[m], off);
+            acc2[m] += __shfl_xor_sync(0xffffffff, acc2[m], off);
+            acc3[m] += __shfl_xor_sync(0xffffffff, acc3[m], off);
+        }
+        if (lane == 0 && m < m_valid) {
+            __nv_bfloat16* y_m = y_out + (size_t)m * N_OUT;
+            y_m[row0] = __float2bfloat16(acc0[m]);
+            y_m[row1] = __float2bfloat16(acc1[m]);
+            y_m[row2] = __float2bfloat16(acc2[m]);
+            y_m[row3] = __float2bfloat16(acc3[m]);
+        }
+    }
+}
+
+static int g_cur_is_decode = 0;
+
 void launch_dsv41_fp8_gemm(
     const __nv_bfloat16* d_x, const uint8_t* d_w, const uint8_t* d_s,
     __nv_bfloat16* d_y, int T, int N_OUT, int K_DIM, cudaStream_t stream = 0
 ) {
     int blocks16 = (N_OUT + 15) / 16; // 16 rows per block at T=16
-    int blocks32 = (N_OUT + 31) / 32; // 32 rows per block at T=1 (4 rows/warp!)
+    int blocks32 = (N_OUT + 31) / 32; // 32 rows per block at T=1..8 (4 rows/warp!)
     if (K_DIM == 5120) {
-        if (T <= 1) dsv41_fp8_e8m0_gemm_t1_4row_v2_kernel<5120><<<blocks32, 256, 0, stream>>>(d_x, d_w, d_s, d_y, N_OUT);
-        else        dsv41_fp8_e8m0_gemm_v1_kernel<16, 5120><<<blocks16, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
+        if (T <= 1)                  dsv41_fp8_e8m0_gemm_t1_4row_v2_kernel<5120><<<blocks32, 256, 0, stream>>>(d_x, d_w, d_s, d_y, N_OUT);
+        else if (!g_cur_is_decode)   dsv41_fp8_e8m0_gemm_v1_kernel<16, 5120><<<blocks16, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
+        else if (T <= 2)             dsv41_fp8_e8m0_gemm_batch_4row_v2_kernel<2, 5120><<<blocks32, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
+        else if (T <= 4)             dsv41_fp8_e8m0_gemm_batch_4row_v2_kernel<4, 5120><<<blocks32, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
+        else if (T <= 8)             dsv41_fp8_e8m0_gemm_batch_4row_v2_kernel<8, 5120><<<blocks32, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
+        else                         dsv41_fp8_e8m0_gemm_v1_kernel<16, 5120><<<blocks16, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
     } else if (K_DIM == 1280) {
-        if (T <= 1) dsv41_fp8_e8m0_gemm_t1_4row_v2_kernel<1280><<<blocks32, 256, 0, stream>>>(d_x, d_w, d_s, d_y, N_OUT);
-        else        dsv41_fp8_e8m0_gemm_v1_kernel<16, 1280><<<blocks16, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
+        if (T <= 1)                  dsv41_fp8_e8m0_gemm_t1_4row_v2_kernel<1280><<<blocks32, 256, 0, stream>>>(d_x, d_w, d_s, d_y, N_OUT);
+        else if (!g_cur_is_decode)   dsv41_fp8_e8m0_gemm_v1_kernel<16, 1280><<<blocks16, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
+        else if (T <= 2)             dsv41_fp8_e8m0_gemm_batch_4row_v2_kernel<2, 1280><<<blocks32, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
+        else if (T <= 4)             dsv41_fp8_e8m0_gemm_batch_4row_v2_kernel<4, 1280><<<blocks32, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
+        else if (T <= 8)             dsv41_fp8_e8m0_gemm_batch_4row_v2_kernel<8, 1280><<<blocks32, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
+        else                         dsv41_fp8_e8m0_gemm_v1_kernel<16, 1280><<<blocks16, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
     } else if (K_DIM == 8192) {
-        if (T <= 1) dsv41_fp8_e8m0_gemm_t1_4row_v2_kernel<8192><<<blocks32, 256, 0, stream>>>(d_x, d_w, d_s, d_y, N_OUT);
-        else        dsv41_fp8_e8m0_gemm_v1_kernel<16, 8192><<<blocks16, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
+        if (T <= 1)                  dsv41_fp8_e8m0_gemm_t1_4row_v2_kernel<8192><<<blocks32, 256, 0, stream>>>(d_x, d_w, d_s, d_y, N_OUT);
+        else if (!g_cur_is_decode)   dsv41_fp8_e8m0_gemm_v1_kernel<16, 8192><<<blocks16, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
+        else if (T <= 2)             dsv41_fp8_e8m0_gemm_batch_4row_v2_kernel<2, 8192><<<blocks32, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
+        else if (T <= 4)             dsv41_fp8_e8m0_gemm_batch_4row_v2_kernel<4, 8192><<<blocks32, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
+        else if (T <= 8)             dsv41_fp8_e8m0_gemm_batch_4row_v2_kernel<8, 8192><<<blocks32, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
+        else                         dsv41_fp8_e8m0_gemm_v1_kernel<16, 8192><<<blocks16, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
     } else if (K_DIM == 6144) {
-        if (T <= 1) dsv41_fp8_e8m0_gemm_t1_4row_v2_kernel<6144><<<blocks32, 256, 0, stream>>>(d_x, d_w, d_s, d_y, N_OUT);
-        else        dsv41_fp8_e8m0_gemm_v1_kernel<16, 6144><<<blocks16, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
+        if (T <= 1)                  dsv41_fp8_e8m0_gemm_t1_4row_v2_kernel<6144><<<blocks32, 256, 0, stream>>>(d_x, d_w, d_s, d_y, N_OUT);
+        else if (T <= 2)             dsv41_fp8_e8m0_gemm_batch_4row_v2_kernel<2, 6144><<<blocks32, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
+        else if (T <= 4)             dsv41_fp8_e8m0_gemm_batch_4row_v2_kernel<4, 6144><<<blocks32, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
+        else if (T <= 8)             dsv41_fp8_e8m0_gemm_batch_4row_v2_kernel<8, 6144><<<blocks32, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
+        else                         dsv41_fp8_e8m0_gemm_v1_kernel<16, 6144><<<blocks16, 256, 0, stream>>>(d_x, d_w, d_s, d_y, T, N_OUT);
     }
 }
 
@@ -1556,20 +1697,7 @@ __global__ void __launch_bounds__(256, 2) dsv41_grouped_nvfp4_moe_stage1_2row_v2
     constexpr int NUM_TILES   = 5;
     constexpr int TILE_HALF_K = 512;
     constexpr int TILE_STRIDE = 544;
-    __shared__ __nv_bfloat162 s_x2[M_CAP][NUM_TILES * TILE_STRIDE];
-
-    for (int m = 0; m < m_valid; ++m) {
-        int tok_id = task->token_ids[m];
-        const __nv_bfloat162* src = reinterpret_cast<const __nv_bfloat162*>(
-            x_tokens + (size_t)tok_id * DS_DIM
-        );
-        for (int idx = threadIdx.x; idx < DS_HALF_DIM; idx += 256) {
-            int t  = idx >> 9;
-            int c2 = idx & 511;
-            s_x2[m][t * TILE_STRIDE + c2 + (c2 >> 4)] = src[idx];
-        }
-    }
-    __syncthreads();
+    __shared__ __nv_bfloat162 s_x2[M_CAP][TILE_STRIDE];
 
     float my_lut_val = get_nvfp4_lut_lane_val(lane);
     const Dsv41Mcl4cExpertPacket* pkt = &arena[task->arena_slot];
@@ -1593,9 +1721,23 @@ __global__ void __launch_bounds__(256, 2) dsv41_grouped_nvfp4_moe_stage1_2row_v2
     }
 
     int swz_base = lane * 17;
+    int c0 = threadIdx.x;
+    int c1 = threadIdx.x + 256;
+    int swz_c0 = c0 + (c0 >> 4);
+    int swz_c1 = c1 + (c1 >> 4);
 
     #pragma unroll 1
     for (int t = 0; t < NUM_TILES; ++t) {
+        for (int m = 0; m < m_valid; ++m) {
+            int tok_id = task->token_ids[m] & 0xFF;
+            const __nv_bfloat162* src = reinterpret_cast<const __nv_bfloat162*>(
+                x_tokens + (size_t)tok_id * DS_DIM
+            ) + t * TILE_HALF_K;
+            s_x2[m][swz_c0] = src[c0];
+            s_x2[m][swz_c1] = src[c1];
+        }
+        __syncthreads();
+
         int u4_idx = t * 32 + lane; // 0..159
         uint4 g0_pack = dg_ld_evict_first_u4(&w1_0_u4[u4_idx]);
         uint4 u0_pack = dg_ld_evict_first_u4(&w3_0_u4[u4_idx]);
@@ -1616,7 +1758,7 @@ __global__ void __launch_bounds__(256, 2) dsv41_grouped_nvfp4_moe_stage1_2row_v2
         uint32_t uw0[4] = {u0_pack.x, u0_pack.y, u0_pack.z, u0_pack.w};
         uint32_t gw1[4] = {g1_pack.x, g1_pack.y, g1_pack.z, g1_pack.w};
         uint32_t uw1[4] = {u1_pack.x, u1_pack.y, u1_pack.z, u1_pack.w};
-        int tile_swz = t * TILE_STRIDE + swz_base;
+        int tile_swz = swz_base;
 
         #pragma unroll
         for (int grp16 = 0; grp16 < 2; ++grp16) {
@@ -1673,6 +1815,7 @@ __global__ void __launch_bounds__(256, 2) dsv41_grouped_nvfp4_moe_stage1_2row_v2
                 acc_u1[m] += sub_u1[m] * us1;
             }
         }
+        __syncthreads();
     }
 
     float g_s2 = pkt->w1_scale2;
@@ -1849,19 +1992,7 @@ __global__ void __launch_bounds__(256, 2) dsv41_grouped_nvfp4_moe_stage2_down_v1
     constexpr int NUM_TILES   = 3;
     constexpr int TILE_HALF_K = 512;
     constexpr int TILE_STRIDE = 544;
-    __shared__ __nv_bfloat162 s_inter2[M_CAP][NUM_TILES * TILE_STRIDE];
-
-    for (int m = 0; m < m_valid; ++m) {
-        const float2* src = reinterpret_cast<const float2*>(
-            inter_buf + ((size_t)g_idx * M_CAP + m) * DS_MOE_INTER
-        );
-        for (int idx = threadIdx.x; idx < DS_HALF_INTER; idx += 256) {
-            int t  = idx >> 9;
-            int c2 = idx & 511;
-            s_inter2[m][t * TILE_STRIDE + c2 + (c2 >> 4)] = __float22bfloat162_rn(src[idx]);
-        }
-    }
-    __syncthreads();
+    __shared__ __nv_bfloat162 s_inter2[M_CAP][TILE_STRIDE];
 
     float my_lut_val = get_nvfp4_lut_lane_val(lane);
     const Dsv41Mcl4cExpertPacket* pkt = &arena[task->arena_slot];
@@ -1878,8 +2009,27 @@ __global__ void __launch_bounds__(256, 2) dsv41_grouped_nvfp4_moe_stage2_down_v1
         acc1[m] = 0.0f;
     }
 
+    int c0 = threadIdx.x;
+    int c1 = threadIdx.x + 256;
+    int swz_c0 = c0 + (c0 >> 4);
+    int swz_c1 = c1 + (c1 >> 4);
+
     #pragma unroll 1
     for (int t = 0; t < NUM_TILES; ++t) {
+        int k_base = t * TILE_HALF_K;
+        for (int m = 0; m < m_valid; ++m) {
+            const float2* src = reinterpret_cast<const float2*>(
+                inter_buf + ((size_t)g_idx * M_CAP + m) * DS_MOE_INTER
+            ) + k_base;
+            s_inter2[m][swz_c0] = (k_base + c0 < DS_HALF_INTER)
+                ? __float22bfloat162_rn(src[c0])
+                : __float22bfloat162_rn(make_float2(0.0f, 0.0f));
+            s_inter2[m][swz_c1] = (k_base + c1 < DS_HALF_INTER)
+                ? __float22bfloat162_rn(src[c1])
+                : __float22bfloat162_rn(make_float2(0.0f, 0.0f));
+        }
+        __syncthreads();
+
         int u4_idx = t * 32 + lane; // 0..95 (valid: 0..71)
         int valid_u4 = (u4_idx < 72) ? 1 : 0;
         uint4 d0_pack = dg_ld_pred_evict_first_u4(&w2_0_u4[u4_idx], valid_u4);
@@ -1896,7 +2046,7 @@ __global__ void __launch_bounds__(256, 2) dsv41_grouped_nvfp4_moe_stage2_down_v1
         };
         uint32_t dw0[4] = {d0_pack.x, d0_pack.y, d0_pack.z, d0_pack.w};
         uint32_t dw1[4] = {d1_pack.x, d1_pack.y, d1_pack.z, d1_pack.w};
-        int tile_swz = t * TILE_STRIDE + (valid_u4 ? lane : 0) * 17;
+        int tile_swz = (valid_u4 ? lane : 0) * 17;
 
         #pragma unroll
         for (int grp16 = 0; grp16 < 2; ++grp16) {
@@ -1937,6 +2087,7 @@ __global__ void __launch_bounds__(256, 2) dsv41_grouped_nvfp4_moe_stage2_down_v1
                 acc1[m] += sub_d1[m] * ds1;
             }
         }
+        __syncthreads();
     }
 
     float d_s2 = pkt->w2_scale2;
@@ -1948,10 +2099,18 @@ __global__ void __launch_bounds__(256, 2) dsv41_grouped_nvfp4_moe_stage2_down_v1
             acc1[m] += __shfl_xor_sync(0xffffffff, acc1[m], off);
         }
         if (lane == 0 && m < m_valid) {
-            int tok_id = task->token_ids[m];
+            int raw_tok = task->token_ids[m];
+            int tok_id  = raw_tok & 0xFF;
+            int k_plus1 = raw_tok >> 8;
             float w_tok = task->weights[m];
-            atomicAdd(&out_accum[(size_t)tok_id * DS_DIM + row0], acc0[m] * d_s2 * w_tok);
-            atomicAdd(&out_accum[(size_t)tok_id * DS_DIM + row1], acc1[m] * d_s2 * w_tok);
+            if (k_plus1 > 0) {
+                size_t slot_idx = (size_t)(tok_id * DS_TOP_K + (k_plus1 - 1)) * DS_DIM;
+                out_accum[slot_idx + row0] = acc0[m] * d_s2 * w_tok;
+                out_accum[slot_idx + row1] = acc1[m] * d_s2 * w_tok;
+            } else {
+                atomicAdd(&out_accum[(size_t)tok_id * DS_DIM + row0], acc0[m] * d_s2 * w_tok);
+                atomicAdd(&out_accum[(size_t)tok_id * DS_DIM + row1], acc1[m] * d_s2 * w_tok);
+            }
         }
     }
 }
@@ -2294,9 +2453,15 @@ void launch_dsv41_grouped_moe(
     } else if (max_m <= 2) {
         dsv41_grouped_nvfp4_moe_stage1_2row_v2_kernel<2><<<g1_2row, 256, 0, stream>>>(d_x_tokens, d_groups, d_arena, d_inter);
         dsv41_grouped_nvfp4_moe_stage2_down_v1_kernel<2><<<g2, 256, 0, stream>>>(d_inter, d_groups, d_arena, d_out);
-    } else {
+    } else if (!g_cur_is_decode) {
         dsv41_grouped_nvfp4_moe_stage1_tc_v3_kernel<8><<<g1_2row, 256, 0, stream>>>(d_x_tokens, d_groups, d_arena, d_inter);
         dsv41_grouped_nvfp4_moe_stage2_tc_v3_kernel<8><<<g2_tc, 256, 0, stream>>>(d_inter, d_groups, d_arena, d_out);
+    } else if (max_m <= 4) {
+        dsv41_grouped_nvfp4_moe_stage1_2row_v2_kernel<4><<<g1_2row, 256, 0, stream>>>(d_x_tokens, d_groups, d_arena, d_inter);
+        dsv41_grouped_nvfp4_moe_stage2_down_v1_kernel<4><<<g2, 256, 0, stream>>>(d_inter, d_groups, d_arena, d_out);
+    } else {
+        dsv41_grouped_nvfp4_moe_stage1_2row_v2_kernel<8><<<g1_2row, 256, 0, stream>>>(d_x_tokens, d_groups, d_arena, d_inter);
+        dsv41_grouped_nvfp4_moe_stage2_down_v1_kernel<8><<<g2, 256, 0, stream>>>(d_inter, d_groups, d_arena, d_out);
     }
 }
 
@@ -5798,15 +5963,299 @@ __global__ void __launch_bounds__(256, 3) dsv41_shared_expert_stage2_only_t1_ker
     }
 }
 
+template <int M_CAP>
+__global__ void __launch_bounds__(256, 3) dsv41_shared_expert_stage1_swiglu_batch_kernel(
+    const __nv_bfloat16* __restrict__ x_in, // [M_CAP, 5120]
+    const uint8_t* __restrict__ w1_fp8,     // [2304, 5120]
+    const uint8_t* __restrict__ s1_e8m0,    // [72, 160]
+    const uint8_t* __restrict__ w3_fp8,     // [2304, 5120]
+    const uint8_t* __restrict__ s3_e8m0,    // [72, 160]
+    __nv_bfloat16* __restrict__ inter_out,  // [M_CAP, 2304]
+    int m_valid
+) {
+    int wid  = threadIdx.x >> 5;
+    int lane = threadIdx.x & 31;
+    int row0 = blockIdx.x * 32 + wid * 4 + 0;
+    int row1 = row0 + 1;
+    int row2 = row0 + 2;
+    int row3 = row0 + 3;
+
+    constexpr int NUM_TILES   = 10;
+    constexpr int TILE_HALF_K = 256;
+    constexpr int TILE_STRIDE = 288;
+    __shared__ __nv_bfloat162 s_x2[M_CAP][TILE_STRIDE];
+
+    float g0[M_CAP], g1[M_CAP], g2[M_CAP], g3[M_CAP];
+    float u0[M_CAP], u1[M_CAP], u2[M_CAP], u3[M_CAP];
+    #pragma unroll
+    for (int m = 0; m < M_CAP; ++m) {
+        g0[m] = 0.0f; g1[m] = 0.0f; g2[m] = 0.0f; g3[m] = 0.0f;
+        u0[m] = 0.0f; u1[m] = 0.0f; u2[m] = 0.0f; u3[m] = 0.0f;
+    }
+
+    const uint4* w1_0 = reinterpret_cast<const uint4*>(w1_fp8 + (size_t)row0 * DS_DIM);
+    const uint4* w1_1 = reinterpret_cast<const uint4*>(w1_fp8 + (size_t)row1 * DS_DIM);
+    const uint4* w1_2 = reinterpret_cast<const uint4*>(w1_fp8 + (size_t)row2 * DS_DIM);
+    const uint4* w1_3 = reinterpret_cast<const uint4*>(w1_fp8 + (size_t)row3 * DS_DIM);
+
+    const uint4* w3_0 = reinterpret_cast<const uint4*>(w3_fp8 + (size_t)row0 * DS_DIM);
+    const uint4* w3_1 = reinterpret_cast<const uint4*>(w3_fp8 + (size_t)row1 * DS_DIM);
+    const uint4* w3_2 = reinterpret_cast<const uint4*>(w3_fp8 + (size_t)row2 * DS_DIM);
+    const uint4* w3_3 = reinterpret_cast<const uint4*>(w3_fp8 + (size_t)row3 * DS_DIM);
+
+    const uint8_t* s1_row = s1_e8m0 + (size_t)(row0 >> 5) * 160;
+    const uint8_t* s3_row = s3_e8m0 + (size_t)(row0 >> 5) * 160;
+    int swz_base = lane * 9;
+    int c = threadIdx.x;
+    int c_swz = c + (c >> 3);
+
+    #pragma unroll 1
+    for (int t = 0; t < NUM_TILES; ++t) {
+        #pragma unroll
+        for (int m = 0; m < M_CAP; ++m) {
+            if (m < m_valid) {
+                const __nv_bfloat162* x2_m = reinterpret_cast<const __nv_bfloat162*>(x_in + (size_t)m * DS_DIM);
+                s_x2[m][c_swz] = x2_m[t * TILE_HALF_K + c];
+            }
+        }
+        __syncthreads();
+
+        int u4_idx = t * 32 + lane;
+        float sc1 = decode_fp8_e8m0_fast(s1_row[u4_idx >> 1]);
+        float sc3 = decode_fp8_e8m0_fast(s3_row[u4_idx >> 1]);
+
+        uint4 pk0 = dg_ld_l2_128b_u4(&w1_0[u4_idx]);
+        uint4 pk1 = dg_ld_l2_128b_u4(&w1_1[u4_idx]);
+        uint4 pk2 = dg_ld_l2_128b_u4(&w1_2[u4_idx]);
+        uint4 pk3 = dg_ld_l2_128b_u4(&w1_3[u4_idx]);
+        uint32_t gw0[4] = {pk0.x, pk0.y, pk0.z, pk0.w};
+        uint32_t gw1[4] = {pk1.x, pk1.y, pk1.z, pk1.w};
+        uint32_t gw2[4] = {pk2.x, pk2.y, pk2.z, pk2.w};
+        uint32_t gw3[4] = {pk3.x, pk3.y, pk3.z, pk3.w};
+
+        float sg0[M_CAP], sg1[M_CAP], sg2[M_CAP], sg3[M_CAP];
+        #pragma unroll
+        for (int m = 0; m < M_CAP; ++m) {
+            sg0[m] = 0.0f; sg1[m] = 0.0f; sg2[m] = 0.0f; sg3[m] = 0.0f;
+        }
+        #pragma unroll
+        for (int w = 0; w < 4; ++w) {
+            uint32_t p0 = gw0[w], p1 = gw1[w], p2 = gw2[w], p3 = gw3[w];
+            float w0_0 = decode_fp8_e4m3_fast(p0 & 0xFF), w0_1 = decode_fp8_e4m3_fast((p0 >> 8) & 0xFF),
+                  w0_2 = decode_fp8_e4m3_fast((p0 >> 16) & 0xFF), w0_3 = decode_fp8_e4m3_fast((p0 >> 24) & 0xFF);
+            float w1_0_f = decode_fp8_e4m3_fast(p1 & 0xFF), w1_1_f = decode_fp8_e4m3_fast((p1 >> 8) & 0xFF),
+                  w1_2_f = decode_fp8_e4m3_fast((p1 >> 16) & 0xFF), w1_3_f = decode_fp8_e4m3_fast((p1 >> 24) & 0xFF);
+            float w2_0 = decode_fp8_e4m3_fast(p2 & 0xFF), w2_1 = decode_fp8_e4m3_fast((p2 >> 8) & 0xFF),
+                  w2_2 = decode_fp8_e4m3_fast((p2 >> 16) & 0xFF), w2_3 = decode_fp8_e4m3_fast((p2 >> 24) & 0xFF);
+            float w3_0_f = decode_fp8_e4m3_fast(p3 & 0xFF), w3_1_f = decode_fp8_e4m3_fast((p3 >> 8) & 0xFF),
+                  w3_2_f = decode_fp8_e4m3_fast((p3 >> 16) & 0xFF), w3_3_f = decode_fp8_e4m3_fast((p3 >> 24) & 0xFF);
+            #pragma unroll
+            for (int m = 0; m < M_CAP; ++m) {
+                float2 x01 = __bfloat1622float2(s_x2[m][swz_base + w * 2 + 0]);
+                float2 x23 = __bfloat1622float2(s_x2[m][swz_base + w * 2 + 1]);
+                sg0[m] += w0_0   * x01.x + w0_1   * x01.y + w0_2   * x23.x + w0_3   * x23.y;
+                sg1[m] += w1_0_f * x01.x + w1_1_f * x01.y + w1_2_f * x23.x + w1_3_f * x23.y;
+                sg2[m] += w2_0   * x01.x + w2_1   * x01.y + w2_2   * x23.x + w2_3   * x23.y;
+                sg3[m] += w3_0_f * x01.x + w3_1_f * x01.y + w3_2_f * x23.x + w3_3_f * x23.y;
+            }
+        }
+        #pragma unroll
+        for (int m = 0; m < M_CAP; ++m) {
+            g0[m] += sg0[m] * sc1; g1[m] += sg1[m] * sc1; g2[m] += sg2[m] * sc1; g3[m] += sg3[m] * sc1;
+        }
+
+        uint4 uk0 = dg_ld_l2_128b_u4(&w3_0[u4_idx]);
+        uint4 uk1 = dg_ld_l2_128b_u4(&w3_1[u4_idx]);
+        uint4 uk2 = dg_ld_l2_128b_u4(&w3_2[u4_idx]);
+        uint4 uk3 = dg_ld_l2_128b_u4(&w3_3[u4_idx]);
+        uint32_t uw0[4] = {uk0.x, uk0.y, uk0.z, uk0.w};
+        uint32_t uw1[4] = {uk1.x, uk1.y, uk1.z, uk1.w};
+        uint32_t uw2[4] = {uk2.x, uk2.y, uk2.z, uk2.w};
+        uint32_t uw3[4] = {uk3.x, uk3.y, uk3.z, uk3.w};
+
+        float su0[M_CAP], su1[M_CAP], su2[M_CAP], su3[M_CAP];
+        #pragma unroll
+        for (int m = 0; m < M_CAP; ++m) {
+            su0[m] = 0.0f; su1[m] = 0.0f; su2[m] = 0.0f; su3[m] = 0.0f;
+        }
+        #pragma unroll
+        for (int w = 0; w < 4; ++w) {
+            uint32_t p0 = uw0[w], p1 = uw1[w], p2 = uw2[w], p3 = uw3[w];
+            float w0_0 = decode_fp8_e4m3_fast(p0 & 0xFF), w0_1 = decode_fp8_e4m3_fast((p0 >> 8) & 0xFF),
+                  w0_2 = decode_fp8_e4m3_fast((p0 >> 16) & 0xFF), w0_3 = decode_fp8_e4m3_fast((p0 >> 24) & 0xFF);
+            float w1_0_f = decode_fp8_e4m3_fast(p1 & 0xFF), w1_1_f = decode_fp8_e4m3_fast((p1 >> 8) & 0xFF),
+                  w1_2_f = decode_fp8_e4m3_fast((p1 >> 16) & 0xFF), w1_3_f = decode_fp8_e4m3_fast((p1 >> 24) & 0xFF);
+            float w2_0 = decode_fp8_e4m3_fast(p2 & 0xFF), w2_1 = decode_fp8_e4m3_fast((p2 >> 8) & 0xFF),
+                  w2_2 = decode_fp8_e4m3_fast((p2 >> 16) & 0xFF), w2_3 = decode_fp8_e4m3_fast((p2 >> 24) & 0xFF);
+            float w3_0_f = decode_fp8_e4m3_fast(p3 & 0xFF), w3_1_f = decode_fp8_e4m3_fast((p3 >> 8) & 0xFF),
+                  w3_2_f = decode_fp8_e4m3_fast((p3 >> 16) & 0xFF), w3_3_f = decode_fp8_e4m3_fast((p3 >> 24) & 0xFF);
+            #pragma unroll
+            for (int m = 0; m < M_CAP; ++m) {
+                float2 x01 = __bfloat1622float2(s_x2[m][swz_base + w * 2 + 0]);
+                float2 x23 = __bfloat1622float2(s_x2[m][swz_base + w * 2 + 1]);
+                su0[m] += w0_0   * x01.x + w0_1   * x01.y + w0_2   * x23.x + w0_3   * x23.y;
+                su1[m] += w1_0_f * x01.x + w1_1_f * x01.y + w1_2_f * x23.x + w1_3_f * x23.y;
+                su2[m] += w2_0   * x01.x + w2_1   * x01.y + w2_2   * x23.x + w2_3   * x23.y;
+                su3[m] += w3_0_f * x01.x + w3_1_f * x01.y + w3_2_f * x23.x + w3_3_f * x23.y;
+            }
+        }
+        #pragma unroll
+        for (int m = 0; m < M_CAP; ++m) {
+            u0[m] += su0[m] * sc3; u1[m] += su1[m] * sc3; u2[m] += su2[m] * sc3; u3[m] += su3[m] * sc3;
+        }
+        __syncthreads();
+    }
+
+    auto swiglu_clamp = [](float g, float u) -> __nv_bfloat16 {
+        float gc = fminf(g, 10.0f);
+        float uc = fminf(fmaxf(u, -10.0f), 10.0f);
+        return __float2bfloat16(cr_fast_silu_f32(gc) * uc);
+    };
+
+    #pragma unroll
+    for (int m = 0; m < M_CAP; ++m) {
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) {
+            g0[m] += __shfl_xor_sync(0xffffffff, g0[m], off);
+            g1[m] += __shfl_xor_sync(0xffffffff, g1[m], off);
+            g2[m] += __shfl_xor_sync(0xffffffff, g2[m], off);
+            g3[m] += __shfl_xor_sync(0xffffffff, g3[m], off);
+            u0[m] += __shfl_xor_sync(0xffffffff, u0[m], off);
+            u1[m] += __shfl_xor_sync(0xffffffff, u1[m], off);
+            u2[m] += __shfl_xor_sync(0xffffffff, u2[m], off);
+            u3[m] += __shfl_xor_sync(0xffffffff, u3[m], off);
+        }
+        if (lane == 0 && m < m_valid) {
+            __nv_bfloat16* out_m = inter_out + (size_t)m * DS_MOE_INTER;
+            out_m[row0] = swiglu_clamp(g0[m], u0[m]);
+            out_m[row1] = swiglu_clamp(g1[m], u1[m]);
+            out_m[row2] = swiglu_clamp(g2[m], u2[m]);
+            out_m[row3] = swiglu_clamp(g3[m], u3[m]);
+        }
+    }
+}
+
+template <int M_CAP>
+__global__ void __launch_bounds__(256, 3) dsv41_shared_expert_stage2_only_batch_kernel(
+    const __nv_bfloat16* __restrict__ inter_in, // [M_CAP, 2304]
+    const uint8_t* __restrict__ w2_fp8,         // [5120, 2304]
+    const uint8_t* __restrict__ s2_e8m0,        // [160, 72]
+    float* __restrict__ shared_out,             // [M_CAP, 5120]
+    int m_valid
+) {
+    int wid  = threadIdx.x >> 5;
+    int lane = threadIdx.x & 31;
+    int row0 = blockIdx.x * 32 + wid * 4 + 0;
+    int row1 = row0 + 1;
+    int row2 = row0 + 2;
+    int row3 = row0 + 3;
+
+    __shared__ __nv_bfloat162 s_inter2[M_CAP][128];
+
+    float acc0[M_CAP], acc1[M_CAP], acc2[M_CAP], acc3[M_CAP];
+    #pragma unroll
+    for (int m = 0; m < M_CAP; ++m) {
+        acc0[m] = 0.0f; acc1[m] = 0.0f; acc2[m] = 0.0f; acc3[m] = 0.0f;
+    }
+
+    const uint2* w0_u2 = reinterpret_cast<const uint2*>(w2_fp8 + (size_t)row0 * DS_MOE_INTER);
+    const uint2* w1_u2 = reinterpret_cast<const uint2*>(w2_fp8 + (size_t)row1 * DS_MOE_INTER);
+    const uint2* w2_u2 = reinterpret_cast<const uint2*>(w2_fp8 + (size_t)row2 * DS_MOE_INTER);
+    const uint2* w3_u2 = reinterpret_cast<const uint2*>(w2_fp8 + (size_t)row3 * DS_MOE_INTER);
+    const uint8_t* s_row = s2_e8m0 + (size_t)(row0 >> 5) * 72;
+
+    #pragma unroll 1
+    for (int t = 0; t < 9; ++t) {
+        if (threadIdx.x < 128) {
+            #pragma unroll
+            for (int m = 0; m < M_CAP; ++m) {
+                if (m < m_valid) {
+                    const __nv_bfloat162* x2_m = reinterpret_cast<const __nv_bfloat162*>(inter_in + (size_t)m * DS_MOE_INTER);
+                    s_inter2[m][threadIdx.x] = x2_m[t * 128 + threadIdx.x];
+                }
+            }
+        }
+        __syncthreads();
+
+        int u2_idx = t * 32 + lane;
+        uint2 pk0 = w0_u2[u2_idx];
+        uint2 pk1 = w1_u2[u2_idx];
+        uint2 pk2 = w2_u2[u2_idx];
+        uint2 pk3 = w3_u2[u2_idx];
+        float blk_scale = decode_fp8_e8m0_fast(s_row[t * 8 + (lane >> 2)]);
+
+        uint32_t words0[2] = {pk0.x, pk0.y};
+        uint32_t words1[2] = {pk1.x, pk1.y};
+        uint32_t words2[2] = {pk2.x, pk2.y};
+        uint32_t words3[2] = {pk3.x, pk3.y};
+        int base_pair = lane * 4;
+
+        float sub0[M_CAP], sub1[M_CAP], sub2[M_CAP], sub3[M_CAP];
+        #pragma unroll
+        for (int m = 0; m < M_CAP; ++m) {
+            sub0[m] = 0.0f; sub1[m] = 0.0f; sub2[m] = 0.0f; sub3[m] = 0.0f;
+        }
+
+        #pragma unroll
+        for (int w = 0; w < 2; ++w) {
+            uint32_t p0 = words0[w], p1 = words1[w], p2 = words2[w], p3 = words3[w];
+            float w0_0 = decode_fp8_e4m3_fast(p0 & 0xFF), w0_1 = decode_fp8_e4m3_fast((p0 >> 8) & 0xFF),
+                  w0_2 = decode_fp8_e4m3_fast((p0 >> 16) & 0xFF), w0_3 = decode_fp8_e4m3_fast((p0 >> 24) & 0xFF);
+            float w1_0_f = decode_fp8_e4m3_fast(p1 & 0xFF), w1_1_f = decode_fp8_e4m3_fast((p1 >> 8) & 0xFF),
+                  w1_2_f = decode_fp8_e4m3_fast((p1 >> 16) & 0xFF), w1_3_f = decode_fp8_e4m3_fast((p1 >> 24) & 0xFF);
+            float w2_0 = decode_fp8_e4m3_fast(p2 & 0xFF), w2_1 = decode_fp8_e4m3_fast((p2 >> 8) & 0xFF),
+                  w2_2 = decode_fp8_e4m3_fast((p2 >> 16) & 0xFF), w2_3 = decode_fp8_e4m3_fast((p2 >> 24) & 0xFF);
+            float w3_0_f = decode_fp8_e4m3_fast(p3 & 0xFF), w3_1_f = decode_fp8_e4m3_fast((p3 >> 8) & 0xFF),
+                  w3_2_f = decode_fp8_e4m3_fast((p3 >> 16) & 0xFF), w3_3_f = decode_fp8_e4m3_fast((p3 >> 24) & 0xFF);
+            #pragma unroll
+            for (int m = 0; m < M_CAP; ++m) {
+                float2 x01 = __bfloat1622float2(s_inter2[m][base_pair + w * 2 + 0]);
+                float2 x23 = __bfloat1622float2(s_inter2[m][base_pair + w * 2 + 1]);
+                sub0[m] += w0_0   * x01.x + w0_1   * x01.y + w0_2   * x23.x + w0_3   * x23.y;
+                sub1[m] += w1_0_f * x01.x + w1_1_f * x01.y + w1_2_f * x23.x + w1_3_f * x23.y;
+                sub2[m] += w2_0   * x01.x + w2_1   * x01.y + w2_2   * x23.x + w2_3   * x23.y;
+                sub3[m] += w3_0_f * x01.x + w3_1_f * x01.y + w3_2_f * x23.x + w3_3_f * x23.y;
+            }
+        }
+        #pragma unroll
+        for (int m = 0; m < M_CAP; ++m) {
+            acc0[m] += sub0[m] * blk_scale;
+            acc1[m] += sub1[m] * blk_scale;
+            acc2[m] += sub2[m] * blk_scale;
+            acc3[m] += sub3[m] * blk_scale;
+        }
+        __syncthreads();
+    }
+
+    #pragma unroll
+    for (int m = 0; m < M_CAP; ++m) {
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) {
+            acc0[m] += __shfl_xor_sync(0xffffffff, acc0[m], off);
+            acc1[m] += __shfl_xor_sync(0xffffffff, acc1[m], off);
+            acc2[m] += __shfl_xor_sync(0xffffffff, acc2[m], off);
+            acc3[m] += __shfl_xor_sync(0xffffffff, acc3[m], off);
+        }
+        if (lane == 0 && m < m_valid) {
+            float* sh_m = shared_out + (size_t)m * DS_DIM;
+            sh_m[row0] = acc0[m];
+            sh_m[row1] = acc1[m];
+            sh_m[row2] = acc2[m];
+            sh_m[row3] = acc3[m];
+        }
+    }
+}
+
 // Fused Routed MoE + Shared Down + Plastic Delta + Hyper-Connection hc_post Expansion
 __global__ void __launch_bounds__(256, 4) dsv41_fused_hc_post_moe_v1_kernel(
-    const float* __restrict__ routed_moe_in,    // [T, 5120]
+    const float* __restrict__ routed_moe_in,    // [T * DS_TOP_K, 5120]
     const float* __restrict__ shared_down_in,   // [T, 5120]
     const float* __restrict__ plastic_delta_in, // [T, 5120] (nullable)
     float plastic_alpha,
     const float* __restrict__ post_mix,         // [T, 4]
     const float* __restrict__ comb_mix,         // [T, 4, 4]
-    __nv_bfloat16* __restrict__ x_hc_inout      // [T, 4, 5120]
+    __nv_bfloat16* __restrict__ x_hc_inout,     // [T, 4, 5120]
+    uint32_t k_counts_packed                    // 4 bits per token t
 ) {
     // Grid: (10, T) -> 10 blocks x 256 threads = 2560 bfloat162 pairs = 5120 dims
     int idx2 = blockIdx.x * 256 + threadIdx.x; // 0..2559
@@ -5818,9 +6267,18 @@ __global__ void __launch_bounds__(256, 4) dsv41_fused_hc_post_moe_v1_kernel(
     if (threadIdx.x < 16) s_comb[threadIdx.x] = comb_mix[t * 16 + threadIdx.x];
     __syncthreads();
 
-    const float2* moe2 = reinterpret_cast<const float2*>(routed_moe_in  + (size_t)t * DS_DIM);
+    float2 mv = make_float2(0.0f, 0.0f);
+    if (k_counts_packed == 0u) {
+        mv = reinterpret_cast<const float2*>(routed_moe_in + (size_t)t * DS_DIM)[idx2];
+    } else {
+        int k_cnt = (int)((k_counts_packed >> (t * 4)) & 0xFu);
+        for (int k = 0; k < k_cnt; ++k) {
+            float2 kv = reinterpret_cast<const float2*>(routed_moe_in + ((size_t)t * DS_TOP_K + k) * DS_DIM)[idx2];
+            mv.x += kv.x;
+            mv.y += kv.y;
+        }
+    }
     const float2* sh2  = reinterpret_cast<const float2*>(shared_down_in + (size_t)t * DS_DIM);
-    float2 mv = moe2[idx2];
     float2 av = sh2[idx2];
     float2 pv = make_float2(0.0f, 0.0f);
     if (plastic_delta_in) {
@@ -5950,16 +6408,21 @@ __global__ void __launch_bounds__(128, 4) dsv41_plastic_dec_t1_kernel(
     reinterpret_cast<float4*>(y_out)[c4] = acc;
 }
 
-// Final Layer-39 hc_pre Collapse + RMSNorm(5120, eps=1e-20) -> BF16 [5120]
+// Final Layer-39 hc_pre Collapse + RMSNorm(5120, eps=1e-20) -> BF16 [batch_m, 5120]
 __global__ void __launch_bounds__(512, 2) dsv41_final_hc_pre_rmsnorm_t1_kernel(
-    const __nv_bfloat16* __restrict__ x_hc,      // [4, 5120]
-    const float* __restrict__ pre_mix,           // [4]
+    const __nv_bfloat16* __restrict__ x_hc,      // [batch_m, 4, 5120]
+    const float* __restrict__ pre_mix,           // [batch_m, 4]
     const __nv_bfloat16* __restrict__ norm_w,    // [5120]
-    __nv_bfloat16* __restrict__ x_final_norm_out // [5120]
+    __nv_bfloat16* __restrict__ x_final_norm_out // [batch_m, 5120]
 ) {
+    int m    = blockIdx.x;
     int tid  = threadIdx.x; // 0..511
     int wid  = tid >> 5;
     int lane = tid & 31;
+
+    x_hc             += (size_t)m * DS_HC_DIM;
+    pre_mix          += (size_t)m * 4;
+    x_final_norm_out += (size_t)m * DS_DIM;
 
     float pm0 = pre_mix[0], pm1 = pre_mix[1], pm2 = pre_mix[2], pm3 = pre_mix[3];
     const __nv_bfloat162* x_c0 = reinterpret_cast<const __nv_bfloat162*>(x_hc + 0 * DS_DIM);
@@ -6139,18 +6602,120 @@ __global__ void __launch_bounds__(256, 3) dsv41_lm_head_fp8_t1_kernel(
     }
 }
 
-// Fast GPU Top-64 Logit Reduction over 129,280 Vocab Logits
-// Stage 1: 64 blocks each find top-1 from their 2,020-token partition; or each of 64 blocks finds top-4 -> 256 candidates
-__global__ void __launch_bounds__(256, 2) dsv41_logits_top256_stage1_kernel(
-    const float* __restrict__ logits, // [129280]
-    int32_t* __restrict__ cand_ids,   // [256]
-    float* __restrict__ cand_vals     // [256]
+// Batched Multi-Token LM Head GEMM: [129280, 5120] FP8_E4M3 + FP32 Row Scale x [M_CAP, 5120] BF16 -> [M_CAP, 129280] FP32 Logits!
+// Loads the 631.25 MiB d_lm_head_fp8 matrix ONCE across all batch_m tokens (up to 8x bandwidth speedup during NCM Speculative Decoding!)
+template <int M_CAP>
+__global__ void __launch_bounds__(256, 3) dsv41_lm_head_fp8_batch_kernel(
+    const __nv_bfloat16* __restrict__ x_in,   // [M_CAP, 5120]
+    const uint8_t* __restrict__ head_fp8,     // [129280, 5120]
+    const float* __restrict__ head_s,         // [129280]
+    float* __restrict__ logits_out,           // [M_CAP, 129280]
+    int m_valid
 ) {
-    // Grid: 64 blocks of 256 threads
+    int wid  = threadIdx.x >> 5;
+    int lane = threadIdx.x & 31;
+    int row0 = blockIdx.x * 32 + wid * 4 + 0;
+    int row1 = row0 + 1;
+    int row2 = row0 + 2;
+    int row3 = row0 + 3;
+
+    __shared__ __nv_bfloat162 s_x2[M_CAP][256]; // 256 pairs per k-tile = 8 KiB at M_CAP=8
+
+    const uint4* w0_u4 = reinterpret_cast<const uint4*>(head_fp8 + (size_t)row0 * DS_DIM);
+    const uint4* w1_u4 = reinterpret_cast<const uint4*>(head_fp8 + (size_t)row1 * DS_DIM);
+    const uint4* w2_u4 = reinterpret_cast<const uint4*>(head_fp8 + (size_t)row2 * DS_DIM);
+    const uint4* w3_u4 = reinterpret_cast<const uint4*>(head_fp8 + (size_t)row3 * DS_DIM);
+
+    float acc0[M_CAP], acc1[M_CAP], acc2[M_CAP], acc3[M_CAP];
+    #pragma unroll
+    for (int m = 0; m < M_CAP; ++m) {
+        acc0[m] = 0.0f; acc1[m] = 0.0f; acc2[m] = 0.0f; acc3[m] = 0.0f;
+    }
+
+    int c2_local = lane * 8;
+    #pragma unroll 1
+    for (int k = 0; k < 10; ++k) {
+        #pragma unroll
+        for (int m = 0; m < M_CAP; ++m) {
+            if (m < m_valid) {
+                const __nv_bfloat162* x2_m = reinterpret_cast<const __nv_bfloat162*>(x_in + (size_t)m * DS_DIM);
+                s_x2[m][threadIdx.x] = x2_m[k * 256 + threadIdx.x];
+            }
+        }
+        __syncthreads();
+
+        int u4_idx = k * 32 + lane;
+        uint4 v0 = dg_ld_evict_first_u4(&w0_u4[u4_idx]);
+        uint4 v1 = dg_ld_evict_first_u4(&w1_u4[u4_idx]);
+        uint4 v2 = dg_ld_evict_first_u4(&w2_u4[u4_idx]);
+        uint4 v3 = dg_ld_evict_first_u4(&w3_u4[u4_idx]);
+
+        uint32_t words0[4] = {v0.x, v0.y, v0.z, v0.w};
+        uint32_t words1[4] = {v1.x, v1.y, v1.z, v1.w};
+        uint32_t words2[4] = {v2.x, v2.y, v2.z, v2.w};
+        uint32_t words3[4] = {v3.x, v3.y, v3.z, v3.w};
+
+        #pragma unroll
+        for (int w = 0; w < 4; ++w) {
+            uint32_t p0 = words0[w], p1 = words1[w], p2 = words2[w], p3 = words3[w];
+            float w0_0 = decode_fp8_e4m3_fast(p0 & 0xFF), w0_1 = decode_fp8_e4m3_fast((p0 >> 8) & 0xFF),
+                  w0_2 = decode_fp8_e4m3_fast((p0 >> 16) & 0xFF), w0_3 = decode_fp8_e4m3_fast((p0 >> 24) & 0xFF);
+            float w1_0 = decode_fp8_e4m3_fast(p1 & 0xFF), w1_1 = decode_fp8_e4m3_fast((p1 >> 8) & 0xFF),
+                  w1_2 = decode_fp8_e4m3_fast((p1 >> 16) & 0xFF), w1_3 = decode_fp8_e4m3_fast((p1 >> 24) & 0xFF);
+            float w2_0 = decode_fp8_e4m3_fast(p2 & 0xFF), w2_1 = decode_fp8_e4m3_fast((p2 >> 8) & 0xFF),
+                  w2_2 = decode_fp8_e4m3_fast((p2 >> 16) & 0xFF), w2_3 = decode_fp8_e4m3_fast((p2 >> 24) & 0xFF);
+            float w3_0 = decode_fp8_e4m3_fast(p3 & 0xFF), w3_1 = decode_fp8_e4m3_fast((p3 >> 8) & 0xFF),
+                  w3_2 = decode_fp8_e4m3_fast((p3 >> 16) & 0xFF), w3_3 = decode_fp8_e4m3_fast((p3 >> 24) & 0xFF);
+            #pragma unroll
+            for (int m = 0; m < M_CAP; ++m) {
+                float2 x01 = __bfloat1622float2(s_x2[m][c2_local + w * 2 + 0]);
+                float2 x23 = __bfloat1622float2(s_x2[m][c2_local + w * 2 + 1]);
+                acc0[m] += w0_0 * x01.x + w0_1 * x01.y + w0_2 * x23.x + w0_3 * x23.y;
+                acc1[m] += w1_0 * x01.x + w1_1 * x01.y + w1_2 * x23.x + w1_3 * x23.y;
+                acc2[m] += w2_0 * x01.x + w2_1 * x01.y + w2_2 * x23.x + w2_3 * x23.y;
+                acc3[m] += w3_0 * x01.x + w3_1 * x01.y + w3_2 * x23.x + w3_3 * x23.y;
+            }
+        }
+        __syncthreads();
+    }
+
+    float s0 = head_s[row0], s1 = head_s[row1], s2 = head_s[row2], s3 = head_s[row3];
+    #pragma unroll
+    for (int m = 0; m < M_CAP; ++m) {
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) {
+            acc0[m] += __shfl_xor_sync(0xffffffff, acc0[m], off);
+            acc1[m] += __shfl_xor_sync(0xffffffff, acc1[m], off);
+            acc2[m] += __shfl_xor_sync(0xffffffff, acc2[m], off);
+            acc3[m] += __shfl_xor_sync(0xffffffff, acc3[m], off);
+        }
+        if (lane == 0 && m < m_valid) {
+            float* l_m = logits_out + (size_t)m * 129280ULL;
+            l_m[row0] = acc0[m] * s0;
+            l_m[row1] = acc1[m] * s1;
+            l_m[row2] = acc2[m] * s2;
+            l_m[row3] = acc3[m] * s3;
+        }
+    }
+}
+
+// Fast GPU Top-64 Logit Reduction over 129,280 Vocab Logits
+// Stage 1: 64 blocks each find top-4 from their 2,020-token partition -> 256 candidates per batch slot
+__global__ void __launch_bounds__(256, 2) dsv41_logits_top256_stage1_kernel(
+    const float* __restrict__ logits, // [batch_m, 129280]
+    int32_t* __restrict__ cand_ids,   // [batch_m, 256]
+    float* __restrict__ cand_vals     // [batch_m, 256]
+) {
+    // Grid: (64, batch_m) blocks of 256 threads
     int bid = blockIdx.x;
+    int m   = blockIdx.y;
     int tid = threadIdx.x;
     int start = bid * 2020;
     int end   = (bid == 63) ? 129280 : (start + 2020);
+
+    logits    += (size_t)m * 129280ULL;
+    cand_ids  += (size_t)m * 256;
+    cand_vals += (size_t)m * 256;
 
     float best_v[4] = {-1e30f, -1e30f, -1e30f, -1e30f};
     int   best_i[4] = {0, 0, 0, 0};
@@ -6198,12 +6763,18 @@ __global__ void __launch_bounds__(256, 2) dsv41_logits_top256_stage1_kernel(
 }
 
 __global__ void __launch_bounds__(256, 1) dsv41_logits_top64_stage2_kernel(
-    const int32_t* __restrict__ cand_ids, // [256]
-    const float* __restrict__ cand_vals,  // [256]
-    int32_t* __restrict__ out_ids,        // [64]
-    float* __restrict__ out_vals          // [64]
+    const int32_t* __restrict__ cand_ids, // [batch_m, 256]
+    const float* __restrict__ cand_vals,  // [batch_m, 256]
+    int32_t* __restrict__ out_ids,        // [batch_m, 64]
+    float* __restrict__ out_vals          // [batch_m, 64]
 ) {
+    int m   = blockIdx.x;
     int tid = threadIdx.x; // 0..255
+    cand_ids  += (size_t)m * 256;
+    cand_vals += (size_t)m * 256;
+    out_ids   += (size_t)m * 64;
+    out_vals  += (size_t)m * 64;
+
     float my_v = cand_vals[tid];
     int   my_i = cand_ids[tid];
 
@@ -6799,11 +7370,18 @@ struct Mcl4Dsv41FullEngine {
     __nv_bfloat16* d_final_norm_w      = nullptr; // [5120] BF16
     uint8_t*       d_lm_head_fp8       = nullptr; // [129280, 5120] FP8_E4M3
     float*         d_lm_head_s         = nullptr; // [129280] FP32 row scale
-    float*         d_logits            = nullptr; // [129280] FP32
+    float*         d_logits            = nullptr; // [DS_MAX_BATCH_M, 129280] FP32
     int32_t*       d_cand256_ids       = nullptr; // [256]
     float*         d_cand256_vals      = nullptr; // [256]
-    int32_t*       d_top64_ids         = nullptr; // [64]
-    float*         d_top64_vals        = nullptr; // [64]
+    int32_t*       d_top64_ids         = nullptr; // [DS_MAX_BATCH_M, 64]
+    float*         d_top64_vals        = nullptr; // [DS_MAX_BATCH_M, 64]
+    int32_t*       h_pinned_top64_ids  = nullptr; // [DS_MAX_BATCH_M, 64]
+    float*         h_pinned_top64_vals = nullptr; // [DS_MAX_BATCH_M, 64]
+
+    // Speculative Prefix Rollback Buffers (< 2 us commit/rollback for NCM batch_m <= 8 verification!)
+    __nv_bfloat16* d_win_kv_step_bak   = nullptr; // [40, DS_MAX_BATCH_M, 512] BF16 (320 KiB)
+    float*         d_comp_state_step   = nullptr; // [DS_MAX_BATCH_M, 4, 8, 1024] FP32 (1.0 MiB)
+    __nv_bfloat16* d_comp_kv_step_bak  = nullptr; // [4, DS_MAX_BATCH_M, 512] BF16 (32 KiB)
 
     // Plastic Upper-Tail (step_10000.bin, Layers 32..39)
     bool   has_plastic     = false;
@@ -6958,18 +7536,24 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_init(
     CHECK_CUDA(cudaMallocHost(&g_engine.h_pinned_tasks, DS_MAX_MOE_GROUPS * sizeof(Dsv41ExpertGroupTask)));
     CHECK_CUDA(cudaMalloc(&g_engine.d_groups,           DS_MAX_MOE_GROUPS * sizeof(Dsv41ExpertGroupTask)));
     CHECK_CUDA(cudaMalloc(&g_engine.d_inter,            DS_MAX_MOE_GROUPS * DS_MAX_BATCH_M * DS_MOE_INTER * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&g_engine.d_moe_out,          DS_MAX_BATCH_M * DS_DIM * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&g_engine.d_moe_out,          DS_MAX_BATCH_M * DS_TOP_K * DS_DIM * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&g_engine.d_shared_out,       DS_MAX_BATCH_M * DS_DIM * sizeof(float)));
+
+    CHECK_CUDA(cudaMalloc(&g_engine.d_win_kv_step_bak,  40ULL * DS_MAX_BATCH_M * DS_HEAD_DIM * sizeof(__nv_bfloat16)));
+    CHECK_CUDA(cudaMalloc(&g_engine.d_comp_state_step,  DS_MAX_BATCH_M * 4ULL * 8ULL * 1024ULL * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&g_engine.d_comp_kv_step_bak, 4ULL * DS_MAX_BATCH_M * 512ULL * sizeof(__nv_bfloat16)));
 
     // 2. Load NORM_HEAD.mcl4h & Quantize head.weight [129280, 5120] BF16 -> FP8_E4M3 + FP32 Row Scale on GPU
     CHECK_CUDA(cudaMalloc(&g_engine.d_final_norm_w,  DS_DIM * sizeof(__nv_bfloat16)));
     CHECK_CUDA(cudaMalloc(&g_engine.d_lm_head_fp8,   129280ULL * DS_DIM * sizeof(uint8_t)));
     CHECK_CUDA(cudaMalloc(&g_engine.d_lm_head_s,     129280ULL * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&g_engine.d_logits,        129280ULL * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&g_engine.d_cand256_ids,   256 * sizeof(int32_t)));
-    CHECK_CUDA(cudaMalloc(&g_engine.d_cand256_vals,  256 * sizeof(float)));
-    CHECK_CUDA(cudaMalloc(&g_engine.d_top64_ids,     64 * sizeof(int32_t)));
-    CHECK_CUDA(cudaMalloc(&g_engine.d_top64_vals,    64 * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&g_engine.d_logits,        DS_MAX_BATCH_M * 129280ULL * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&g_engine.d_cand256_ids,   DS_MAX_BATCH_M * 256 * sizeof(int32_t)));
+    CHECK_CUDA(cudaMalloc(&g_engine.d_cand256_vals,  DS_MAX_BATCH_M * 256 * sizeof(float)));
+    CHECK_CUDA(cudaMalloc(&g_engine.d_top64_ids,     DS_MAX_BATCH_M * 64 * sizeof(int32_t)));
+    CHECK_CUDA(cudaMalloc(&g_engine.d_top64_vals,    DS_MAX_BATCH_M * 64 * sizeof(float)));
+    CHECK_CUDA(cudaMallocHost(&g_engine.h_pinned_top64_ids,  DS_MAX_BATCH_M * 64 * sizeof(int32_t)));
+    CHECK_CUDA(cudaMallocHost(&g_engine.h_pinned_top64_vals, DS_MAX_BATCH_M * 64 * sizeof(float)));
 
     {
         std::string nh_path = g_engine.x_root + "\\NORM_HEAD.mcl4h";
@@ -7207,12 +7791,12 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_init(
 
     size_t free_before_arena = 0, total_vram = 0;
     cudaMemGetInfo(&free_before_arena, &total_vram);
-    size_t reserve_headroom = 160ULL * 1024ULL * 1024ULL;
+    size_t reserve_headroom = 320ULL * 1024ULL * 1024ULL;
     int max_slots = 6;
     if (free_before_arena > reserve_headroom + 6 * sizeof(Dsv41Mcl4cExpertPacket)) {
         size_t avail = free_before_arena - reserve_headroom;
         max_slots = (int)(avail / sizeof(Dsv41Mcl4cExpertPacket));
-        if (max_slots > 168) max_slots = 168; // 160 dedicated (4/layer) + 8 ring slots
+        if (max_slots > 160) max_slots = 160; // 120 dedicated (3/layer) + 40 ring slots (320 MiB WDDM headroom!)
         if (max_slots < 6)   max_slots = 6;
     }
     g_engine.num_arena_slots = max_slots;
@@ -7235,6 +7819,7 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_init(
 extern "C" __declspec(dllexport) void mcl4_dsv41_engine_set_step_context(uint64_t prompt_hash, int is_decode) {
     g_engine.cur_prompt_hash = prompt_hash;
     g_engine.cur_is_decode   = is_decode;
+    g_cur_is_decode          = is_decode;
 }
 
 extern "C" __declspec(dllexport) int mcl4_dsv41_engine_has_vram_expert(int layer_id, int exp_id) {
@@ -7478,6 +8063,225 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_step_token_begin(
     return mcl4_dsv41_engine_step_batch_begin(token_history, seq_len - 1, 1);
 }
 
+// Save/Rollback kernels for Zero-Lobotomy Speculative Verification (`batch_m <= 8`)
+__global__ void __launch_bounds__(256, 4) dsv41_save_win_kv_step_bak_kernel(
+    const __nv_bfloat16* __restrict__ layer_win_kv, // [128, 512]
+    __nv_bfloat16* __restrict__ step_bak,           // [DS_MAX_BATCH_M, 512]
+    int base_pos
+) {
+    int m   = blockIdx.x;
+    int c2  = threadIdx.x; // 0..255 (256 bfloat162 = 512 bfloat16)
+    int sl  = (base_pos + m) & (DS_WINDOW_SIZE - 1);
+    reinterpret_cast<__nv_bfloat162*>(step_bak + (size_t)m * DS_HEAD_DIM)[c2] =
+        reinterpret_cast<const __nv_bfloat162*>(layer_win_kv + (size_t)sl * DS_HEAD_DIM)[c2];
+}
+
+__global__ void __launch_bounds__(256, 4) dsv41_rollback_win_kv_step_bak_kernel(
+    __nv_bfloat16* __restrict__ d_window_kv_all,    // [40, 128, 512]
+    const __nv_bfloat16* __restrict__ d_win_kv_bak, // [40, DS_MAX_BATCH_M, 512]
+    int base_pos,
+    int batch_m,
+    int k_accepted
+) {
+    int l  = blockIdx.x; // 0..39
+    int c2 = threadIdx.x; // 0..255
+    __nv_bfloat16* layer_win_kv = d_window_kv_all + (size_t)l * DS_WINDOW_SIZE * DS_HEAD_DIM;
+    const __nv_bfloat16* layer_bak = d_win_kv_bak + (size_t)l * DS_MAX_BATCH_M * DS_HEAD_DIM;
+    // Restore in reverse order (from batch_m - 1 down to k_accepted)
+    for (int m = batch_m - 1; m >= k_accepted; --m) {
+        int sl = (base_pos + m) & (DS_WINDOW_SIZE - 1);
+        reinterpret_cast<__nv_bfloat162*>(layer_win_kv + (size_t)sl * DS_HEAD_DIM)[c2] =
+            reinterpret_cast<const __nv_bfloat162*>(layer_bak + (size_t)m * DS_HEAD_DIM)[c2];
+    }
+}
+
+template <int M_CAP>
+__global__ void __launch_bounds__(256, 3) dsv41_fused_mla_grouped_wo_a_batch_4row_v2_kernel(
+    const __nv_bfloat16* __restrict__ o_in, // [M_CAP, 8, 4096] = [M_CAP, 32768]
+    const uint8_t* __restrict__ wo_a_fp8,   // [8, 1024, 4096] = [8192, 4096]
+    const uint8_t* __restrict__ wo_a_s,     // [256, 128] (E8M0 32x32 block scale)
+    __nv_bfloat16* __restrict__ o_lora_out, // [M_CAP, 8192]
+    int m_valid
+) {
+    int wid  = threadIdx.x >> 5;
+    int lane = threadIdx.x & 31;
+    int grp  = blockIdx.y; // 0..7
+    int r_in_grp0 = blockIdx.x * 32 + wid * 4 + 0; // 0..1020
+    int row0 = grp * DS_O_LORA_RANK + r_in_grp0;
+    int row1 = row0 + 1;
+    int row2 = row0 + 2;
+    int row3 = row0 + 3;
+
+    constexpr int NUM_TILES   = 8; // 4096 / 512 = 8 tiles
+    constexpr int TILE_HALF_K = 256;
+    constexpr int TILE_STRIDE = 288;
+    __shared__ __nv_bfloat162 s_o2[M_CAP][TILE_STRIDE];
+
+    float acc0[M_CAP], acc1[M_CAP], acc2[M_CAP], acc3[M_CAP];
+    #pragma unroll
+    for (int m = 0; m < M_CAP; ++m) {
+        acc0[m] = 0.0f; acc1[m] = 0.0f; acc2[m] = 0.0f; acc3[m] = 0.0f;
+    }
+
+    const uint4* w0_u4  = reinterpret_cast<const uint4*>(wo_a_fp8 + (size_t)row0 * DS_GROUP_IN_DIM);
+    const uint4* w1_u4  = reinterpret_cast<const uint4*>(wo_a_fp8 + (size_t)row1 * DS_GROUP_IN_DIM);
+    const uint4* w2_u4  = reinterpret_cast<const uint4*>(wo_a_fp8 + (size_t)row2 * DS_GROUP_IN_DIM);
+    const uint4* w3_u4  = reinterpret_cast<const uint4*>(wo_a_fp8 + (size_t)row3 * DS_GROUP_IN_DIM);
+    const uint8_t* s_r  = wo_a_s + (size_t)(row0 >> 5) * (DS_GROUP_IN_DIM >> 5);
+    int swz_base = lane * 9;
+
+    #pragma unroll 1
+    for (int t = 0; t < NUM_TILES; ++t) {
+        int c = threadIdx.x;
+        #pragma unroll
+        for (int m = 0; m < M_CAP; ++m) {
+            if (m < m_valid) {
+                const __nv_bfloat162* src = reinterpret_cast<const __nv_bfloat162*>(
+                    o_in + ((size_t)m * DS_O_GROUPS + grp) * DS_GROUP_IN_DIM
+                );
+                s_o2[m][c + (c >> 3)] = src[t * TILE_HALF_K + c];
+            }
+        }
+        __syncthreads();
+
+        int u4_idx = t * 32 + lane;
+        uint4 pk0 = dg_ld_l2_128b_u4(&w0_u4[u4_idx]);
+        uint4 pk1 = dg_ld_l2_128b_u4(&w1_u4[u4_idx]);
+        uint4 pk2 = dg_ld_l2_128b_u4(&w2_u4[u4_idx]);
+        uint4 pk3 = dg_ld_l2_128b_u4(&w3_u4[u4_idx]);
+        float blk_scale = decode_fp8_e8m0_fast(s_r[u4_idx >> 1]);
+        uint32_t words0[4] = {pk0.x, pk0.y, pk0.z, pk0.w};
+        uint32_t words1[4] = {pk1.x, pk1.y, pk1.z, pk1.w};
+        uint32_t words2[4] = {pk2.x, pk2.y, pk2.z, pk2.w};
+        uint32_t words3[4] = {pk3.x, pk3.y, pk3.z, pk3.w};
+
+        float w0_f[16], w1_f[16], w2_f[16], w3_f[16];
+        #pragma unroll
+        for (int w = 0; w < 4; ++w) {
+            uint32_t p0 = words0[w];
+            w0_f[w * 4 + 0] = decode_fp8_e4m3_fast(p0 & 0xFF);
+            w0_f[w * 4 + 1] = decode_fp8_e4m3_fast((p0 >> 8) & 0xFF);
+            w0_f[w * 4 + 2] = decode_fp8_e4m3_fast((p0 >> 16) & 0xFF);
+            w0_f[w * 4 + 3] = decode_fp8_e4m3_fast((p0 >> 24) & 0xFF);
+
+            uint32_t p1 = words1[w];
+            w1_f[w * 4 + 0] = decode_fp8_e4m3_fast(p1 & 0xFF);
+            w1_f[w * 4 + 1] = decode_fp8_e4m3_fast((p1 >> 8) & 0xFF);
+            w1_f[w * 4 + 2] = decode_fp8_e4m3_fast((p1 >> 16) & 0xFF);
+            w1_f[w * 4 + 3] = decode_fp8_e4m3_fast((p1 >> 24) & 0xFF);
+
+            uint32_t p2 = words2[w];
+            w2_f[w * 4 + 0] = decode_fp8_e4m3_fast(p2 & 0xFF);
+            w2_f[w * 4 + 1] = decode_fp8_e4m3_fast((p2 >> 8) & 0xFF);
+            w2_f[w * 4 + 2] = decode_fp8_e4m3_fast((p2 >> 16) & 0xFF);
+            w2_f[w * 4 + 3] = decode_fp8_e4m3_fast((p2 >> 24) & 0xFF);
+
+            uint32_t p3 = words3[w];
+            w3_f[w * 4 + 0] = decode_fp8_e4m3_fast(p3 & 0xFF);
+            w3_f[w * 4 + 1] = decode_fp8_e4m3_fast((p3 >> 8) & 0xFF);
+            w3_f[w * 4 + 2] = decode_fp8_e4m3_fast((p3 >> 16) & 0xFF);
+            w3_f[w * 4 + 3] = decode_fp8_e4m3_fast((p3 >> 24) & 0xFF);
+        }
+
+        #pragma unroll
+        for (int m = 0; m < M_CAP; ++m) {
+            float sub0 = 0.0f, sub1 = 0.0f, sub2 = 0.0f, sub3 = 0.0f;
+            #pragma unroll
+            for (int w = 0; w < 4; ++w) {
+                float2 x01 = __bfloat1622float2(s_o2[m][swz_base + w * 2 + 0]);
+                float2 x23 = __bfloat1622float2(s_o2[m][swz_base + w * 2 + 1]);
+                sub0 += w0_f[w * 4 + 0] * x01.x + w0_f[w * 4 + 1] * x01.y + w0_f[w * 4 + 2] * x23.x + w0_f[w * 4 + 3] * x23.y;
+                sub1 += w1_f[w * 4 + 0] * x01.x + w1_f[w * 4 + 1] * x01.y + w1_f[w * 4 + 2] * x23.x + w1_f[w * 4 + 3] * x23.y;
+                sub2 += w2_f[w * 4 + 0] * x01.x + w2_f[w * 4 + 1] * x01.y + w2_f[w * 4 + 2] * x23.x + w2_f[w * 4 + 3] * x23.y;
+                sub3 += w3_f[w * 4 + 0] * x01.x + w3_f[w * 4 + 1] * x01.y + w3_f[w * 4 + 2] * x23.x + w3_f[w * 4 + 3] * x23.y;
+            }
+            acc0[m] += sub0 * blk_scale;
+            acc1[m] += sub1 * blk_scale;
+            acc2[m] += sub2 * blk_scale;
+            acc3[m] += sub3 * blk_scale;
+        }
+        __syncthreads();
+    }
+
+    #pragma unroll
+    for (int m = 0; m < M_CAP; ++m) {
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) {
+            acc0[m] += __shfl_xor_sync(0xffffffff, acc0[m], off);
+            acc1[m] += __shfl_xor_sync(0xffffffff, acc1[m], off);
+            acc2[m] += __shfl_xor_sync(0xffffffff, acc2[m], off);
+            acc3[m] += __shfl_xor_sync(0xffffffff, acc3[m], off);
+        }
+        if (lane == 0 && m < m_valid) {
+            __nv_bfloat16* out_m = o_lora_out + (size_t)m * DS_O_TOTAL_RANK;
+            out_m[row0] = __float2bfloat16(acc0[m]);
+            out_m[row1] = __float2bfloat16(acc1[m]);
+            out_m[row2] = __float2bfloat16(acc2[m]);
+            out_m[row3] = __float2bfloat16(acc3[m]);
+        }
+    }
+}
+
+template <int M_CAP>
+__global__ void __launch_bounds__(256, 2) dsv41_router_scores_batch_48blk_v3_kernel(
+    const __nv_bfloat16* __restrict__ x_norm,    // [M_CAP, 5120]
+    const __nv_bfloat16* __restrict__ gate_w,    // [384, 5120]
+    const float* __restrict__ gate_bias,         // [384]
+    float* __restrict__ raw_scores_out,          // [M_CAP, 384]
+    float* __restrict__ biased_scores_out,       // [M_CAP, 384]
+    int m_valid
+) {
+    int wid  = threadIdx.x >> 5;   // 0..7
+    int lane = threadIdx.x & 31;
+    int e    = blockIdx.x * 8 + wid; // 0..383
+
+    __shared__ __nv_bfloat162 s_x2[M_CAP][512]; // 5 chunks of 512 pairs = 2560 pairs (16 KiB at M_CAP=8)
+    const __nv_bfloat162* gw2 = reinterpret_cast<const __nv_bfloat162*>(gate_w + (size_t)e * DS_DIM);
+
+    float dot[M_CAP];
+    #pragma unroll
+    for (int m = 0; m < M_CAP; ++m) dot[m] = 0.0f;
+
+    #pragma unroll 1
+    for (int chunk = 0; chunk < 5; ++chunk) {
+        int base_c2 = chunk * 512;
+        #pragma unroll
+        for (int m = 0; m < M_CAP; ++m) {
+            if (m < m_valid) {
+                const __nv_bfloat162* x2_in = reinterpret_cast<const __nv_bfloat162*>(x_norm + (size_t)m * DS_DIM);
+                s_x2[m][threadIdx.x]       = x2_in[base_c2 + threadIdx.x];
+                s_x2[m][threadIdx.x + 256] = x2_in[base_c2 + threadIdx.x + 256];
+            }
+        }
+        __syncthreads();
+
+        #pragma unroll
+        for (int sub_k = 0; sub_k < 16; ++sub_k) {
+            int local_c2 = lane + sub_k * 32;
+            float2 gw = __bfloat1622float2(gw2[base_c2 + local_c2]);
+            #pragma unroll
+            for (int m = 0; m < M_CAP; ++m) {
+                float2 xv = __bfloat1622float2(s_x2[m][local_c2]);
+                dot[m] += xv.x * gw.x + xv.y * gw.y;
+            }
+        }
+        __syncthreads();
+    }
+
+    float gb = gate_bias[e];
+    #pragma unroll
+    for (int m = 0; m < M_CAP; ++m) {
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) dot[m] += __shfl_xor_sync(0xffffffff, dot[m], off);
+        if (lane == 0 && m < m_valid) {
+            float sp = (dot[m] > 20.0f) ? dot[m] : log1pf(__expf(dot[m]));
+            float sc = sqrtf(fmaxf(sp, 0.0f));
+            raw_scores_out[m * DS_ROUTED_EXPERTS + e]    = sc;
+            biased_scores_out[m * DS_ROUTED_EXPERTS + e] = sc + gb;
+        }
+    }
+}
+
 extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_attn_and_route_batch(
     int layer_id,
     int base_pos,
@@ -7532,27 +8336,24 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_attn_and_route_batc
             ? (g_engine.mmap_shard47.base != nullptr || g_engine.fp_shard47 != nullptr)
             : (g_engine.mmap_shard48.base != nullptr || g_engine.fp_shard48 != nullptr);
         if (has_eng) {
-            dim3 g_deq(24, 1);
-            for (int m = 0; m < batch_m; ++m) {
-                __nv_bfloat16* x_hc_m = g_engine.d_x_hc + (size_t)m * DS_HC_DIM;
-                const uint8_t* eng_fp8_m   = g_engine.d_eng_fp8   + ((size_t)eng_idx * DS_MAX_BATCH_M + m) * 24 * 256;
-                const uint8_t* eng_scale_m = g_engine.d_eng_scale + ((size_t)eng_idx * DS_MAX_BATCH_M + m) * 24 * 8;
-                dsv41_engram_dequant_rows_v1_kernel<<<g_deq, 256>>>(
-                    eng_fp8_m,
-                    eng_scale_m,
-                    g_engine.d_eng_emb
-                );
-                launch_dsv41_fp8_gemm(
-                    g_engine.d_eng_emb,
-                    g_engine.d_eng_wkv_w[eng_idx],
-                    g_engine.d_eng_wkv_s[eng_idx],
-                    g_engine.d_eng_kv_out,
-                    1, 25600, 6144
-                );
-                dsv41_engram_gated_hc_residual_v1_kernel<<<1, 256>>>(
-                    x_hc_m, g_engine.d_eng_kv_out, g_engine.d_eng_qw[eng_idx], g_engine.d_eng_kw[eng_idx]
-                );
-            }
+            dim3 g_deq(24, batch_m);
+            const uint8_t* eng_fp8_base   = g_engine.d_eng_fp8   + (size_t)eng_idx * DS_MAX_BATCH_M * 24 * 256;
+            const uint8_t* eng_scale_base = g_engine.d_eng_scale + (size_t)eng_idx * DS_MAX_BATCH_M * 24 * 8;
+            dsv41_engram_dequant_rows_v1_kernel<<<g_deq, 256>>>(
+                eng_fp8_base,
+                eng_scale_base,
+                g_engine.d_eng_emb
+            );
+            launch_dsv41_fp8_gemm(
+                g_engine.d_eng_emb,
+                g_engine.d_eng_wkv_w[eng_idx],
+                g_engine.d_eng_wkv_s[eng_idx],
+                g_engine.d_eng_kv_out,
+                batch_m, 25600, 6144
+            );
+            dsv41_engram_gated_hc_residual_v1_kernel<<<batch_m, 256>>>(
+                g_engine.d_x_hc, g_engine.d_eng_kv_out, g_engine.d_eng_qw[eng_idx], g_engine.d_eng_kw[eng_idx]
+            );
         }
     }
 
@@ -7565,6 +8366,13 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_attn_and_route_batc
     // 3. Batched MLA Down-Projections + Norm/RoPE + Q Up-Projection
     launch_dsv41_fp8_gemm(g_engine.d_x_norm, wqa_w, wqa_s, g_engine.d_qr, batch_m, 1280, 5120);
     launch_dsv41_fp8_gemm(g_engine.d_x_norm, wkv_w, wkv_s, g_engine.d_kv, batch_m, 512,  5120);
+    if (batch_m > 1) {
+        dsv41_save_win_kv_step_bak_kernel<<<batch_m, 256>>>(
+            layer_win_kv,
+            g_engine.d_win_kv_step_bak + (size_t)layer_id * DS_MAX_BATCH_M * DS_HEAD_DIM,
+            base_pos
+        );
+    }
     bool batch_win_safe = (batch_m == 1) || (base_pos + batch_m <= DS_WINDOW_SIZE);
     dsv41_fused_mla_q_kv_norm_rope_exact_t1_kernel<<<batch_m, 256>>>(
         g_engine.d_qr, q_norm_w, g_engine.d_kv, kv_norm_w,
@@ -7573,14 +8381,12 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_attn_and_route_batc
     );
     launch_dsv41_fp8_gemm(g_engine.d_qr, wqb_w, wqb_s, g_engine.d_q, batch_m, 32768, 1280);
 
-    // 4 & 5. Per-token KV Compressor + Sparse Online-Softmax MLA + 8-Group wo_a
-    dim3 g_woa_t1(32, 8);
+    // 4. Per-token KV Compressor + Sparse Online-Softmax MLA
     for (int m = 0; m < batch_m; ++m) {
         int pos = base_pos + m;
         const __nv_bfloat16* x_norm_m = g_engine.d_x_norm + (size_t)m * DS_DIM;
         const __nv_bfloat16* q_m      = g_engine.d_q      + (size_t)m * 32768;
         __nv_bfloat16*       attn_o_m = g_engine.d_attn_o + (size_t)m * 32768;
-        __nv_bfloat16*       o_lora_m = g_engine.d_o_lora + (size_t)m * 8192;
 
         if (!batch_win_safe) {
             int win_slot = pos & (DS_WINDOW_SIZE - 1);
@@ -7605,9 +8411,27 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_attn_and_route_batc
                 dsv41_kv_compressor_proj_v1_kernel<1><<<64, 256>>>(
                     x_norm_m, g_engine.d_comp_wgate_wkv[src_idx], slot_state, 1
                 );
+                if (batch_m > 1) {
+                    CHECK_CUDA(cudaMemcpyAsync(
+                        g_engine.d_comp_state_step + ((size_t)m * 4 + src_idx) * 8 * 1024,
+                        g_engine.d_comp_state[src_idx],
+                        (size_t)ratio * 1024 * sizeof(float),
+                        cudaMemcpyDeviceToDevice,
+                        0
+                    ));
+                }
                 if (((pos + 1) % ratio) == 0) {
                     int group_idx = (pos / ratio) & 511;
                     int group_pos = (pos / ratio) * ratio;
+                    if (batch_m > 1) {
+                        CHECK_CUDA(cudaMemcpyAsync(
+                            g_engine.d_comp_kv_step_bak + ((size_t)src_idx * DS_MAX_BATCH_M + m) * 512,
+                            g_engine.d_comp_kv_cache[src_idx] + (size_t)group_idx * 512,
+                            512 * sizeof(__nv_bfloat16),
+                            cudaMemcpyDeviceToDevice,
+                            0
+                        ));
+                    }
                     dsv41_kv_compressor_pool_rmsnorm_rope_t1_kernel<<<1, 512>>>(
                         g_engine.d_comp_state[src_idx],
                         g_engine.d_comp_norm[src_idx],
@@ -7627,9 +8451,25 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_attn_and_route_batc
             q_m, layer_win_kv, n_win_valid, active_comp_kv, n_comp_valid,
             attn_sink, attn_o_m, pos, use_yarn
         );
+    }
 
+    // 5. Coalesced 8-Group Block-Diagonal Output Projection wo_a (loads 32 MiB woa_w ONCE across batch_m!)
+    dim3 g_woa_t1(32, 8);
+    if (batch_m == 1) {
         dsv41_fused_mla_grouped_wo_a_t1_4row_v2_kernel<<<g_woa_t1, 256>>>(
-            attn_o_m, woa_w, woa_s, o_lora_m
+            g_engine.d_attn_o, woa_w, woa_s, g_engine.d_o_lora
+        );
+    } else if (batch_m == 2) {
+        dsv41_fused_mla_grouped_wo_a_batch_4row_v2_kernel<2><<<g_woa_t1, 256>>>(
+            g_engine.d_attn_o, woa_w, woa_s, g_engine.d_o_lora, batch_m
+        );
+    } else if (batch_m <= 4) {
+        dsv41_fused_mla_grouped_wo_a_batch_4row_v2_kernel<4><<<g_woa_t1, 256>>>(
+            g_engine.d_attn_o, woa_w, woa_s, g_engine.d_o_lora, batch_m
+        );
+    } else {
+        dsv41_fused_mla_grouped_wo_a_batch_4row_v2_kernel<8><<<g_woa_t1, 256>>>(
+            g_engine.d_attn_o, woa_w, woa_s, g_engine.d_o_lora, batch_m
         );
     }
 
@@ -7646,18 +8486,29 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_attn_and_route_batc
         g_engine.d_x_norm, g_engine.d_pre_mix, g_engine.d_post_mix, g_engine.d_comb_mix
     );
 
-    for (int m = 0; m < batch_m; ++m) {
-        const __nv_bfloat16* x_norm_m = g_engine.d_x_norm + (size_t)m * DS_DIM;
+    if (batch_m == 1) {
         dsv41_router_scores_48blk_v3_kernel<<<48, 256>>>(
-            x_norm_m, gate_w, gate_bias, nullptr, g_engine.d_raw_scores, g_engine.d_biased_scores
+            g_engine.d_x_norm, gate_w, gate_bias, nullptr, g_engine.d_raw_scores, g_engine.d_biased_scores
         );
-        dsv41_router_top6_v5_kernel<<<1, 32>>>(
-            g_engine.d_raw_scores,
-            g_engine.d_biased_scores,
-            g_engine.h_pinned_top_idx + (size_t)m * DS_TOP_K,
-            g_engine.h_pinned_top_w   + (size_t)m * DS_TOP_K
+    } else if (batch_m == 2) {
+        dsv41_router_scores_batch_48blk_v3_kernel<2><<<48, 256>>>(
+            g_engine.d_x_norm, gate_w, gate_bias, g_engine.d_raw_scores, g_engine.d_biased_scores, batch_m
+        );
+    } else if (batch_m <= 4) {
+        dsv41_router_scores_batch_48blk_v3_kernel<4><<<48, 256>>>(
+            g_engine.d_x_norm, gate_w, gate_bias, g_engine.d_raw_scores, g_engine.d_biased_scores, batch_m
+        );
+    } else {
+        dsv41_router_scores_batch_48blk_v3_kernel<8><<<48, 256>>>(
+            g_engine.d_x_norm, gate_w, gate_bias, g_engine.d_raw_scores, g_engine.d_biased_scores, batch_m
         );
     }
+    dsv41_router_top6_v5_kernel<<<batch_m, 32>>>(
+        g_engine.d_raw_scores,
+        g_engine.d_biased_scores,
+        g_engine.h_pinned_top_idx,
+        g_engine.h_pinned_top_w
+    );
 
     // 8. Optional Opposite-Drive Next-Layer Lookahead Hint (uses layers[layer_id + 1].d_meta in VRAM!)
     if (out_next_layer_lookahead_top6) {
@@ -7668,7 +8519,9 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_attn_and_route_batc
             const __nv_bfloat16* last_x    = g_engine.d_x_norm + (size_t)(batch_m - 1) * DS_DIM;
 
             dsv41_router_scores_48blk_v3_kernel<<<48, 256>>>(
-                last_x, next_gw, next_gb, nullptr, g_engine.d_raw_scores, g_engine.d_biased_scores
+                last_x, next_gw, next_gb, nullptr,
+                g_engine.d_raw_scores,
+                g_engine.d_biased_scores
             );
             dsv41_router_top6_v5_kernel<<<1, 32>>>(
                 g_engine.d_raw_scores, g_engine.d_biased_scores, g_engine.h_pinned_next_idx, g_engine.d_next_top_w
@@ -7903,6 +8756,7 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_moe_and_post_batch(
     }
 
     // Pass 2: Allocate VRAM slots for misses (`chosen_slots[u] < 0`) and stage H2D transfers
+    bool waited_moe_done = false;
     for (int u = 0; u < num_unique_experts; ++u) {
         int32_t exp_id = h_unique_expert_ids[u];
         if (chosen_slots[u] < 0) {
@@ -7933,7 +8787,7 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_moe_and_post_batch(
                         }
                     }
                 }
-                // 2. If all dedicated slots are locked in decode (or active in this batch step), use the 48-slot Ring Buffer [ring_base..]!
+                // 2. If all dedicated slots are locked in decode (or active in this batch step), use the Ring Buffer [ring_base..]!
                 if (best_slot < 0) {
                     best_tick = UINT64_MAX;
                     for (int s = ring_base; s < g_engine.num_arena_slots; ++s) {
@@ -7969,6 +8823,10 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_moe_and_post_batch(
                 }
             }
             if (h_unique_expert_ptrs && h_unique_expert_ptrs[u]) {
+                if (best_slot >= ring_base && !waited_moe_done) {
+                    CHECK_CUDA(cudaStreamWaitEvent(g_engine.stream_prefetch, g_engine.ev_moe_done, 0));
+                    waited_moe_done = true;
+                }
                 const Dsv41Mcl4cExpertPacket* src_ptr = h_unique_expert_ptrs[u];
                 CHECK_CUDA(cudaMemcpyAsync(
                     &g_engine.d_arena[best_slot],
@@ -7993,7 +8851,7 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_moe_and_post_batch(
             for (int k = 0; k < k_active; ++k) {
                 if (h_top6_indices_batch[m * DS_TOP_K + k] == exp_id) {
                     if (mc < 8) {
-                        h_tasks[u].token_ids[mc] = m;
+                        h_tasks[u].token_ids[mc] = g_engine.cur_is_decode ? (((k + 1) << 8) | m) : m;
                         h_tasks[u].weights[mc]   = h_top6_weights_batch[m * DS_TOP_K + k];
                         mc++;
                     }
@@ -8004,13 +8862,28 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_moe_and_post_batch(
         h_tasks[u].m_count = mc;
     }
 
+    uint32_t k_counts_packed = 0u;
+    if (g_engine.cur_is_decode) {
+        for (int m = 0; m < batch_m; ++m) {
+            int k_cnt = 0;
+            for (int k = 0; k < k_active; ++k) {
+                if (h_top6_indices_batch[m * DS_TOP_K + k] >= 0) {
+                    k_cnt = k + 1;
+                }
+            }
+            k_counts_packed |= ((uint32_t)k_cnt & 0xFu) << (m * 4);
+        }
+    }
+
     if (any_async_dma) {
         CHECK_CUDA(cudaEventRecord(g_engine.ev_prefetch_done, g_engine.stream_prefetch));
     }
 
-    // 2. Overlap on Compute Stream: Upload tasks from pinned RAM, zero d_moe_out, Run Batched Shared Stage-1, Stage-2, & Plastic Upper-Tail!
+    // 2. Overlap on Compute Stream: Upload tasks from pinned RAM, Run Coalesced Shared Stage-1, Stage-2, & Plastic Upper-Tail!
     CHECK_CUDA(cudaMemcpyAsync(g_engine.d_groups, h_tasks, num_unique_experts * sizeof(Dsv41ExpertGroupTask), cudaMemcpyHostToDevice, 0));
-    CHECK_CUDA(cudaMemsetAsync(g_engine.d_moe_out, 0, (size_t)batch_m * DS_DIM * sizeof(float), 0));
+    if (!g_engine.cur_is_decode) {
+        CHECK_CUDA(cudaMemsetAsync(g_engine.d_moe_out, 0, (size_t)batch_m * DS_DIM * sizeof(float), 0));
+    }
 
     const uint8_t* d_sh = g_engine.layers[layer_id].d_shared;
     const uint8_t* sw1  = d_sh + OFF_SHARED_W1_W;
@@ -8020,15 +8893,35 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_moe_and_post_batch(
     const uint8_t* ss3  = d_sh + OFF_SHARED_W3_S;
     const uint8_t* ss2  = d_sh + OFF_SHARED_W2_S;
 
-    dim3 g_sh_s1(72, batch_m);
-    dsv41_shared_expert_stage1_swiglu_t1_kernel<<<g_sh_s1, 256>>>(
-        g_engine.d_x_norm, sw1, ss1, sw3, ss3, g_engine.d_shared_inter
-    );
-
-    dim3 g_sh_s2(160, batch_m);
-    dsv41_shared_expert_stage2_only_t1_kernel<<<g_sh_s2, 256>>>(
-        g_engine.d_shared_inter, sw2, ss2, g_engine.d_shared_out
-    );
+    if (batch_m == 1) {
+        dsv41_shared_expert_stage1_swiglu_t1_kernel<<<72, 256>>>(
+            g_engine.d_x_norm, sw1, ss1, sw3, ss3, g_engine.d_shared_inter
+        );
+        dsv41_shared_expert_stage2_only_t1_kernel<<<160, 256>>>(
+            g_engine.d_shared_inter, sw2, ss2, g_engine.d_shared_out
+        );
+    } else if (batch_m == 2) {
+        dsv41_shared_expert_stage1_swiglu_batch_kernel<2><<<72, 256>>>(
+            g_engine.d_x_norm, sw1, ss1, sw3, ss3, g_engine.d_shared_inter, batch_m
+        );
+        dsv41_shared_expert_stage2_only_batch_kernel<2><<<160, 256>>>(
+            g_engine.d_shared_inter, sw2, ss2, g_engine.d_shared_out, batch_m
+        );
+    } else if (batch_m <= 4) {
+        dsv41_shared_expert_stage1_swiglu_batch_kernel<4><<<72, 256>>>(
+            g_engine.d_x_norm, sw1, ss1, sw3, ss3, g_engine.d_shared_inter, batch_m
+        );
+        dsv41_shared_expert_stage2_only_batch_kernel<4><<<160, 256>>>(
+            g_engine.d_shared_inter, sw2, ss2, g_engine.d_shared_out, batch_m
+        );
+    } else {
+        dsv41_shared_expert_stage1_swiglu_batch_kernel<8><<<72, 256>>>(
+            g_engine.d_x_norm, sw1, ss1, sw3, ss3, g_engine.d_shared_inter, batch_m
+        );
+        dsv41_shared_expert_stage2_only_batch_kernel<8><<<160, 256>>>(
+            g_engine.d_shared_inter, sw2, ss2, g_engine.d_shared_out, batch_m
+        );
+    }
 
     bool run_plastic = (layer_id >= 32 && g_engine.has_plastic && plastic_alpha != 0.0f);
     if (run_plastic) {
@@ -8085,7 +8978,8 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_moe_and_post_batch(
         plastic_alpha,
         g_engine.d_post_mix,
         g_engine.d_comb_mix,
-        g_engine.d_x_hc
+        g_engine.d_x_hc,
+        k_counts_packed
     );
 
     return 0;
@@ -8114,6 +9008,102 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_moe_and_post(
     );
 }
 
+extern "C" __declspec(dllexport) int mcl4_dsv41_engine_commit_batch_prefix(
+    int base_pos,
+    int batch_m,
+    int k_accepted
+) {
+    if (!g_engine.initialized || batch_m < 1 || batch_m > DS_MAX_BATCH_M) return -1;
+    if (k_accepted < 1) k_accepted = 1;
+    if (k_accepted > batch_m) k_accepted = batch_m;
+
+    if (batch_m > 1 && k_accepted < batch_m) {
+        // 1. Roll back 40-layer sliding window KV cache for rejected draft slots [k_accepted .. batch_m - 1]
+        dsv41_rollback_win_kv_step_bak_kernel<<<40, 256>>>(
+            g_engine.d_window_kv_all,
+            g_engine.d_win_kv_step_bak,
+            base_pos,
+            batch_m,
+            k_accepted
+        );
+
+        // 2. Roll back KV compressor states and any pooled compressor KV slots for rejected draft slots
+        int ratios[4] = {8, 4, 2, 1};
+        for (int src_idx = 0; src_idx < 4; ++src_idx) {
+            int ratio = ratios[src_idx];
+            CHECK_CUDA(cudaMemcpyAsync(
+                g_engine.d_comp_state[src_idx],
+                g_engine.d_comp_state_step + ((size_t)(k_accepted - 1) * 4 + src_idx) * 8 * 1024,
+                (size_t)ratio * 1024 * sizeof(float),
+                cudaMemcpyDeviceToDevice,
+                0
+            ));
+            for (int m = batch_m - 1; m >= k_accepted; --m) {
+                int pos = base_pos + m;
+                if (((pos + 1) % ratio) == 0) {
+                    int group_idx = (pos / ratio) & 511;
+                    CHECK_CUDA(cudaMemcpyAsync(
+                        g_engine.d_comp_kv_cache[src_idx] + (size_t)group_idx * 512,
+                        g_engine.d_comp_kv_step_bak + ((size_t)src_idx * DS_MAX_BATCH_M + m) * 512,
+                        512 * sizeof(__nv_bfloat16),
+                        cudaMemcpyDeviceToDevice,
+                        0
+                    ));
+                }
+            }
+        }
+    }
+
+    int acc_slot = k_accepted - 1;
+    if (acc_slot > 0) {
+        const __nv_bfloat16* x_hc_m    = g_engine.d_x_hc    + (size_t)acc_slot * DS_HC_DIM;
+        const float*         pre_mix_m = g_engine.d_pre_mix + (size_t)acc_slot * 4;
+        CHECK_CUDA(cudaMemcpyAsync(g_engine.d_x_hc,    x_hc_m,    DS_HC_DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice, 0));
+        CHECK_CUDA(cudaMemcpyAsync(g_engine.d_pre_mix, pre_mix_m, 4 * sizeof(float),                 cudaMemcpyDeviceToDevice, 0));
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int mcl4_dsv41_engine_compute_logits_batch(
+    int batch_m,
+    int32_t* out_top64_ids_batch, // [batch_m, 64]
+    float* out_top64_logits_batch // [batch_m, 64]
+) {
+    if (!g_engine.initialized || batch_m < 1 || batch_m > DS_MAX_BATCH_M) return -1;
+
+    dsv41_final_hc_pre_rmsnorm_t1_kernel<<<batch_m, 512>>>(
+        g_engine.d_x_hc, g_engine.d_pre_mix, g_engine.d_final_norm_w, g_engine.d_x_norm
+    );
+    if (batch_m == 1) {
+        dsv41_lm_head_fp8_t1_kernel<<<4040, 256>>>(
+            g_engine.d_x_norm, g_engine.d_lm_head_fp8, g_engine.d_lm_head_s, g_engine.d_logits
+        );
+    } else if (batch_m == 2) {
+        dsv41_lm_head_fp8_batch_kernel<2><<<4040, 256>>>(
+            g_engine.d_x_norm, g_engine.d_lm_head_fp8, g_engine.d_lm_head_s, g_engine.d_logits, batch_m
+        );
+    } else if (batch_m <= 4) {
+        dsv41_lm_head_fp8_batch_kernel<4><<<4040, 256>>>(
+            g_engine.d_x_norm, g_engine.d_lm_head_fp8, g_engine.d_lm_head_s, g_engine.d_logits, batch_m
+        );
+    } else {
+        dsv41_lm_head_fp8_batch_kernel<8><<<4040, 256>>>(
+            g_engine.d_x_norm, g_engine.d_lm_head_fp8, g_engine.d_lm_head_s, g_engine.d_logits, batch_m
+        );
+    }
+    dim3 g_s1(64, batch_m);
+    dsv41_logits_top256_stage1_kernel<<<g_s1, 256>>>(
+        g_engine.d_logits, g_engine.d_cand256_ids, g_engine.d_cand256_vals
+    );
+    dsv41_logits_top64_stage2_kernel<<<batch_m, 256>>>(
+        g_engine.d_cand256_ids, g_engine.d_cand256_vals, g_engine.h_pinned_top64_ids, g_engine.h_pinned_top64_vals
+    );
+    CHECK_CUDA(cudaStreamSynchronize(0));
+    memcpy(out_top64_ids_batch,    g_engine.h_pinned_top64_ids,  (size_t)batch_m * 64 * sizeof(int32_t));
+    memcpy(out_top64_logits_batch, g_engine.h_pinned_top64_vals, (size_t)batch_m * 64 * sizeof(float));
+    return 0;
+}
+
 extern "C" __declspec(dllexport) int mcl4_dsv41_engine_compute_logits_for_slot(
     int batch_slot,
     int32_t* out_top64_ids,
@@ -8135,17 +9125,18 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_compute_logits_for_slot(
         g_engine.d_logits, g_engine.d_cand256_ids, g_engine.d_cand256_vals
     );
     dsv41_logits_top64_stage2_kernel<<<1, 256>>>(
-        g_engine.d_cand256_ids, g_engine.d_cand256_vals, g_engine.d_top64_ids, g_engine.d_top64_vals
+        g_engine.d_cand256_ids, g_engine.d_cand256_vals, g_engine.h_pinned_top64_ids, g_engine.h_pinned_top64_vals
     );
 
     if (batch_slot > 0) {
         // Sync latest batch_slot state to slot 0 so save_kv_snapshot captures the end-of-batch state
-        CHECK_CUDA(cudaMemcpy(g_engine.d_x_hc,    x_hc_m,    DS_HC_DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice));
-        CHECK_CUDA(cudaMemcpy(g_engine.d_pre_mix, pre_mix_m, 4 * sizeof(float),                 cudaMemcpyDeviceToDevice));
+        CHECK_CUDA(cudaMemcpyAsync(g_engine.d_x_hc,    x_hc_m,    DS_HC_DIM * sizeof(__nv_bfloat16), cudaMemcpyDeviceToDevice, 0));
+        CHECK_CUDA(cudaMemcpyAsync(g_engine.d_pre_mix, pre_mix_m, 4 * sizeof(float),                 cudaMemcpyDeviceToDevice, 0));
     }
 
-    CHECK_CUDA(cudaMemcpy(out_top64_ids,    g_engine.d_top64_ids,  64 * sizeof(int32_t), cudaMemcpyDeviceToHost));
-    CHECK_CUDA(cudaMemcpy(out_top64_logits, g_engine.d_top64_vals, 64 * sizeof(float),   cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaStreamSynchronize(0));
+    memcpy(out_top64_ids,    g_engine.h_pinned_top64_ids,  64 * sizeof(int32_t));
+    memcpy(out_top64_logits, g_engine.h_pinned_top64_vals, 64 * sizeof(float));
     return 0;
 }
 

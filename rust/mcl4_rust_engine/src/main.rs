@@ -223,6 +223,18 @@ extern "C" {
         plastic_alpha: f32,
     ) -> i32;
 
+    pub fn mcl4_dsv41_engine_commit_batch_prefix(
+        base_pos: i32,
+        batch_m: i32,
+        k_accepted: i32,
+    ) -> i32;
+
+    pub fn mcl4_dsv41_engine_compute_logits_batch(
+        batch_m: i32,
+        out_top64_ids_batch: *mut i32,
+        out_top64_logits_batch: *mut f32,
+    ) -> i32;
+
     pub fn mcl4_dsv41_engine_compute_logits_for_slot(
         batch_slot: i32,
         out_top64_ids: *mut i32,

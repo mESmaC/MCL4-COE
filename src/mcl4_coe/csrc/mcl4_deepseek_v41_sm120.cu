@@ -7434,6 +7434,7 @@ struct Mcl4Dsv41FullEngine {
     cudaEvent_t    ev_prefetch_done     = nullptr;
     cudaEvent_t    ev_moe_done          = nullptr;
     bool           pending_prefetch_dma = false;
+    int            inflight_moe_layer   = -1;
 
     Dsv41Mcl4cExpertPacket* d_arena        = nullptr; // [num_arena_slots] up to 168 in VRAM (~3.19 GiB)
     Dsv41ExpertGroupTask*   h_pinned_tasks = nullptr; // Pinned host staging [DS_MAX_MOE_GROUPS]
@@ -8533,6 +8534,7 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_attn_and_route_batc
 
     // Single stream synchronization instead of 2-3 separate unpinned WDDM cudaMemcpy calls!
     CHECK_CUDA(cudaStreamSynchronize(0));
+    g_engine.inflight_moe_layer = -1;
     memcpy(out_top6_indices_batch, g_engine.h_pinned_top_idx, (size_t)batch_m * DS_TOP_K * sizeof(int32_t));
     memcpy(out_top6_weights_batch, g_engine.h_pinned_top_w,   (size_t)batch_m * DS_TOP_K * sizeof(float));
     if (out_next_layer_lookahead_top6 && layer_id + 1 < 40) {
@@ -8637,16 +8639,25 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_prestage_vram_experts(
                                 break;
                             }
                         }
-                        if (!pinned_in_step && g_engine.arena_lru_tick[s] < best_tick) {
-                            best_tick = g_engine.arena_lru_tick[s];
-                            best_slot = s;
+                        if (!pinned_in_step) {
+                            uint64_t prio = (g_engine.inflight_moe_layer >= 0 &&
+                                             g_engine.arena_cached_layer[s] == g_engine.inflight_moe_layer)
+                                ? (g_engine.arena_lru_tick[s] | (1ULL << 62))
+                                : g_engine.arena_lru_tick[s];
+                            if (prio < best_tick) {
+                                best_tick = prio;
+                                best_slot = s;
+                            }
                         }
                     }
                 }
             }
             if (best_slot >= 0) {
-                if (best_slot >= ring_base && !waited_moe_done) {
+                if (best_slot >= ring_base && !waited_moe_done &&
+                    g_engine.inflight_moe_layer >= 0 &&
+                    g_engine.arena_cached_layer[best_slot] == g_engine.inflight_moe_layer) {
                     CHECK_CUDA(cudaStreamWaitEvent(g_engine.stream_prefetch, g_engine.ev_moe_done, 0));
+                    g_engine.inflight_moe_layer = -1;
                     waited_moe_done = true;
                 }
                 CHECK_CUDA(cudaMemcpyAsync(
@@ -8823,8 +8834,11 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_moe_and_post_batch(
                 }
             }
             if (h_unique_expert_ptrs && h_unique_expert_ptrs[u]) {
-                if (best_slot >= ring_base && !waited_moe_done) {
+                if (best_slot >= ring_base && !waited_moe_done &&
+                    g_engine.inflight_moe_layer >= 0 &&
+                    g_engine.arena_cached_layer[best_slot] == g_engine.inflight_moe_layer) {
                     CHECK_CUDA(cudaStreamWaitEvent(g_engine.stream_prefetch, g_engine.ev_moe_done, 0));
+                    g_engine.inflight_moe_layer = -1;
                     waited_moe_done = true;
                 }
                 const Dsv41Mcl4cExpertPacket* src_ptr = h_unique_expert_ptrs[u];
@@ -8968,6 +8982,7 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_moe_and_post_batch(
         g_engine.d_moe_out
     );
     CHECK_CUDA(cudaEventRecord(g_engine.ev_moe_done, 0));
+    g_engine.inflight_moe_layer = layer_id;
 
     // 4. Fused Routed MoE + Shared Down + Plastic Delta + Batched FFN HC Post
     dim3 g_post(10, batch_m);

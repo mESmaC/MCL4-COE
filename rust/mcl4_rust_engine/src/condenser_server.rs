@@ -1331,6 +1331,127 @@ impl CondenserEngineState {
             let mut slot_ut_routes = [[0i32; TOTAL_UT_PKTS]; 8];
             let mut slot_dispatches = [0usize; 8];
 
+            // Upfront Dual-Controller (`X:` Even + `Z:` Odd) High-QD Scatter-Gather Prefetch across all 40 layers:
+            // When `step_route_predictor` knows the batch's 40-layer route trajectory, batch-fetch any tail cache misses
+            // across both Intel DC P4608 SSDs simultaneously in one high-QD burst before Layer 0 begins!
+            if _decode_step_idx.is_some() {
+                let mut batch_pred_all: Vec<(usize, usize)> = Vec::new();
+                {
+                    let pred_map = self.step_route_predictor.lock().unwrap();
+                    if pred_map.contains_key(&(cur_prompt_hash, base_pos, 0)) {
+                        batch_pred_all.reserve(batch_m * 40 * 3);
+                        for l in 0..40usize {
+                            for m in 0..batch_m {
+                                if let Some(exps) = pred_map.get(&(cur_prompt_hash, base_pos + m, l)) {
+                                    for &e in exps {
+                                        if !batch_pred_all.contains(&(l, e)) {
+                                            batch_pred_all.push((l, e));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if !batch_pred_all.is_empty() {
+                    let mut missing_batch: Vec<(usize, usize, Box<Dsv41Mcl4cExpertPacket>)> = Vec::new();
+                    {
+                        let mut cache = self.hot_expert_cache.lock().unwrap();
+                        for &(l, exp) in &batch_pred_all {
+                            if missing_batch.len() >= 64 {
+                                break;
+                            }
+                            let in_vram = unsafe {
+                                mcl4_dsv41_engine_has_vram_expert(l as i32, exp as i32) != 0
+                            };
+                            if !in_vram && !cache.contains_key(&(l, exp)) {
+                                self.cache_misses.fetch_add(1, Ordering::Relaxed);
+                                let mut recycled_slab: Option<Box<Dsv41Mcl4cExpertPacket>> = None;
+                                while cache.len() + missing_batch.len() >= 940 {
+                                    let evict_cand = cache
+                                        .iter()
+                                        .filter(|(&k, _)| !batch_pred_all.contains(&k))
+                                        .min_by_key(|(&(cl, ce), v)| {
+                                            if v.prompt_hash != cur_prompt_hash {
+                                                (0u8, 0u32, v.last_tick)
+                                            } else if v.first_decode_step == u32::MAX {
+                                                (1u8, 0u32, v.last_tick)
+                                            } else {
+                                                let locked_vram = unsafe {
+                                                    mcl4_dsv41_engine_has_vram_expert(cl as i32, ce as i32) == 2
+                                                };
+                                                if locked_vram {
+                                                    (2u8, 0u32, v.last_tick)
+                                                } else {
+                                                    (3u8, u32::MAX - v.first_decode_step, u64::MAX - v.last_tick)
+                                                }
+                                            }
+                                        })
+                                        .map(|(&k, _)| k);
+                                    if let Some(evict_key) = evict_cand {
+                                        if let Some(evicted_entry) = cache.remove(&evict_key) {
+                                            if let Ok(boxed_slab) = Arc::try_unwrap(evicted_entry.pkt) {
+                                                if recycled_slab.is_none() {
+                                                    recycled_slab = Some(boxed_slab);
+                                                } else {
+                                                    self.free_slab_pool.lock().unwrap().push(boxed_slab);
+                                                }
+                                                if cache.len() + missing_batch.len() < 940 {
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                let slab = recycled_slab.unwrap_or_else(|| self.acquire_pinned_slab());
+                                missing_batch.push((l, exp, slab));
+                            }
+                        }
+                    }
+                    if !missing_batch.is_empty() {
+                        let loaded_batch: Vec<(usize, usize, Arc<Box<Dsv41Mcl4cExpertPacket>>)> =
+                            thread::scope(|s| -> io::Result<_> {
+                                let mut handles = Vec::with_capacity(missing_batch.len());
+                                for (l, exp, mut pkt) in missing_batch {
+                                    let store_ref = &self.p4608_store;
+                                    let index_ref = &self.index;
+                                    handles.push(s.spawn(move || -> io::Result<_> {
+                                        if store_ref
+                                            .read_expert_single_syscall(l, exp, &mut pkt)
+                                            .is_err()
+                                        {
+                                            index_ref.stream_expert_packet(l, exp, &mut pkt)?;
+                                        }
+                                        Ok((l, exp, Arc::new(pkt)))
+                                    }));
+                                }
+                                let mut out = Vec::with_capacity(handles.len());
+                                for h in handles {
+                                    out.push(h.join().unwrap()?);
+                                }
+                                Ok(out)
+                            })?;
+                        let mut cache = self.hot_expert_cache.lock().unwrap();
+                        for (l, exp, arc_pkt) in loaded_batch {
+                            cache.insert(
+                                (l, exp),
+                                CachedExpertEntry {
+                                    pkt: arc_pkt,
+                                    cos_s1: self.calibrated_cos_s1,
+                                    cos_s2: self.calibrated_cos_s2,
+                                    us_moe: self.calibrated_us_moe,
+                                    last_tick: CACHE_LRU_TICK.fetch_add(1, Ordering::Relaxed),
+                                    prompt_hash: cur_prompt_hash,
+                                    first_decode_step: step_u32,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+
             for layer in 0..40usize {
                 // 0. Cross-Attention PCIe H2D Pre-Stage across all `m in 0..batch_m`:
                 //    Before launching Layer `layer`'s Attention + Router on Stream 0 (`~0.42 ms`),

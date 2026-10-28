@@ -7444,6 +7444,9 @@ struct Mcl4Dsv41FullEngine {
     cudaEvent_t    ev_moe_done          = nullptr;
     bool           pending_prefetch_dma = false;
     int            inflight_moe_layer   = -1;
+    int            shared_prelaunched_layer = -1;
+    int            shared_prelaunched_m     = 0;
+    bool           in_multi_chunk_prefill   = false;
     uint64_t       moe_dispatch_seq     = 0;
     uint64_t       moe_synced_seq       = 0;
 
@@ -8563,6 +8566,52 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_attn_and_route_batc
     if (out_next_layer_lookahead_top6 && layer_id + 1 < 40) {
         memcpy(out_next_layer_lookahead_top6, g_engine.h_pinned_next_idx, DS_TOP_K * sizeof(int32_t));
     }
+
+    // 9. Immediately pre-launch Shared Expert Stage-1 + Stage-2 on stream 0 so the GPU computes
+    // the 35.4 MB Shared Expert in parallel while the CPU / NVMe stripe pool resolves routed experts!
+    if (!g_engine.in_multi_chunk_prefill) {
+        const uint8_t* d_sh = g_engine.layers[layer_id].d_shared;
+        const uint8_t* sw1  = d_sh + OFF_SHARED_W1_W;
+        const uint8_t* sw3  = d_sh + OFF_SHARED_W3_W;
+        const uint8_t* sw2  = d_sh + OFF_SHARED_W2_W;
+        const uint8_t* ss1  = d_sh + OFF_SHARED_W1_S;
+        const uint8_t* ss3  = d_sh + OFF_SHARED_W3_S;
+        const uint8_t* ss2  = d_sh + OFF_SHARED_W2_S;
+        if (batch_m == 1) {
+            dsv41_shared_expert_stage1_swiglu_t1_kernel<<<72, 256>>>(
+                g_engine.d_x_norm, sw1, ss1, sw3, ss3, g_engine.d_shared_inter
+            );
+            dsv41_shared_expert_stage2_only_t1_kernel<<<160, 256>>>(
+                g_engine.d_shared_inter, sw2, ss2, g_engine.d_shared_out
+            );
+        } else if (batch_m == 2) {
+            dsv41_shared_expert_stage1_swiglu_batch_kernel<2><<<72, 256>>>(
+                g_engine.d_x_norm, sw1, ss1, sw3, ss3, g_engine.d_shared_inter, batch_m
+            );
+            dsv41_shared_expert_stage2_only_batch_kernel<2><<<160, 256>>>(
+                g_engine.d_shared_inter, sw2, ss2, g_engine.d_shared_out, batch_m
+            );
+        } else if (batch_m <= 4) {
+            dsv41_shared_expert_stage1_swiglu_batch_kernel<4><<<72, 256>>>(
+                g_engine.d_x_norm, sw1, ss1, sw3, ss3, g_engine.d_shared_inter, batch_m
+            );
+            dsv41_shared_expert_stage2_only_batch_kernel<4><<<160, 256>>>(
+                g_engine.d_shared_inter, sw2, ss2, g_engine.d_shared_out, batch_m
+            );
+        } else {
+            dsv41_shared_expert_stage1_swiglu_batch_kernel<8><<<72, 256>>>(
+                g_engine.d_x_norm, sw1, ss1, sw3, ss3, g_engine.d_shared_inter, batch_m
+            );
+            dsv41_shared_expert_stage2_only_batch_kernel<8><<<160, 256>>>(
+                g_engine.d_shared_inter, sw2, ss2, g_engine.d_shared_out, batch_m
+            );
+        }
+        g_engine.shared_prelaunched_layer = layer_id;
+        g_engine.shared_prelaunched_m     = batch_m;
+    } else {
+        g_engine.shared_prelaunched_layer = -1;
+        g_engine.shared_prelaunched_m     = 0;
+    }
     return 0;
 }
 
@@ -8918,42 +8967,49 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_moe_and_post_batch(
         CHECK_CUDA(cudaMemsetAsync(g_engine.d_moe_out, 0, (size_t)batch_m * DS_DIM * sizeof(float), 0));
     }
 
-    const uint8_t* d_sh = g_engine.layers[layer_id].d_shared;
-    const uint8_t* sw1  = d_sh + OFF_SHARED_W1_W;
-    const uint8_t* sw3  = d_sh + OFF_SHARED_W3_W;
-    const uint8_t* sw2  = d_sh + OFF_SHARED_W2_W;
-    const uint8_t* ss1  = d_sh + OFF_SHARED_W1_S;
-    const uint8_t* ss3  = d_sh + OFF_SHARED_W3_S;
-    const uint8_t* ss2  = d_sh + OFF_SHARED_W2_S;
-
-    if (batch_m == 1) {
-        dsv41_shared_expert_stage1_swiglu_t1_kernel<<<72, 256>>>(
-            g_engine.d_x_norm, sw1, ss1, sw3, ss3, g_engine.d_shared_inter
-        );
-        dsv41_shared_expert_stage2_only_t1_kernel<<<160, 256>>>(
-            g_engine.d_shared_inter, sw2, ss2, g_engine.d_shared_out
-        );
-    } else if (batch_m == 2) {
-        dsv41_shared_expert_stage1_swiglu_batch_kernel<2><<<72, 256>>>(
-            g_engine.d_x_norm, sw1, ss1, sw3, ss3, g_engine.d_shared_inter, batch_m
-        );
-        dsv41_shared_expert_stage2_only_batch_kernel<2><<<160, 256>>>(
-            g_engine.d_shared_inter, sw2, ss2, g_engine.d_shared_out, batch_m
-        );
-    } else if (batch_m <= 4) {
-        dsv41_shared_expert_stage1_swiglu_batch_kernel<4><<<72, 256>>>(
-            g_engine.d_x_norm, sw1, ss1, sw3, ss3, g_engine.d_shared_inter, batch_m
-        );
-        dsv41_shared_expert_stage2_only_batch_kernel<4><<<160, 256>>>(
-            g_engine.d_shared_inter, sw2, ss2, g_engine.d_shared_out, batch_m
-        );
+    if (g_engine.shared_prelaunched_layer == layer_id && g_engine.shared_prelaunched_m == batch_m) {
+        g_engine.shared_prelaunched_layer = -1;
+        g_engine.shared_prelaunched_m     = 0;
     } else {
-        dsv41_shared_expert_stage1_swiglu_batch_kernel<8><<<72, 256>>>(
-            g_engine.d_x_norm, sw1, ss1, sw3, ss3, g_engine.d_shared_inter, batch_m
-        );
-        dsv41_shared_expert_stage2_only_batch_kernel<8><<<160, 256>>>(
-            g_engine.d_shared_inter, sw2, ss2, g_engine.d_shared_out, batch_m
-        );
+        g_engine.shared_prelaunched_layer = -1;
+        g_engine.shared_prelaunched_m     = 0;
+        const uint8_t* d_sh = g_engine.layers[layer_id].d_shared;
+        const uint8_t* sw1  = d_sh + OFF_SHARED_W1_W;
+        const uint8_t* sw3  = d_sh + OFF_SHARED_W3_W;
+        const uint8_t* sw2  = d_sh + OFF_SHARED_W2_W;
+        const uint8_t* ss1  = d_sh + OFF_SHARED_W1_S;
+        const uint8_t* ss3  = d_sh + OFF_SHARED_W3_S;
+        const uint8_t* ss2  = d_sh + OFF_SHARED_W2_S;
+
+        if (batch_m == 1) {
+            dsv41_shared_expert_stage1_swiglu_t1_kernel<<<72, 256>>>(
+                g_engine.d_x_norm, sw1, ss1, sw3, ss3, g_engine.d_shared_inter
+            );
+            dsv41_shared_expert_stage2_only_t1_kernel<<<160, 256>>>(
+                g_engine.d_shared_inter, sw2, ss2, g_engine.d_shared_out
+            );
+        } else if (batch_m == 2) {
+            dsv41_shared_expert_stage1_swiglu_batch_kernel<2><<<72, 256>>>(
+                g_engine.d_x_norm, sw1, ss1, sw3, ss3, g_engine.d_shared_inter, batch_m
+            );
+            dsv41_shared_expert_stage2_only_batch_kernel<2><<<160, 256>>>(
+                g_engine.d_shared_inter, sw2, ss2, g_engine.d_shared_out, batch_m
+            );
+        } else if (batch_m <= 4) {
+            dsv41_shared_expert_stage1_swiglu_batch_kernel<4><<<72, 256>>>(
+                g_engine.d_x_norm, sw1, ss1, sw3, ss3, g_engine.d_shared_inter, batch_m
+            );
+            dsv41_shared_expert_stage2_only_batch_kernel<4><<<160, 256>>>(
+                g_engine.d_shared_inter, sw2, ss2, g_engine.d_shared_out, batch_m
+            );
+        } else {
+            dsv41_shared_expert_stage1_swiglu_batch_kernel<8><<<72, 256>>>(
+                g_engine.d_x_norm, sw1, ss1, sw3, ss3, g_engine.d_shared_inter, batch_m
+            );
+            dsv41_shared_expert_stage2_only_batch_kernel<8><<<160, 256>>>(
+                g_engine.d_shared_inter, sw2, ss2, g_engine.d_shared_out, batch_m
+            );
+        }
     }
 
     bool run_plastic = (layer_id >= 32 && g_engine.has_plastic && plastic_alpha != 0.0f);
@@ -9294,6 +9350,9 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_prefill_layer_attn_and_ro
     if (!g_engine.initialized || layer_id < 0 || layer_id >= 40 ||
         prefill_m < 1 || prefill_m > Mcl4Dsv41FullEngine::DS_MAX_PREFILL_M) return -1;
 
+    g_engine.in_multi_chunk_prefill   = true;
+    g_engine.shared_prelaunched_layer = -1;
+    g_engine.shared_prelaunched_m     = 0;
     for (int off = 0; off < prefill_m; off += DS_MAX_BATCH_M) {
         int chunk_m = (prefill_m - off < DS_MAX_BATCH_M) ? (prefill_m - off) : DS_MAX_BATCH_M;
         CHECK_CUDA(cudaMemcpyAsync(
@@ -9336,7 +9395,10 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_prefill_layer_attn_and_ro
             out_top6_weights_all + (size_t)off * DS_TOP_K,
             nullptr
         );
-        if (rc != 0) return rc;
+        if (rc != 0) {
+            g_engine.in_multi_chunk_prefill = false;
+            return rc;
+        }
 
         CHECK_CUDA(cudaMemcpyAsync(
             g_engine.d_pf_x_hc + (size_t)off * DS_HC_DIM,
@@ -9374,6 +9436,9 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_prefill_layer_attn_and_ro
             0
         ));
     }
+    g_engine.in_multi_chunk_prefill   = false;
+    g_engine.shared_prelaunched_layer = -1;
+    g_engine.shared_prelaunched_m     = 0;
     return 0;
 }
 
@@ -9392,6 +9457,9 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_prefill_layer_moe_chunk(
 ) {
     if (!g_engine.initialized || off < 0 || chunk_m < 1 || chunk_m > DS_MAX_BATCH_M ||
         off + chunk_m > Mcl4Dsv41FullEngine::DS_MAX_PREFILL_M) return -1;
+
+    g_engine.shared_prelaunched_layer = -1;
+    g_engine.shared_prelaunched_m     = 0;
 
     CHECK_CUDA(cudaMemcpyAsync(
         g_engine.d_x_hc,

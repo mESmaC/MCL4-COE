@@ -878,20 +878,39 @@ impl CondenserEngineState {
             );
         }
 
-        // Pre-allocate 24 reusable Pinned Host Slabs (~478 MiB) so cache misses never pay VirtualAlloc + cudaHostRegister!
-        let mut init_free_pool = Vec::with_capacity(64);
-        for _ in 0..24 {
-            let mut slab = Dsv41Mcl4cExpertPacket::new_zeroed_box();
-            if REGISTERED_PINNED_SLABS.fetch_add(1, Ordering::Relaxed) < 900 {
-                unsafe {
-                    let _ = mcl4_dsv41_register_pinned_host_slab(
-                        slab.as_mut() as *mut Dsv41Mcl4cExpertPacket as *mut std::ffi::c_void,
-                        std::mem::size_of::<Dsv41Mcl4cExpertPacket>(),
-                    );
-                }
+        // Pre-allocate 420 reusable Pinned Host Slabs (~7.98 GiB) in parallel across 16 threads at startup
+        // (128 warm + 420 free = 548 pinned slabs), covering 100% of Pass 1 misses with zero runtime page faults
+        // while keeping 100% of slabs pinned (`< 968`) for true async PCIe H2D DMA on `stream_prefetch`!
+        let target_free_slabs = 420usize;
+        let init_free_pool = thread::scope(|s| {
+            let num_workers = 16usize;
+            let mut handles = Vec::with_capacity(num_workers);
+            for w in 0..num_workers {
+                let count = (target_free_slabs + num_workers - 1 - w) / num_workers;
+                handles.push(s.spawn(move || {
+                    let mut local = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        let mut slab = Dsv41Mcl4cExpertPacket::new_zeroed_box();
+                        if REGISTERED_PINNED_SLABS.fetch_add(1, Ordering::Relaxed) < 968 {
+                            unsafe {
+                                let _ = mcl4_dsv41_register_pinned_host_slab(
+                                    slab.as_mut() as *mut Dsv41Mcl4cExpertPacket
+                                        as *mut std::ffi::c_void,
+                                    std::mem::size_of::<Dsv41Mcl4cExpertPacket>(),
+                                );
+                            }
+                        }
+                        local.push(slab);
+                    }
+                    local
+                }));
             }
-            init_free_pool.push(slab);
-        }
+            let mut pool = Vec::with_capacity(target_free_slabs);
+            for h in handles {
+                pool.extend(h.join().unwrap());
+            }
+            pool
+        });
 
         let state = Self {
             index,
@@ -1098,36 +1117,90 @@ impl CondenserEngineState {
         }
 
         if !missing_slots.is_empty() {
-            let targets: Vec<(usize, usize)> =
-                missing_slots.iter().map(|&(_, exp, _)| (layer, exp)).collect();
-            let drives = P4608DualDriveExpertStore::choose_balanced_drives(&targets);
-            let loaded: Vec<(usize, usize, Arc<Box<Dsv41Mcl4cExpertPacket>>)> =
-                thread::scope(|s| -> io::Result<_> {
+            // Overlap PCIe H2D DMA of any contiguous rank-0 prefix (`0..first_miss`) of Host-RAM hits
+            // while passing ALL `exp_ids[0..n_pin]` so every VRAM hit in the batch is pinned!
+            let n_pin = exp_ids.len().min(40);
+            if n_pin > 0 {
+                let first_miss = missing_slots
+                    .iter()
+                    .map(|&(slot_idx, _, _)| slot_idx)
+                    .min()
+                    .unwrap_or(0)
+                    .min(n_pin);
+                if first_miss > 0 {
+                    let mut pre_ptrs = [std::ptr::null::<Dsv41Mcl4cExpertPacket>(); 48];
+                    let mut pre_ids = [0i32; 48];
+                    let mut any_host_hit = false;
+                    for (u, &eid) in exp_ids.iter().take(n_pin).enumerate() {
+                        pre_ids[u] = eid as i32;
+                        if u < first_miss {
+                            if let Some(ref arc_pkt) = results[u] {
+                                pre_ptrs[u] =
+                                    arc_pkt.as_ref().as_ref() as *const Dsv41Mcl4cExpertPacket;
+                                any_host_hit = true;
+                            }
+                        }
+                    }
+                    if any_host_hit {
+                        unsafe {
+                            mcl4_dsv41_engine_prestage_vram_experts(
+                                layer as i32,
+                                pre_ptrs.as_ptr(),
+                                pre_ids.as_ptr(),
+                                n_pin as i32,
+                            );
+                        }
+                    }
+                }
+            }
+
+            let stripe_tasks: Vec<(usize, usize, usize)> = missing_slots
+                .iter_mut()
+                .map(|(_, exp, pkt)| {
+                    (
+                        layer,
+                        *exp,
+                        (pkt.as_mut() as *mut Dsv41Mcl4cExpertPacket) as usize,
+                    )
+                })
+                .collect();
+
+            if self
+                .p4608_store
+                .read_expert_addrs_striped(&stripe_tasks)
+                .is_err()
+            {
+                let targets: Vec<(usize, usize)> =
+                    missing_slots.iter().map(|&(_, exp, _)| (layer, exp)).collect();
+                let drives = P4608DualDriveExpertStore::choose_balanced_drives(&targets);
+                thread::scope(|s| -> io::Result<()> {
                     let mut handles = Vec::with_capacity(missing_slots.len());
-                    for ((slot_idx, exp, mut pkt), drv_idx) in
-                        missing_slots.into_iter().zip(drives.into_iter())
+                    for ((_, exp, pkt), drv_idx) in
+                        missing_slots.iter_mut().zip(drives.into_iter())
                     {
+                        let exp_val = *exp;
                         let store_ref = &self.p4608_store;
                         let index_ref = &self.index;
-                        handles.push(s.spawn(move || -> io::Result<_> {
+                        handles.push(s.spawn(move || -> io::Result<()> {
                             if store_ref
-                                .read_expert_on_drive(drv_idx, layer, exp, &mut pkt)
+                                .read_expert_on_drive(drv_idx, layer, exp_val, pkt)
                                 .is_err()
                             {
-                                index_ref.stream_expert_packet(layer, exp, &mut pkt)?;
+                                index_ref.stream_expert_packet(layer, exp_val, pkt)?;
                             }
-                            Ok((slot_idx, exp, Arc::new(pkt)))
+                            Ok(())
                         }));
                     }
-                    let mut out = Vec::with_capacity(handles.len());
                     for h in handles {
-                        out.push(h.join().unwrap()?);
+                        h.join().unwrap()?;
                     }
-                    Ok(out)
+                    Ok(())
                 })?;
+            }
 
             let mut cache = self.hot_expert_cache.lock().unwrap();
-            for (slot_idx, exp, arc_pkt) in loaded {
+            for (slot_idx, exp, pkt) in missing_slots {
+                let arc_pkt = Arc::new(pkt);
                 cache.insert(
                     (layer, exp),
                     CachedExpertEntry {
@@ -1458,39 +1531,57 @@ impl CondenserEngineState {
                         }
                     }
                     if !missing_batch.is_empty() {
-                        let targets: Vec<(usize, usize)> =
-                            missing_batch.iter().map(|&(l, exp, _)| (l, exp)).collect();
-                        let drives = P4608DualDriveExpertStore::choose_balanced_drives(&targets);
-                        let loaded_batch: Vec<(usize, usize, Arc<Box<Dsv41Mcl4cExpertPacket>>)> =
-                            thread::scope(|s| -> io::Result<_> {
+                        let stripe_tasks: Vec<(usize, usize, usize)> = missing_batch
+                            .iter_mut()
+                            .map(|(l, exp, pkt)| {
+                                (
+                                    *l,
+                                    *exp,
+                                    (pkt.as_mut() as *mut Dsv41Mcl4cExpertPacket) as usize,
+                                )
+                            })
+                            .collect();
+                        if self
+                            .p4608_store
+                            .read_expert_addrs_striped(&stripe_tasks)
+                            .is_err()
+                        {
+                            let targets: Vec<(usize, usize)> =
+                                missing_batch.iter().map(|&(l, exp, _)| (l, exp)).collect();
+                            let drives =
+                                P4608DualDriveExpertStore::choose_balanced_drives(&targets);
+                            thread::scope(|s| -> io::Result<()> {
                                 let mut handles = Vec::with_capacity(missing_batch.len());
-                                for ((l, exp, mut pkt), drv_idx) in
-                                    missing_batch.into_iter().zip(drives.into_iter())
+                                for ((l, exp, pkt), drv_idx) in
+                                    missing_batch.iter_mut().zip(drives.into_iter())
                                 {
+                                    let l_val = *l;
+                                    let exp_val = *exp;
                                     let store_ref = &self.p4608_store;
                                     let index_ref = &self.index;
-                                    handles.push(s.spawn(move || -> io::Result<_> {
+                                    handles.push(s.spawn(move || -> io::Result<()> {
                                         if store_ref
-                                            .read_expert_on_drive(drv_idx, l, exp, &mut pkt)
+                                            .read_expert_on_drive(drv_idx, l_val, exp_val, pkt)
                                             .is_err()
                                         {
-                                            index_ref.stream_expert_packet(l, exp, &mut pkt)?;
+                                            index_ref
+                                                .stream_expert_packet(l_val, exp_val, pkt)?;
                                         }
-                                        Ok((l, exp, Arc::new(pkt)))
+                                        Ok(())
                                     }));
                                 }
-                                let mut out = Vec::with_capacity(handles.len());
                                 for h in handles {
-                                    out.push(h.join().unwrap()?);
+                                    h.join().unwrap()?;
                                 }
-                                Ok(out)
+                                Ok(())
                             })?;
+                        }
                         let mut cache = self.hot_expert_cache.lock().unwrap();
-                        for (l, exp, arc_pkt) in loaded_batch {
+                        for (l, exp, pkt) in missing_batch {
                             cache.insert(
                                 (l, exp),
                                 CachedExpertEntry {
-                                    pkt: arc_pkt,
+                                    pkt: Arc::new(pkt),
                                     cos_s1: self.calibrated_cos_s1,
                                     cos_s2: self.calibrated_cos_s2,
                                     us_moe: self.calibrated_us_moe,

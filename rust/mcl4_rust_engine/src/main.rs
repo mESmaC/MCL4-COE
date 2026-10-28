@@ -241,6 +241,36 @@ extern "C" {
         out_top64_logits: *mut f32,
     ) -> i32;
 
+    pub fn mcl4_dsv41_engine_prefill_init_batch(
+        token_history: *const i32,
+        base_seq_len: i32,
+        prefill_m: i32,
+    ) -> i32;
+
+    pub fn mcl4_dsv41_engine_prefill_layer_attn_and_route(
+        layer_id: i32,
+        base_pos: i32,
+        prefill_m: i32,
+        out_top6_indices_all: *mut i32,
+        out_top6_weights_all: *mut f32,
+    ) -> i32;
+
+    pub fn mcl4_dsv41_engine_prefill_layer_moe_chunk(
+        layer_id: i32,
+        base_pos: i32,
+        off: i32,
+        chunk_m: i32,
+        h_unique_expert_ptrs: *const *const Dsv41Mcl4cExpertPacket,
+        h_unique_expert_ids: *const i32,
+        num_unique_experts: i32,
+        h_top6_indices_chunk: *const i32,
+        h_top6_weights_chunk: *const f32,
+        k_active: i32,
+        plastic_alpha: f32,
+    ) -> i32;
+
+    pub fn mcl4_dsv41_engine_prefill_finish_batch(prefill_m: i32) -> i32;
+
     pub fn mcl4_dsv41_engine_compute_logits(
         out_top64_ids: *mut i32,
         out_top64_logits: *mut f32,

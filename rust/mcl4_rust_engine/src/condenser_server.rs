@@ -1098,15 +1098,20 @@ impl CondenserEngineState {
         }
 
         if !missing_slots.is_empty() {
+            let targets: Vec<(usize, usize)> =
+                missing_slots.iter().map(|&(_, exp, _)| (layer, exp)).collect();
+            let drives = P4608DualDriveExpertStore::choose_balanced_drives(&targets);
             let loaded: Vec<(usize, usize, Arc<Box<Dsv41Mcl4cExpertPacket>>)> =
                 thread::scope(|s| -> io::Result<_> {
                     let mut handles = Vec::with_capacity(missing_slots.len());
-                    for (slot_idx, exp, mut pkt) in missing_slots {
+                    for ((slot_idx, exp, mut pkt), drv_idx) in
+                        missing_slots.into_iter().zip(drives.into_iter())
+                    {
                         let store_ref = &self.p4608_store;
                         let index_ref = &self.index;
                         handles.push(s.spawn(move || -> io::Result<_> {
                             if store_ref
-                                .read_expert_single_syscall(layer, exp, &mut pkt)
+                                .read_expert_on_drive(drv_idx, layer, exp, &mut pkt)
                                 .is_err()
                             {
                                 index_ref.stream_expert_packet(layer, exp, &mut pkt)?;
@@ -1177,8 +1182,12 @@ impl CondenserEngineState {
                 let mut recycled = Vec::new();
                 if !cache.contains_key(&(next_layer, exp)) {
                     while cache.len() >= 840 {
-                        if let Some((&evict_key, _)) = cache.iter().min_by_key(|(_, v)| v.last_tick)
-                        {
+                        if let Some((&evict_key, _)) = cache.iter().min_by_key(|(_, v)| {
+                            (
+                                if v.first_decode_step == u32::MAX { 0u8 } else { 1u8 },
+                                v.last_tick,
+                            )
+                        }) {
                             if let Some(evicted_entry) = cache.remove(&evict_key) {
                                 if let Ok(boxed_slab) = Arc::try_unwrap(evicted_entry.pkt) {
                                     recycled.push(boxed_slab);
@@ -1449,15 +1458,20 @@ impl CondenserEngineState {
                         }
                     }
                     if !missing_batch.is_empty() {
+                        let targets: Vec<(usize, usize)> =
+                            missing_batch.iter().map(|&(l, exp, _)| (l, exp)).collect();
+                        let drives = P4608DualDriveExpertStore::choose_balanced_drives(&targets);
                         let loaded_batch: Vec<(usize, usize, Arc<Box<Dsv41Mcl4cExpertPacket>>)> =
                             thread::scope(|s| -> io::Result<_> {
                                 let mut handles = Vec::with_capacity(missing_batch.len());
-                                for (l, exp, mut pkt) in missing_batch {
+                                for ((l, exp, mut pkt), drv_idx) in
+                                    missing_batch.into_iter().zip(drives.into_iter())
+                                {
                                     let store_ref = &self.p4608_store;
                                     let index_ref = &self.index;
                                     handles.push(s.spawn(move || -> io::Result<_> {
                                         if store_ref
-                                            .read_expert_single_syscall(l, exp, &mut pkt)
+                                            .read_expert_on_drive(drv_idx, l, exp, &mut pkt)
                                             .is_err()
                                         {
                                             index_ref.stream_expert_packet(l, exp, &mut pkt)?;

@@ -17,13 +17,12 @@
 //!         file handles (`FILE_FLAG_SEQUENTIAL_SCAN`), eliminating 8 out of 9 syscalls, all JSON/HashMap
 //!         lookups, and Windows `CreateFileW` filter-driver overhead!
 
-use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 #[cfg(not(windows))]
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Instant;
 
@@ -37,32 +36,130 @@ const FILE_FLAG_SEQUENTIAL_SCAN: u32 = 0x0800_0000;
 #[cfg(windows)]
 const FILE_FLAG_NO_BUFFERING: u32 = 0x2000_0000;
 
-/// Manages striped 4K-aligned single-expert `.mcl4e` shards across the two NVMe controllers
-/// of the Intel DC P4608 (`X:` = Controller 0 for Even Layers, `Z:` = Controller 1 for Odd Layers).
+/// Manages 3-way bandwidth-matched 4K-aligned single-expert `.mcl4e` shards across all 3 physical NVMe drives:
+///   - `X:\deepseek_v41_experts` (P4608 Controller 0, `25%`: `expert & 3 == 0`)
+///   - `Z:\deepseek_v41_experts` (P4608 Controller 1, `25%`: `expert & 3 == 1`)
+///   - `C:\deepseek_v41_experts` (M.2 Gen4 NVMe,      `50%`: `expert & 3 >= 2`)
 pub struct P4608DualDriveExpertStore {
-    pub ctrl0_root: PathBuf, // X:\deepseek_v41_experts (Even layers: L % 2 == 0)
-    pub ctrl1_root: PathBuf, // Z:\deepseek_v41_experts (Odd  layers: L % 2 == 1)
-    handle_cache: RwLock<HashMap<(usize, usize), Arc<File>>>,
+    pub ctrl0_root: PathBuf, // X:\deepseek_v41_experts (25%: expert & 3 == 0)
+    pub ctrl1_root: PathBuf, // Z:\deepseek_v41_experts (25%: expert & 3 == 1)
+    pub ctrl2_root: PathBuf, // C:\deepseek_v41_experts (50%: expert & 3 >= 2)
+    handle_cache: Box<[OnceLock<Arc<File>>]>, // 40 * 384 = 15,360 lock-free O(1) slots
 }
 
 impl P4608DualDriveExpertStore {
     pub fn new(ctrl0_root: impl Into<PathBuf>, ctrl1_root: impl Into<PathBuf>) -> Self {
+        Self::new_3way(ctrl0_root, ctrl1_root, r"C:\deepseek_v41_experts")
+    }
+
+    pub fn new_3way(
+        ctrl0_root: impl Into<PathBuf>,
+        ctrl1_root: impl Into<PathBuf>,
+        ctrl2_root: impl Into<PathBuf>,
+    ) -> Self {
+        let mut vec_handles = Vec::with_capacity(3 * 40 * 384);
+        for _ in 0..(3 * 40 * 384) {
+            vec_handles.push(OnceLock::new());
+        }
         Self {
             ctrl0_root: ctrl0_root.into(),
             ctrl1_root: ctrl1_root.into(),
-            handle_cache: RwLock::new(HashMap::with_capacity(256)),
+            ctrl2_root: ctrl2_root.into(),
+            handle_cache: vec_handles.into_boxed_slice(),
         }
     }
 
     pub fn default_p4608() -> Self {
-        Self::new(r"X:\deepseek_v41_experts", r"Z:\deepseek_v41_experts")
+        Self::new_3way(
+            r"X:\deepseek_v41_experts",
+            r"Z:\deepseek_v41_experts",
+            r"C:\deepseek_v41_experts",
+        )
     }
 
-    /// O(1) deterministic path resolution striping even layers (`L % 2 == 0`) to Controller 0 (`X:`)
-    /// and odd layers (`L % 2 == 1`) to Controller 1 (`Z:`), so Layer `L` execution and Layer `L+1`
-    /// NCM-Lookahead prefetching always hit opposite physical NVMe controllers!
+    #[inline]
+    pub fn drive_expert_path(&self, drive_idx: usize, layer: usize, expert: usize) -> PathBuf {
+        let root = match drive_idx {
+            0 => &self.ctrl0_root,
+            1 => &self.ctrl1_root,
+            _ => &self.ctrl2_root,
+        };
+        root.join(format!("L{:02}", layer))
+            .join(format!("E{:03}.mcl4e", expert))
+    }
+
+    /// O(1) deterministic path resolution striping experts 1:1:1 within every layer across
+    /// `X:` (`0`), `Z:` (`1`), and `C:` (`2`), exploiting full-layer mirrors on `X:` (Even) and `Z:` (Odd).
+    #[inline]
+    pub fn primary_drive_idx(layer: usize, expert: usize) -> usize {
+        match expert & 3 {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            _ => {
+                if ((expert >> 2) & 1) == 0 {
+                    2
+                } else if (layer & 1) == 0 {
+                    0
+                } else {
+                    1
+                }
+            }
+        }
+    }
+
+    /// Water-filling 3-Drive Load Balancer (`X:` = 0, `Z:` = 1, `C:` = 2):
+    /// Because Even layers (`L & 1 == 0`) have all 384 experts mirrored on `X:` (`0`) in addition
+    /// to `Z:` (`expert & 3 == 1`) and `C:` (`expert & 3 >= 2`), and Odd layers (`L & 1 == 1`)
+    /// have all 384 experts mirrored on `Z:` (`1`) in addition to `X:` (`expert & 3 == 0`) and `C:` (`expert & 3 >= 2`),
+    /// this function dynamically assigns each `(layer, expert)` in a batch to the least-loaded physical NVMe controller!
+    pub fn choose_balanced_drives(targets: &[(usize, usize)]) -> Vec<usize> {
+        let n = targets.len();
+        let mut assigned = vec![0usize; n];
+        let mut load = [0usize; 3];
+
+        // Pass 1: Assign single-homed experts (`e & 3 == 0` on Even -> X:, `e & 3 == 1` on Odd -> Z:)
+        for (i, &(l, e)) in targets.iter().enumerate() {
+            if (l & 1) == 0 && (e & 3) == 0 {
+                assigned[i] = 0;
+                load[0] += 1;
+            } else if (l & 1) == 1 && (e & 3) == 1 {
+                assigned[i] = 1;
+                load[1] += 1;
+            } else {
+                assigned[i] = usize::MAX;
+            }
+        }
+
+        // Pass 2: Assign dual-homed experts to whichever of `{alt_drive, full_drive}` currently has lower queue depth!
+        for (i, &(l, e)) in targets.iter().enumerate() {
+            if assigned[i] != usize::MAX {
+                continue;
+            }
+            let full_drv = if (l & 1) == 0 { 0usize } else { 1usize };
+            let alt_drv = match e & 3 {
+                0 => 0usize,
+                1 => 1usize,
+                _ => 2usize,
+            };
+            let chosen = if load[alt_drv] <= load[full_drv] {
+                alt_drv
+            } else {
+                full_drv
+            };
+            assigned[i] = chosen;
+            load[chosen] += 1;
+        }
+        assigned
+    }
+
     #[inline]
     pub fn expert_path(&self, layer: usize, expert: usize) -> PathBuf {
+        self.drive_expert_path(Self::primary_drive_idx(layer, expert), layer, expert)
+    }
+
+    #[inline]
+    fn fallback_expert_path(&self, layer: usize, expert: usize) -> PathBuf {
         let root = if (layer & 1) == 0 {
             &self.ctrl0_root
         } else {
@@ -76,33 +173,62 @@ impl P4608DualDriveExpertStore {
     #[inline]
     pub fn is_expert_sharded(&self, layer: usize, expert: usize) -> bool {
         let p = self.expert_path(layer, expert);
-        match fs::metadata(&p) {
+        if let Ok(m) = fs::metadata(&p) {
+            if m.is_file() && m.len() == (DS_PACKET_BYTES as u64) {
+                return true;
+            }
+        }
+        let fb = self.fallback_expert_path(layer, expert);
+        match fs::metadata(&fb) {
             Ok(m) => m.is_file() && m.len() == (DS_PACKET_BYTES as u64),
             Err(_) => false,
         }
     }
 
     #[inline]
-    fn get_or_open_handle(&self, layer: usize, expert: usize) -> io::Result<Arc<File>> {
-        if let Some(f) = self.handle_cache.read().unwrap().get(&(layer, expert)) {
-            return Ok(Arc::clone(f));
+    fn get_or_open_handle_on_drive(
+        &self,
+        drive_idx: usize,
+        layer: usize,
+        expert: usize,
+    ) -> io::Result<Arc<File>> {
+        let d = drive_idx.min(2);
+        let idx = (d * 40 + layer) * 384 + expert;
+        if let Some(slot) = self.handle_cache.get(idx) {
+            if let Some(f) = slot.get() {
+                return Ok(Arc::clone(f));
+            }
         }
-        let path = self.expert_path(layer, expert);
+        let primary_path = self.drive_expert_path(d, layer, expert);
         #[cfg(windows)]
-        let file = OpenOptions::new()
+        let file = match OpenOptions::new()
             .read(true)
             .custom_flags(FILE_FLAG_NO_BUFFERING | FILE_FLAG_SEQUENTIAL_SCAN)
-            .open(&path)?;
+            .open(&primary_path)
+        {
+            Ok(f) => f,
+            Err(_) => {
+                let fb_path = self.fallback_expert_path(layer, expert);
+                OpenOptions::new()
+                    .read(true)
+                    .custom_flags(FILE_FLAG_NO_BUFFERING | FILE_FLAG_SEQUENTIAL_SCAN)
+                    .open(&fb_path)?
+            }
+        };
         #[cfg(not(windows))]
-        let file = File::open(&path)?;
+        let file = File::open(&primary_path)
+            .or_else(|_| File::open(self.fallback_expert_path(layer, expert)))?;
 
         let arc_f = Arc::new(file);
-        let mut cache = self.handle_cache.write().unwrap();
-        if cache.len() >= 2048 {
-            cache.clear();
+        if let Some(slot) = self.handle_cache.get(idx) {
+            let _ = slot.set(Arc::clone(&arc_f));
         }
-        cache.insert((layer, expert), Arc::clone(&arc_f));
         Ok(arc_f)
+    }
+
+    #[inline]
+    fn get_or_open_handle(&self, layer: usize, expert: usize) -> io::Result<Arc<File>> {
+        self.get_or_open_handle_on_drive(Self::primary_drive_idx(layer, expert), layer, expert)
     }
 
     /// Deterministic path for the 4K-aligned per-layer Router + Norm + Hyper-Connection bundle
@@ -570,15 +696,16 @@ impl P4608DualDriveExpertStore {
         Ok((total_new, cached, dt_ms))
     }
 
-    /// Reads a single 4K-aligned `.mcl4e` expert shard (`19,910,656` B) from `X:` or `Z:`
+    /// Reads a single 4K-aligned `.mcl4e` expert shard (`19,910,656` B) from `X:`, `Z:`, or `C:`
     /// in a single contiguous read at `offset = 0` (replacing 9 scattered seeks + 9 HashMap lookups).
-    pub fn read_expert_single_syscall(
+    pub fn read_expert_on_drive(
         &self,
+        drive_idx: usize,
         layer: usize,
         expert: usize,
         dst_pkt: &mut Dsv41Mcl4cExpertPacket,
     ) -> io::Result<()> {
-        let file = self.get_or_open_handle(layer, expert)?;
+        let file = self.get_or_open_handle_on_drive(drive_idx, layer, expert)?;
         let dst_ptr = (dst_pkt as *mut Dsv41Mcl4cExpertPacket) as *mut u8;
         let dst_bytes: &mut [u8] = unsafe { std::slice::from_raw_parts_mut(dst_ptr, DS_PACKET_BYTES) };
 
@@ -604,6 +731,20 @@ impl P4608DualDriveExpertStore {
             f.read_exact(dst_bytes)?;
             Ok(())
         }
+    }
+
+    pub fn read_expert_single_syscall(
+        &self,
+        layer: usize,
+        expert: usize,
+        dst_pkt: &mut Dsv41Mcl4cExpertPacket,
+    ) -> io::Result<()> {
+        self.read_expert_on_drive(
+            Self::primary_drive_idx(layer, expert),
+            layer,
+            expert,
+            dst_pkt,
+        )
     }
 
     /// Streams a batch of `(layer, expert)` packets concurrently across BOTH Intel P4608

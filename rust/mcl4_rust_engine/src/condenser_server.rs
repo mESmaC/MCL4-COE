@@ -43,6 +43,65 @@ use crate::{
 
 const KV_SNAPSHOT_BYTES: usize = 7_512_080;
 static REGISTERED_PINNED_SLABS: AtomicU64 = AtomicU64::new(0);
+const MOE_PSO_CACHE_PATH: &str = "X:\\deepseek_v41_experts\\moe_pso_shader_cache.bin";
+static PSO_SHADER_HISTOGRAM: [AtomicU64; 40 * 384] = [const { AtomicU64::new(0) }; 40 * 384];
+
+fn load_pso_shader_histogram() -> bool {
+    if let Ok(bytes) = fs::read(MOE_PSO_CACHE_PATH) {
+        if bytes.len() == 8 + 40 * 384 * 4 && &bytes[0..8] == b"MCL4PSO1" {
+            for idx in 0..(40 * 384) {
+                let off = 8 + idx * 4;
+                let v = u32::from_le_bytes([
+                    bytes[off],
+                    bytes[off + 1],
+                    bytes[off + 2],
+                    bytes[off + 3],
+                ]);
+                let decayed = if v > 0 { (v >> 1).max(1) as u64 } else { 0 };
+                PSO_SHADER_HISTOGRAM[idx].store(decayed, Ordering::Relaxed);
+            }
+            return true;
+        }
+    }
+    false
+}
+
+fn save_pso_shader_histogram() {
+    let mut buf = Vec::with_capacity(8 + 40 * 384 * 4);
+    buf.extend_from_slice(b"MCL4PSO1");
+    for idx in 0..(40 * 384) {
+        let v = PSO_SHADER_HISTOGRAM[idx].load(Ordering::Relaxed).min(u32::MAX as u64) as u32;
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+    let _ = fs::write(MOE_PSO_CACHE_PATH, &buf);
+}
+
+fn read_layer_gate_bias_from_meta(layer: usize) -> [f32; 384] {
+    use std::io::Seek;
+    let mut bias = [0.0f32; 384];
+    let root = if (layer & 1) == 0 {
+        "X:\\deepseek_v41_experts"
+    } else {
+        "Z:\\deepseek_v41_experts"
+    };
+    let path = format!("{root}\\L{layer:02}\\META.mcl4m");
+    if let Ok(mut f) = fs::File::open(&path) {
+        if f.seek(io::SeekFrom::Start(5_908_480)).is_ok() {
+            let mut raw = [0u8; 384 * 4];
+            if f.read_exact(&mut raw).is_ok() {
+                for e in 0..384 {
+                    bias[e] = f32::from_le_bytes([
+                        raw[e * 4],
+                        raw[e * 4 + 1],
+                        raw[e * 4 + 2],
+                        raw[e * 4 + 3],
+                    ]);
+                }
+            }
+        }
+    }
+    bias
+}
 
 #[derive(Clone)]
 pub struct PrefixKvSnapshot {
@@ -791,102 +850,20 @@ impl CondenserEngineState {
             ));
         }
 
-        // Pre-warm the top Zipfian experts for Upper-Tail Layers 32..39 into Pinned Host RAM cache
-        // with `last_tick = 50` (< CACHE_LRU_TICK=100) so unused startup entries never block active conversation experts!
-        let mut warm_map = HashMap::with_capacity(768);
-        let warm_lru = VecDeque::with_capacity(64);
-        let mut cal_cos_s1 = 1.0f64;
-        let mut cal_cos_s2 = 1.0f64;
-        let mut cal_us_moe = 37.2f32;
-        let mut calibrated_once = false;
-
-        let mut warm_targets: Vec<(usize, usize)> = Vec::with_capacity(128);
-        for layer in 32..40usize {
-            for exp in [
-                0usize, 1, 2, 3, 32, 45, 66, 92, 94, 100, 158, 221, 222, 287, 322, 335, 376, 377,
-                382,
-            ] {
-                let in_vram =
-                    unsafe { mcl4_dsv41_engine_has_vram_expert(layer as i32, exp as i32) != 0 };
-                if !in_vram && p4608_store.is_expert_sharded(layer, exp) {
-                    warm_targets.push((layer, exp));
-                }
-            }
-        }
-
-        let loaded_warm: Vec<(usize, usize, Box<Dsv41Mcl4cExpertPacket>)> =
-            thread::scope(|s| {
-                let chunk_sz = (warm_targets.len() / 8).max(1);
-                let mut handles = Vec::new();
-                for chunk in warm_targets.chunks(chunk_sz) {
-                    let store_ref = &p4608_store;
-                    handles.push(s.spawn(move || {
-                        let mut local = Vec::with_capacity(chunk.len());
-                        for &(layer, exp) in chunk {
-                            let mut pkt = Dsv41Mcl4cExpertPacket::new_zeroed_box();
-                            if store_ref
-                                .read_expert_single_syscall(layer, exp, &mut pkt)
-                                .is_ok()
-                            {
-                                local.push((layer, exp, pkt));
-                            }
-                        }
-                        local
-                    }));
-                }
-                let mut all = Vec::with_capacity(warm_targets.len());
-                for h in handles {
-                    if let Ok(mut part) = h.join() {
-                        all.append(&mut part);
-                    }
-                }
-                all
-            });
-
-        for (layer, exp, mut pkt) in loaded_warm {
-            if !calibrated_once {
-                let _ = unsafe {
-                    mcl4_dsv41_verify_expert_packet_gpu(
-                        pkt.as_ref() as *const Dsv41Mcl4cExpertPacket,
-                        &mut cal_cos_s1,
-                        &mut cal_cos_s2,
-                        &mut cal_us_moe,
-                    )
-                };
-                calibrated_once = true;
-            }
-            if REGISTERED_PINNED_SLABS.fetch_add(1, Ordering::Relaxed) < 900 {
-                unsafe {
-                    let _ = mcl4_dsv41_register_pinned_host_slab(
-                        pkt.as_mut() as *mut Dsv41Mcl4cExpertPacket as *mut std::ffi::c_void,
-                        std::mem::size_of::<Dsv41Mcl4cExpertPacket>(),
-                    );
-                }
-            }
-            warm_map.insert(
-                (layer, exp),
-                CachedExpertEntry {
-                    pkt: Arc::new(pkt),
-                    cos_s1: cal_cos_s1,
-                    cos_s2: cal_cos_s2,
-                    us_moe: cal_us_moe,
-                    last_tick: 50,
-                    prompt_hash: 0,
-                    first_decode_step: u32::MAX,
-                    use_count: 0,
-                },
-            );
-        }
-
-        // Pre-allocate 420 reusable Pinned Host Slabs (~7.98 GiB) in parallel across 16 threads at startup
-        // (128 warm + 420 free = 548 pinned slabs), covering 100% of Pass 1 misses with zero runtime page faults
-        // while keeping 100% of slabs pinned (`< 968`) for true async PCIe H2D DMA on `stream_prefetch`!
-        let target_free_slabs = 420usize;
-        let init_free_pool = thread::scope(|s| {
+        // MoE-PSO ("Shader Pre-Compilation") Startup Pipeline:
+        // 1. Pre-allocate all 548 Pinned Host Slabs (~10.4 GiB) in parallel across 16 threads at startup.
+        // 2. Rank all 384 experts per layer (0..40) by persistent Fossilize PSO hit count (`moe_pso_shader_cache.bin`)
+        //    + Upper-Tail Zipfian seeds + intrinsic router `gate_bias[384]`.
+        // 3. Stream 240 PSO experts across all 40 layers in ONE 3-Way Colibri NVMe Striped batch into `warm_map`
+        //    (leaving 308 pre-allocated free slabs in `free_slab_pool`), and pre-stage the Top-4 per layer
+        //    (160 experts = 2.97 GiB) directly into `d_arena[0..160]` GDDR7 VRAM!
+        let _has_pso_file = load_pso_shader_histogram();
+        let total_startup_slabs = 548usize;
+        let mut init_free_pool = thread::scope(|s| {
             let num_workers = 16usize;
             let mut handles = Vec::with_capacity(num_workers);
             for w in 0..num_workers {
-                let count = (target_free_slabs + num_workers - 1 - w) / num_workers;
+                let count = (total_startup_slabs + num_workers - 1 - w) / num_workers;
                 handles.push(s.spawn(move || {
                     let mut local = Vec::with_capacity(count);
                     for _ in 0..count {
@@ -905,12 +882,134 @@ impl CondenserEngineState {
                     local
                 }));
             }
-            let mut pool = Vec::with_capacity(target_free_slabs);
+            let mut pool = Vec::with_capacity(total_startup_slabs);
             for h in handles {
                 pool.extend(h.join().unwrap());
             }
             pool
         });
+
+        let ut_seeds: [usize; 19] = [
+            0, 1, 2, 3, 32, 45, 66, 92, 94, 100, 158, 221, 222, 287, 322, 335, 376, 377, 382,
+        ];
+        let mut vram_pso_targets: Vec<(usize, usize)> = Vec::with_capacity(160);
+        let mut extra_host_candidates: Vec<(u64, u8, i32, usize, usize)> = Vec::with_capacity(640);
+        for layer in 0..40usize {
+            let gb = read_layer_gate_bias_from_meta(layer);
+            let mut layer_ranked: Vec<(u64, u8, i32, usize)> = Vec::with_capacity(384);
+            for exp in 0..384usize {
+                if p4608_store.is_expert_sharded(layer, exp) {
+                    let hits = PSO_SHADER_HISTOGRAM[layer * 384 + exp].load(Ordering::Relaxed);
+                    let is_ut = if layer >= 32 && ut_seeds.contains(&exp) { 1u8 } else { 0u8 };
+                    let gb_q = (gb[exp] * 1_000_000.0) as i32;
+                    layer_ranked.push((hits, is_ut, gb_q, exp));
+                }
+            }
+            layer_ranked.sort_by(|a, b| b.cmp(a));
+            for (rank, &(hits, is_ut, gb_q, exp)) in layer_ranked.iter().take(24).enumerate() {
+                if rank < 4 {
+                    vram_pso_targets.push((layer, exp));
+                } else {
+                    extra_host_candidates.push((hits, is_ut, gb_q, layer, exp));
+                }
+            }
+        }
+        extra_host_candidates.sort_by(|a, b| b.cmp(a));
+
+        let mut warm_targets: Vec<(usize, usize)> = vram_pso_targets.clone();
+        for &(_, _, _, layer, exp) in &extra_host_candidates {
+            if warm_targets.len() >= 320 {
+                break;
+            }
+            warm_targets.push((layer, exp));
+        }
+
+        let mut warm_map = HashMap::with_capacity(768);
+        let warm_lru = VecDeque::with_capacity(64);
+        let mut cal_cos_s1 = 1.0f64;
+        let mut cal_cos_s2 = 1.0f64;
+        let mut cal_us_moe = 37.2f32;
+        let mut calibrated_once = false;
+
+        let mut warm_slabs: Vec<(usize, usize, Box<Dsv41Mcl4cExpertPacket>)> =
+            Vec::with_capacity(warm_targets.len());
+        for &(layer, exp) in &warm_targets {
+            if let Some(pkt) = init_free_pool.pop() {
+                warm_slabs.push((layer, exp, pkt));
+            }
+        }
+        if !warm_slabs.is_empty() {
+            let warm_stripe_tasks: Vec<(usize, usize, usize)> = warm_slabs
+                .iter_mut()
+                .map(|(l, exp, pkt)| {
+                    (
+                        *l,
+                        *exp,
+                        (pkt.as_mut() as *mut Dsv41Mcl4cExpertPacket) as usize,
+                    )
+                })
+                .collect();
+            let _ = p4608_store.read_expert_addrs_striped(&warm_stripe_tasks);
+        }
+
+        for (layer, exp, pkt) in warm_slabs {
+            if !calibrated_once {
+                let _ = unsafe {
+                    mcl4_dsv41_verify_expert_packet_gpu(
+                        pkt.as_ref() as *const Dsv41Mcl4cExpertPacket,
+                        &mut cal_cos_s1,
+                        &mut cal_cos_s2,
+                        &mut cal_us_moe,
+                    )
+                };
+                calibrated_once = true;
+            }
+            warm_map.insert(
+                (layer, exp),
+                CachedExpertEntry {
+                    pkt: Arc::new(pkt),
+                    cos_s1: cal_cos_s1,
+                    cos_s2: cal_cos_s2,
+                    us_moe: cal_us_moe,
+                    last_tick: 50,
+                    prompt_hash: 0,
+                    first_decode_step: u32::MAX,
+                    use_count: 0,
+                },
+            );
+        }
+
+        // Pre-stage the Top-4 PSO experts per layer (160 VRAM slots = 120 dedicated + 40 ring = 2.97 GiB) directly into `d_arena`!
+        unsafe {
+            mcl4_dsv41_engine_set_step_context(0, 0);
+        }
+        for layer in 0..40usize {
+            let mut ptrs = [std::ptr::null::<Dsv41Mcl4cExpertPacket>(); 4];
+            let mut ids = [0i32; 4];
+            let mut cnt = 0usize;
+            for &(l, exp) in &vram_pso_targets {
+                if l == layer && cnt < 4 {
+                    if let Some(entry) = warm_map.get(&(l, exp)) {
+                        ptrs[cnt] = entry.pkt.as_ref().as_ref() as *const Dsv41Mcl4cExpertPacket;
+                        ids[cnt] = exp as i32;
+                        cnt += 1;
+                    }
+                }
+            }
+            if cnt > 0 {
+                unsafe {
+                    mcl4_dsv41_engine_prestage_vram_experts(
+                        layer as i32,
+                        ptrs.as_ptr(),
+                        ids.as_ptr(),
+                        cnt as i32,
+                    );
+                }
+            }
+        }
+        unsafe {
+            mcl4_dsv41_engine_set_step_context(0, 0);
+        }
 
         let state = Self {
             index,
@@ -981,6 +1080,16 @@ impl CondenserEngineState {
         //    slot needed by Chunk 2/3, Chunk 2/3 always has a valid host pointer!
         let mut vram_hit_exps: Vec<usize> = Vec::new();
         for (slot_idx, &exp) in exp_ids.iter().enumerate() {
+            if layer < 40 && exp < 384 {
+                let pso_w = if decode_step_idx.is_none() {
+                    2u64
+                } else if step_u32 < 8 {
+                    12u64
+                } else {
+                    4u64
+                };
+                PSO_SHADER_HISTOGRAM[layer * 384 + exp].fetch_add(pso_w, Ordering::Relaxed);
+            }
             let vram_state = unsafe { mcl4_dsv41_engine_has_vram_expert(layer as i32, exp as i32) };
             let in_vram = if decode_step_idx.is_some() {
                 vram_state != 0
@@ -1027,9 +1136,12 @@ impl CondenserEngineState {
                         entry.prompt_hash = cur_prompt_hash;
                         entry.first_decode_step = step_u32;
                         entry.use_count = if step_u32 < u32::MAX { 1 } else { 0 };
-                    } else {
-                        entry.first_decode_step = entry.first_decode_step.min(step_u32);
-                        if step_u32 < u32::MAX {
+                    } else if step_u32 < u32::MAX {
+                        if entry.first_decode_step == u32::MAX {
+                            entry.first_decode_step = step_u32;
+                            entry.use_count = 1;
+                        } else {
+                            entry.first_decode_step = entry.first_decode_step.min(step_u32);
                             entry.use_count = entry.use_count.saturating_add(1);
                         }
                     }
@@ -1042,9 +1154,12 @@ impl CondenserEngineState {
                         entry.prompt_hash = cur_prompt_hash;
                         entry.first_decode_step = step_u32;
                         entry.use_count = if step_u32 < u32::MAX { 1 } else { 0 };
-                    } else {
-                        entry.first_decode_step = entry.first_decode_step.min(step_u32);
-                        if step_u32 < u32::MAX {
+                    } else if step_u32 < u32::MAX {
+                        if entry.first_decode_step == u32::MAX {
+                            entry.first_decode_step = step_u32;
+                            entry.use_count = 1;
+                        } else {
+                            entry.first_decode_step = entry.first_decode_step.min(step_u32);
                             entry.use_count = entry.use_count.saturating_add(1);
                         }
                     }
@@ -1062,7 +1177,7 @@ impl CondenserEngineState {
                                 if v.prompt_hash != cur_prompt_hash {
                                     (0u8, 0u32, v.last_tick)
                                 } else if v.first_decode_step == u32::MAX {
-                                    (1u8, 0u32, v.last_tick)
+                                    (1u8, v.use_count, v.last_tick)
                                 } else {
                                     let locked_vram = unsafe {
                                         mcl4_dsv41_engine_has_vram_expert(l as i32, e as i32) == 2
@@ -1117,39 +1232,30 @@ impl CondenserEngineState {
         }
 
         if !missing_slots.is_empty() {
-            // Overlap PCIe H2D DMA of any contiguous rank-0 prefix (`0..first_miss`) of Host-RAM hits
-            // while passing ALL `exp_ids[0..n_pin]` so every VRAM hit in the batch is pinned!
-            let n_pin = exp_ids.len().min(40);
+            // Overlap PCIe H2D DMA of ALL Host-RAM hits in `0..n_pin` (`n_pin <= 43`) while NVMe reads `missing_slots`!
+            // `mcl4_dsv41_engine_prestage_vram_experts` reserves `base_s + 0..2` for higher-ranked misses (`other < u`)
+            // and places lower-ranked Host-RAM hits into the 40-slot ring buffer `120..160`.
+            let n_pin = exp_ids.len().min(43);
             if n_pin > 0 {
-                let first_miss = missing_slots
-                    .iter()
-                    .map(|&(slot_idx, _, _)| slot_idx)
-                    .min()
-                    .unwrap_or(0)
-                    .min(n_pin);
-                if first_miss > 0 {
-                    let mut pre_ptrs = [std::ptr::null::<Dsv41Mcl4cExpertPacket>(); 48];
-                    let mut pre_ids = [0i32; 48];
-                    let mut any_host_hit = false;
-                    for (u, &eid) in exp_ids.iter().take(n_pin).enumerate() {
-                        pre_ids[u] = eid as i32;
-                        if u < first_miss {
-                            if let Some(ref arc_pkt) = results[u] {
-                                pre_ptrs[u] =
-                                    arc_pkt.as_ref().as_ref() as *const Dsv41Mcl4cExpertPacket;
-                                any_host_hit = true;
-                            }
-                        }
+                let mut pre_ptrs = [std::ptr::null::<Dsv41Mcl4cExpertPacket>(); 48];
+                let mut pre_ids = [0i32; 48];
+                let mut any_host_hit = false;
+                for (u, &eid) in exp_ids.iter().take(n_pin).enumerate() {
+                    pre_ids[u] = eid as i32;
+                    if let Some(ref arc_pkt) = results[u] {
+                        pre_ptrs[u] =
+                            arc_pkt.as_ref().as_ref() as *const Dsv41Mcl4cExpertPacket;
+                        any_host_hit = true;
                     }
-                    if any_host_hit {
-                        unsafe {
-                            mcl4_dsv41_engine_prestage_vram_experts(
-                                layer as i32,
-                                pre_ptrs.as_ptr(),
-                                pre_ids.as_ptr(),
-                                n_pin as i32,
-                            );
-                        }
+                }
+                if any_host_hit {
+                    unsafe {
+                        mcl4_dsv41_engine_prestage_vram_experts(
+                            layer as i32,
+                            pre_ptrs.as_ptr(),
+                            pre_ids.as_ptr(),
+                            n_pin as i32,
+                        );
                     }
                 }
             }
@@ -1495,7 +1601,7 @@ impl CondenserEngineState {
                                             if v.prompt_hash != cur_prompt_hash {
                                                 (0u8, 0u32, v.last_tick)
                                             } else if v.first_decode_step == u32::MAX {
-                                                (1u8, 0u32, v.last_tick)
+                                                (1u8, v.use_count, v.last_tick)
                                             } else {
                                                 let locked_vram = unsafe {
                                                     mcl4_dsv41_engine_has_vram_expert(cl as i32, ce as i32) == 2
@@ -1632,6 +1738,10 @@ impl CondenserEngineState {
                             if entry.prompt_hash != cur_prompt_hash {
                                 entry.prompt_hash = cur_prompt_hash;
                                 entry.first_decode_step = step_u32;
+                                entry.use_count = 0;
+                            } else if step_u32 < u32::MAX && entry.first_decode_step == u32::MAX {
+                                entry.first_decode_step = step_u32;
+                                entry.use_count = 0;
                             } else {
                                 entry.first_decode_step = entry.first_decode_step.min(step_u32);
                             }
@@ -2009,6 +2119,27 @@ impl CondenserEngineState {
                         }
                     }
 
+                    // MoE-PSO ("Shader Pre-Compilation") Dedicated Slot Promotion (for large multi-chunk prompts `prefill_m >= 48`):
+                    // Promote the final prompt token's Top-3 experts (`tok_chosen[prefill_m - 1][0..3]`)
+                    // to `layer_unique_exps[0..3]` so they claim `layer`'s 3 dedicated VRAM slots (`base_s + 0..2`),
+                    // while keeping the remaining experts in natural token order.
+                    if prefill_m >= 48 {
+                        if let Some(last_chosen) = tok_chosen.last() {
+                            let mut insert_pos = 0usize;
+                            for &top_eid in last_chosen.iter().take(3) {
+                                if let Some(cur_pos) =
+                                    layer_unique_exps.iter().position(|&e| e == top_eid)
+                                {
+                                    if cur_pos > insert_pos {
+                                        layer_unique_exps.remove(cur_pos);
+                                        layer_unique_exps.insert(insert_pos, top_eid);
+                                    }
+                                    insert_pos += 1;
+                                }
+                            }
+                        }
+                    }
+
                     // Phase B: Single High-QD Parallel NVMe Fetch for ALL unique experts routed across the prompt at `layer`!
                     let layer_arcs = self.fetch_layer_expert_arcs(
                         layer,
@@ -2016,6 +2147,70 @@ impl CondenserEngineState {
                         cur_prompt_hash,
                         None,
                     )?;
+
+                    // For large-context prompts (`prefill_m >= 48`), tag Scene Core PSO priority in `hot_expert_cache`
+                    // so multi-use & suffix-4 experts across Layers 0..39 are never evicted by one-shot distant-prefix experts!
+                    if prefill_m >= 48 {
+                        let mut exp_freq = [0u16; 384];
+                        let mut exp_suffix_bonus = [0u16; 384];
+                        for (m, chosen) in tok_chosen.iter().enumerate() {
+                            for (rank, &eid) in chosen.iter().enumerate() {
+                                if eid < 384 {
+                                    exp_freq[eid] = exp_freq[eid].saturating_add(1);
+                                    if m + 1 == prefill_m {
+                                        let rank_bonus = 64u16.saturating_sub((rank as u16) * 8);
+                                        if rank_bonus > exp_suffix_bonus[eid] {
+                                            exp_suffix_bonus[eid] = rank_bonus;
+                                        }
+                                    } else if m + 4 >= prefill_m && exp_suffix_bonus[eid] < 16 {
+                                        exp_suffix_bonus[eid] = 16;
+                                    }
+                                }
+                            }
+                        }
+                        let mut cache = self.hot_expert_cache.lock().unwrap();
+                        for &eid in &layer_unique_exps {
+                            if let Some(entry) = cache.get_mut(&(layer, eid)) {
+                                if entry.first_decode_step == u32::MAX {
+                                    let pso_score =
+                                        if exp_freq[eid] <= 1 && exp_suffix_bonus[eid] == 0 {
+                                            0u32
+                                        } else {
+                                            (exp_suffix_bonus[eid] as u32)
+                                                + (exp_freq[eid] as u32) * 2
+                                        };
+                                    entry.use_count = entry.use_count.max(pso_score);
+                                }
+                            }
+                        }
+                    }
+
+                    // Whole-Layer 43-Slot VRAM PSO Pre-Staging (`prefill_m >= 48`):
+                    // Upload up to 43 unique experts (`3` dedicated slots + `40` ring-buffer slots)
+                    // in ONE coalesced PCIe H2D burst before Chunk 0 so Chunks `0..N` execute back-to-back
+                    // on `stream 0` with 100% VRAM hits, zero inter-chunk PCIe transfers, and zero barriers!
+                    if prefill_m >= 48 {
+                        let n_pso = layer_unique_exps.len().min(43);
+                        if n_pso > 0 {
+                            let mut pso_ptrs = [std::ptr::null::<Dsv41Mcl4cExpertPacket>(); 48];
+                            let mut pso_ids = [0i32; 48];
+                            for u in 0..n_pso {
+                                pso_ids[u] = layer_unique_exps[u] as i32;
+                                if let Some(ref arc_box) = layer_arcs[u] {
+                                    pso_ptrs[u] =
+                                        arc_box.as_ref().as_ref() as *const Dsv41Mcl4cExpertPacket;
+                                }
+                            }
+                            unsafe {
+                                mcl4_dsv41_engine_prestage_vram_experts(
+                                    layer as i32,
+                                    pso_ptrs.as_ptr(),
+                                    pso_ids.as_ptr(),
+                                    n_pso as i32,
+                                );
+                            }
+                        }
+                    }
 
                     // Phase C: Execute MoE + Post across all 8-token chunks at `layer` (reusing `d_arena` VRAM slots across chunks!)
                     for off in (0..prefill_m).step_by(8) {
@@ -2363,6 +2558,9 @@ impl CondenserEngineState {
         let decode_ms = t_decode.elapsed().as_secs_f64() * 1000.0;
         let hits = self.cache_hits.load(Ordering::Relaxed).saturating_sub(hits_start);
         let misses = self.cache_misses.load(Ordering::Relaxed).saturating_sub(misses_start);
+        if misses > 0 {
+            save_pso_shader_histogram();
+        }
         let hit_pct = if hits + misses > 0 {
             100.0 * (hits as f64) / ((hits + misses) as f64)
         } else {

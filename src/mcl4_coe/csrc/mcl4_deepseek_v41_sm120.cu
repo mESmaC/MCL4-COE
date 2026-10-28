@@ -7843,6 +7843,10 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_init(
 }
 
 extern "C" __declspec(dllexport) void mcl4_dsv41_engine_set_step_context(uint64_t prompt_hash, int is_decode) {
+    if (prompt_hash == 0 && is_decode == 0 && g_engine.initialized && g_engine.pending_prefetch_dma) {
+        cudaStreamSynchronize(g_engine.stream_prefetch);
+        g_engine.pending_prefetch_dma = false;
+    }
     g_engine.cur_prompt_hash = prompt_hash;
     g_engine.cur_is_decode   = is_decode;
     g_cur_is_decode          = is_decode;
@@ -8677,7 +8681,14 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_prestage_vram_experts(
             int best_slot = -1;
             uint64_t best_tick = UINT64_MAX;
             if (ded_slots > 0) {
+                int misses_ahead = 0;
+                for (int other = 0; other < u; ++other) {
+                    if (chosen_slots[other] < 0) {
+                        ++misses_ahead;
+                    }
+                }
                 int base_s = ded_slots * layer_id;
+                int avail_ded = 0;
                 for (int r = 0; r < ded_slots; ++r) {
                     int s = base_s + r;
                     bool pinned_in_step = false;
@@ -8691,6 +8702,7 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_prestage_vram_experts(
                                              g_engine.arena_prompt_hash[s] == g_engine.cur_prompt_hash &&
                                              g_engine.arena_is_decode[s] == 1);
                     if (!pinned_in_step && !locked_in_decode) {
+                        ++avail_ded;
                         uint64_t prio = (g_engine.arena_prompt_hash[s] == g_engine.cur_prompt_hash)
                             ? (g_engine.arena_lru_tick[s] | (1ULL << 62))
                             : g_engine.arena_lru_tick[s];
@@ -8699,6 +8711,9 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_prestage_vram_experts(
                             best_slot = s;
                         }
                     }
+                }
+                if (avail_ded <= misses_ahead) {
+                    best_slot = -1;
                 }
                 if (best_slot < 0) {
                     best_tick = UINT64_MAX;
@@ -8711,9 +8726,12 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_prestage_vram_experts(
                             }
                         }
                         if (!pinned_in_step) {
-                            uint64_t prio = (g_engine.arena_last_dispatch[s] > g_engine.moe_synced_seq)
-                                ? (g_engine.arena_lru_tick[s] | (1ULL << 62))
-                                : g_engine.arena_lru_tick[s];
+                            uint64_t prio = g_engine.arena_lru_tick[s];
+                            if (g_engine.arena_last_dispatch[s] > g_engine.moe_synced_seq) {
+                                prio |= (1ULL << 62);
+                            } else if (!g_engine.cur_is_decode && g_engine.arena_cached_layer[s] == layer_id) {
+                                prio |= (1ULL << 61);
+                            }
                             if (prio < best_tick) {
                                 best_tick = prio;
                                 best_slot = s;
@@ -8877,9 +8895,17 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_moe_and_post_batch(
                                 break;
                             }
                         }
-                        if (!pinned_in_step && g_engine.arena_lru_tick[s] < best_tick) {
-                            best_tick = g_engine.arena_lru_tick[s];
-                            best_slot = s;
+                        if (!pinned_in_step) {
+                            uint64_t prio = g_engine.arena_lru_tick[s];
+                            if (g_engine.arena_last_dispatch[s] > g_engine.moe_synced_seq) {
+                                prio |= (1ULL << 62);
+                            } else if (!g_engine.cur_is_decode && g_engine.arena_cached_layer[s] == layer_id) {
+                                prio |= (1ULL << 61);
+                            }
+                            if (prio < best_tick) {
+                                best_tick = prio;
+                                best_slot = s;
+                            }
                         }
                     }
                 }

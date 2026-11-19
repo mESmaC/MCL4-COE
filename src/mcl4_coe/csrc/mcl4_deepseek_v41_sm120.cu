@@ -994,6 +994,263 @@ void launch_dsv41_fp8_gemm(
     }
 }
 
+__global__ void __launch_bounds__(256, 3) dsv41_fused_wqa_wkv_fp8_t1_4row_v2_kernel(
+    const __nv_bfloat16* __restrict__ x_in, // [1, 5120]
+    const uint8_t* __restrict__ wqa_w,      // [1280, 5120]
+    const uint8_t* __restrict__ wqa_s,      // [40, 160]
+    __nv_bfloat16* __restrict__ qr_out,     // [1, 1280]
+    const uint8_t* __restrict__ wkv_w,      // [512, 5120]
+    const uint8_t* __restrict__ wkv_s,      // [16, 160]
+    __nv_bfloat16* __restrict__ kv_out      // [1, 512]
+) {
+    // Grid: 56 blocks (0..39 -> wqa [1280 rows], 40..55 -> wkv [512 rows])
+    constexpr int K_DIM       = 5120;
+    constexpr int NUM_TILES   = K_DIM / 512;
+    constexpr int TILE_HALF_K = 256;
+    constexpr int TILE_STRIDE = 288;
+    __shared__ __nv_bfloat162 s_x2[NUM_TILES * TILE_STRIDE];
+
+    const __nv_bfloat162* x2_in = reinterpret_cast<const __nv_bfloat162*>(x_in);
+    #pragma unroll
+    for (int t = 0; t < NUM_TILES; ++t) {
+        int c = threadIdx.x;
+        s_x2[t * TILE_STRIDE + c + (c >> 3)] = x2_in[t * TILE_HALF_K + c];
+    }
+    __syncthreads();
+
+    int wid  = threadIdx.x >> 5;
+    int lane = threadIdx.x & 31;
+    bool is_wkv = (blockIdx.x >= 40);
+    int local_blk = is_wkv ? (blockIdx.x - 40) : blockIdx.x;
+    int row0 = local_blk * 32 + wid * 4 + 0;
+    int row1 = row0 + 1;
+    int row2 = row0 + 2;
+    int row3 = row0 + 3;
+
+    const uint8_t* w_fp8  = is_wkv ? wkv_w : wqa_w;
+    const uint8_t* s_e8m0 = is_wkv ? wkv_s : wqa_s;
+    __nv_bfloat16* y_out  = is_wkv ? kv_out : qr_out;
+
+    float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+    const uint4* w0_u4 = reinterpret_cast<const uint4*>(w_fp8 + (size_t)row0 * K_DIM);
+    const uint4* w1_u4 = reinterpret_cast<const uint4*>(w_fp8 + (size_t)row1 * K_DIM);
+    const uint4* w2_u4 = reinterpret_cast<const uint4*>(w_fp8 + (size_t)row2 * K_DIM);
+    const uint4* w3_u4 = reinterpret_cast<const uint4*>(w_fp8 + (size_t)row3 * K_DIM);
+    const uint8_t* s0_row = s_e8m0 + (size_t)(row0 >> 5) * (K_DIM >> 5);
+    int swz_base = lane * 9;
+
+    #pragma unroll 2
+    for (int t = 0; t < NUM_TILES; ++t) {
+        int u4_idx = t * 32 + lane;
+        uint4 pk0 = dg_ld_l2_128b_u4(&w0_u4[u4_idx]);
+        uint4 pk1 = dg_ld_l2_128b_u4(&w1_u4[u4_idx]);
+        uint4 pk2 = dg_ld_l2_128b_u4(&w2_u4[u4_idx]);
+        uint4 pk3 = dg_ld_l2_128b_u4(&w3_u4[u4_idx]);
+        float blk_scale = decode_fp8_e8m0_fast(s0_row[u4_idx >> 1]);
+
+        uint32_t words0[4] = {pk0.x, pk0.y, pk0.z, pk0.w};
+        uint32_t words1[4] = {pk1.x, pk1.y, pk1.z, pk1.w};
+        uint32_t words2[4] = {pk2.x, pk2.y, pk2.z, pk2.w};
+        uint32_t words3[4] = {pk3.x, pk3.y, pk3.z, pk3.w};
+        int tile_swz = t * TILE_STRIDE + swz_base;
+
+        float sub0 = 0.0f, sub1 = 0.0f, sub2 = 0.0f, sub3 = 0.0f;
+        #pragma unroll
+        for (int w = 0; w < 4; ++w) {
+            float2 x01 = __bfloat1622float2(s_x2[tile_swz + w * 2 + 0]);
+            float2 x23 = __bfloat1622float2(s_x2[tile_swz + w * 2 + 1]);
+
+            uint32_t p0 = words0[w];
+            sub0 += decode_fp8_e4m3_fast(p0 & 0xFF) * x01.x + decode_fp8_e4m3_fast((p0 >> 8) & 0xFF) * x01.y
+                  + decode_fp8_e4m3_fast((p0 >> 16) & 0xFF) * x23.x + decode_fp8_e4m3_fast((p0 >> 24) & 0xFF) * x23.y;
+
+            uint32_t p1 = words1[w];
+            sub1 += decode_fp8_e4m3_fast(p1 & 0xFF) * x01.x + decode_fp8_e4m3_fast((p1 >> 8) & 0xFF) * x01.y
+                  + decode_fp8_e4m3_fast((p1 >> 16) & 0xFF) * x23.x + decode_fp8_e4m3_fast((p1 >> 24) & 0xFF) * x23.y;
+
+            uint32_t p2 = words2[w];
+            sub2 += decode_fp8_e4m3_fast(p2 & 0xFF) * x01.x + decode_fp8_e4m3_fast((p2 >> 8) & 0xFF) * x01.y
+                  + decode_fp8_e4m3_fast((p2 >> 16) & 0xFF) * x23.x + decode_fp8_e4m3_fast((p2 >> 24) & 0xFF) * x23.y;
+
+            uint32_t p3 = words3[w];
+            sub3 += decode_fp8_e4m3_fast(p3 & 0xFF) * x01.x + decode_fp8_e4m3_fast((p3 >> 8) & 0xFF) * x01.y
+                  + decode_fp8_e4m3_fast((p3 >> 16) & 0xFF) * x23.x + decode_fp8_e4m3_fast((p3 >> 24) & 0xFF) * x23.y;
+        }
+        acc0 += sub0 * blk_scale;
+        acc1 += sub1 * blk_scale;
+        acc2 += sub2 * blk_scale;
+        acc3 += sub3 * blk_scale;
+    }
+
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {
+        acc0 += __shfl_xor_sync(0xffffffff, acc0, off);
+        acc1 += __shfl_xor_sync(0xffffffff, acc1, off);
+        acc2 += __shfl_xor_sync(0xffffffff, acc2, off);
+        acc3 += __shfl_xor_sync(0xffffffff, acc3, off);
+    }
+    if (lane == 0) {
+        y_out[row0] = __float2bfloat16(acc0);
+        y_out[row1] = __float2bfloat16(acc1);
+        y_out[row2] = __float2bfloat16(acc2);
+        y_out[row3] = __float2bfloat16(acc3);
+    }
+}
+
+template <int M_CAP>
+__global__ void __launch_bounds__(256, 3) dsv41_fused_wqa_wkv_fp8_batch_4row_v2_kernel(
+    const __nv_bfloat16* __restrict__ x_in, // [M_CAP, 5120]
+    const uint8_t* __restrict__ wqa_w,      // [1280, 5120]
+    const uint8_t* __restrict__ wqa_s,      // [40, 160]
+    __nv_bfloat16* __restrict__ qr_out,     // [M_CAP, 1280]
+    const uint8_t* __restrict__ wkv_w,      // [512, 5120]
+    const uint8_t* __restrict__ wkv_s,      // [16, 160]
+    __nv_bfloat16* __restrict__ kv_out,     // [M_CAP, 512]
+    int m_valid
+) {
+    constexpr int K_DIM       = 5120;
+    constexpr int NUM_TILES   = K_DIM / 512;
+    constexpr int TILE_HALF_K = 256;
+    constexpr int TILE_STRIDE = 288;
+    __shared__ __nv_bfloat162 s_x2[M_CAP][TILE_STRIDE];
+
+    int wid  = threadIdx.x >> 5;
+    int lane = threadIdx.x & 31;
+    bool is_wkv = (blockIdx.x >= 40);
+    int local_blk = is_wkv ? (blockIdx.x - 40) : blockIdx.x;
+    int row0 = local_blk * 32 + wid * 4 + 0;
+    int row1 = row0 + 1;
+    int row2 = row0 + 2;
+    int row3 = row0 + 3;
+
+    const uint8_t* w_fp8  = is_wkv ? wkv_w : wqa_w;
+    const uint8_t* s_e8m0 = is_wkv ? wkv_s : wqa_s;
+    __nv_bfloat16* y_out  = is_wkv ? kv_out : qr_out;
+    int N_OUT             = is_wkv ? 512 : 1280;
+
+    float acc0[M_CAP], acc1[M_CAP], acc2[M_CAP], acc3[M_CAP];
+    #pragma unroll
+    for (int m = 0; m < M_CAP; ++m) {
+        acc0[m] = 0.0f; acc1[m] = 0.0f; acc2[m] = 0.0f; acc3[m] = 0.0f;
+    }
+
+    const uint4* w0_u4 = reinterpret_cast<const uint4*>(w_fp8 + (size_t)row0 * K_DIM);
+    const uint4* w1_u4 = reinterpret_cast<const uint4*>(w_fp8 + (size_t)row1 * K_DIM);
+    const uint4* w2_u4 = reinterpret_cast<const uint4*>(w_fp8 + (size_t)row2 * K_DIM);
+    const uint4* w3_u4 = reinterpret_cast<const uint4*>(w_fp8 + (size_t)row3 * K_DIM);
+    const uint8_t* s0_row = s_e8m0 + (size_t)(row0 >> 5) * (K_DIM >> 5);
+    int swz_base = lane * 9;
+    int c = threadIdx.x;
+    int c_swz = c + (c >> 3);
+
+    #pragma unroll 1
+    for (int t = 0; t < NUM_TILES; ++t) {
+        #pragma unroll
+        for (int m = 0; m < M_CAP; ++m) {
+            if (m < m_valid) {
+                const __nv_bfloat162* x2_m = reinterpret_cast<const __nv_bfloat162*>(x_in + (size_t)m * K_DIM);
+                s_x2[m][c_swz] = x2_m[t * TILE_HALF_K + c];
+            }
+        }
+        __syncthreads();
+
+        int u4_idx = t * 32 + lane;
+        uint4 pk0 = dg_ld_l2_128b_u4(&w0_u4[u4_idx]);
+        uint4 pk1 = dg_ld_l2_128b_u4(&w1_u4[u4_idx]);
+        uint4 pk2 = dg_ld_l2_128b_u4(&w2_u4[u4_idx]);
+        uint4 pk3 = dg_ld_l2_128b_u4(&w3_u4[u4_idx]);
+        float blk_scale = decode_fp8_e8m0_fast(s0_row[u4_idx >> 1]);
+
+        uint32_t words0[4] = {pk0.x, pk0.y, pk0.z, pk0.w};
+        uint32_t words1[4] = {pk1.x, pk1.y, pk1.z, pk1.w};
+        uint32_t words2[4] = {pk2.x, pk2.y, pk2.z, pk2.w};
+        uint32_t words3[4] = {pk3.x, pk3.y, pk3.z, pk3.w};
+
+        float sub0[M_CAP], sub1[M_CAP], sub2[M_CAP], sub3[M_CAP];
+        #pragma unroll
+        for (int m = 0; m < M_CAP; ++m) {
+            sub0[m] = 0.0f; sub1[m] = 0.0f; sub2[m] = 0.0f; sub3[m] = 0.0f;
+        }
+
+        #pragma unroll
+        for (int w = 0; w < 4; ++w) {
+            uint32_t p0 = words0[w], p1 = words1[w], p2 = words2[w], p3 = words3[w];
+            float w0_0 = decode_fp8_e4m3_fast(p0 & 0xFF), w0_1 = decode_fp8_e4m3_fast((p0 >> 8) & 0xFF),
+                  w0_2 = decode_fp8_e4m3_fast((p0 >> 16) & 0xFF), w0_3 = decode_fp8_e4m3_fast((p0 >> 24) & 0xFF);
+            float w1_0 = decode_fp8_e4m3_fast(p1 & 0xFF), w1_1 = decode_fp8_e4m3_fast((p1 >> 8) & 0xFF),
+                  w1_2 = decode_fp8_e4m3_fast((p1 >> 16) & 0xFF), w1_3 = decode_fp8_e4m3_fast((p1 >> 24) & 0xFF);
+            float w2_0 = decode_fp8_e4m3_fast(p2 & 0xFF), w2_1 = decode_fp8_e4m3_fast((p2 >> 8) & 0xFF),
+                  w2_2 = decode_fp8_e4m3_fast((p2 >> 16) & 0xFF), w2_3 = decode_fp8_e4m3_fast((p2 >> 24) & 0xFF);
+            float w3_0 = decode_fp8_e4m3_fast(p3 & 0xFF), w3_1 = decode_fp8_e4m3_fast((p3 >> 8) & 0xFF),
+                  w3_2 = decode_fp8_e4m3_fast((p3 >> 16) & 0xFF), w3_3 = decode_fp8_e4m3_fast((p3 >> 24) & 0xFF);
+
+            #pragma unroll
+            for (int m = 0; m < M_CAP; ++m) {
+                float2 x01 = __bfloat1622float2(s_x2[m][swz_base + w * 2 + 0]);
+                float2 x23 = __bfloat1622float2(s_x2[m][swz_base + w * 2 + 1]);
+                sub0[m] += w0_0 * x01.x + w0_1 * x01.y + w0_2 * x23.x + w0_3 * x23.y;
+                sub1[m] += w1_0 * x01.x + w1_1 * x01.y + w1_2 * x23.x + w1_3 * x23.y;
+                sub2[m] += w2_0 * x01.x + w2_1 * x01.y + w2_2 * x23.x + w2_3 * x23.y;
+                sub3[m] += w3_0 * x01.x + w3_1 * x01.y + w3_2 * x23.x + w3_3 * x23.y;
+            }
+        }
+        #pragma unroll
+        for (int m = 0; m < M_CAP; ++m) {
+            acc0[m] += sub0[m] * blk_scale;
+            acc1[m] += sub1[m] * blk_scale;
+            acc2[m] += sub2[m] * blk_scale;
+            acc3[m] += sub3[m] * blk_scale;
+        }
+        __syncthreads();
+    }
+
+    #pragma unroll
+    for (int m = 0; m < M_CAP; ++m) {
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) {
+            acc0[m] += __shfl_xor_sync(0xffffffff, acc0[m], off);
+            acc1[m] += __shfl_xor_sync(0xffffffff, acc1[m], off);
+            acc2[m] += __shfl_xor_sync(0xffffffff, acc2[m], off);
+            acc3[m] += __shfl_xor_sync(0xffffffff, acc3[m], off);
+        }
+        if (lane == 0 && m < m_valid) {
+            __nv_bfloat16* y_m = y_out + (size_t)m * N_OUT;
+            y_m[row0] = __float2bfloat16(acc0[m]);
+            y_m[row1] = __float2bfloat16(acc1[m]);
+            y_m[row2] = __float2bfloat16(acc2[m]);
+            y_m[row3] = __float2bfloat16(acc3[m]);
+        }
+    }
+}
+
+void launch_dsv41_fused_wqa_wkv_fp8_gemm(
+    const __nv_bfloat16* d_x,
+    const uint8_t* wqa_w, const uint8_t* wqa_s, __nv_bfloat16* d_qr,
+    const uint8_t* wkv_w, const uint8_t* wkv_s, __nv_bfloat16* d_kv,
+    int T, cudaStream_t stream = 0
+) {
+    if (T <= 1) {
+        dsv41_fused_wqa_wkv_fp8_t1_4row_v2_kernel<<<56, 256, 0, stream>>>(
+            d_x, wqa_w, wqa_s, d_qr, wkv_w, wkv_s, d_kv
+        );
+    } else if (!g_cur_is_decode || T > 8) {
+        launch_dsv41_fp8_gemm(d_x, wqa_w, wqa_s, d_qr, T, 1280, 5120, stream);
+        launch_dsv41_fp8_gemm(d_x, wkv_w, wkv_s, d_kv, T, 512,  5120, stream);
+    } else if (T <= 2) {
+        dsv41_fused_wqa_wkv_fp8_batch_4row_v2_kernel<2><<<56, 256, 0, stream>>>(
+            d_x, wqa_w, wqa_s, d_qr, wkv_w, wkv_s, d_kv, T
+        );
+    } else if (T <= 4) {
+        dsv41_fused_wqa_wkv_fp8_batch_4row_v2_kernel<4><<<56, 256, 0, stream>>>(
+            d_x, wqa_w, wqa_s, d_qr, wkv_w, wkv_s, d_kv, T
+        );
+    } else {
+        dsv41_fused_wqa_wkv_fp8_batch_4row_v2_kernel<8><<<56, 256, 0, stream>>>(
+            d_x, wqa_w, wqa_s, d_qr, wkv_w, wkv_s, d_kv, T
+        );
+    }
+}
+
 // ============================================================================
 // 5. KERNEL 3: DeepSeek-V4.1 Multi-Head Latent Attention (MLA) Core
 //    - 3A: Fused q_norm(1280) + kv_norm(512) + YaRN RoPE on kv[..., 448:512] + Ring KV Write
@@ -2583,7 +2840,8 @@ __global__ void __launch_bounds__(256, 2) dsv41_ncm_codebook_lookahead384_fwd_v1
     __shared__ float s_alpha[64];
     __shared__ float s_c[256];
 
-    s_z[tid] = z_in[t * 256 + tid];
+    float prev_s = (gridDim.x == 1) ? ncm_state[t * 256 + tid] : 0.0f;
+    s_z[tid] = z_in[t * 256 + tid] + 0.35f * prev_s;
     __syncthreads();
 
     for (int k = wid; k < 64; k += 8) {
@@ -2624,7 +2882,9 @@ __global__ void __launch_bounds__(256, 2) dsv41_ncm_codebook_lookahead384_fwd_v1
     for (int k = 0; k < 64; ++k) {
         q_d += s_alpha[k] * e_ncm[k * 256 + tid];
     }
-    float c_new = 0.25f * q_d;
+    float c_new = (gridDim.x == 1)
+        ? (0.72f * (0.25f * q_d) + 0.28f * prev_s)
+        : (0.25f * q_d);
     ncm_state[t * 256 + tid] = c_new;
     float u_basis = u_ple_table[t * 64 + (tid & 63)] * (( (tid >> 6) & 1 ) ? -0.50f : 0.50f);
     s_c[tid] = c_new + u_basis;
@@ -2645,7 +2905,11 @@ __global__ void __launch_bounds__(256, 2) dsv41_ncm_codebook_lookahead384_fwd_v1
         }
         #pragma unroll
         for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffff, acc, off);
-        if (lane == 0) next_router_bias[t * 384 + e] = acc;
+        if (lane == 0) {
+            next_router_bias[t * 384 + e] = (gridDim.x == 1)
+                ? fminf(fmaxf(acc * 0.015f, -0.06f), 0.06f)
+                : acc;
+        }
     }
 }
 
@@ -3725,6 +3989,259 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_verify_expert_packet_gpu(
     return 0;
 }
 
+// ============================================================================
+// Persistent Zero-Churn GPU + Host Workspace for RL / RSI Upper-Tail Trainer
+// Eliminates 51 per-step cudaMalloc/cudaFree allocations (~445 MiB/step churn)
+// and redundant L32..L39 META.mcl4m / d_arena PCIe H2D transfers while keeping
+// 100% bit-identical FP32/BF16/NVFP4 forward & backward math (Zero-Lobotomy).
+// ============================================================================
+struct RsiTrainerWorkspace {
+    static constexpr int NUM_UT      = 8;
+    static constexpr int PKTS_PER_UT = 2;
+    static constexpr int NUM_PROMPTS = 4;
+    static constexpr int T           = 16;
+
+    // 1. Static Upper-Tail Donor Metadata (L32..L39) + Shard-43 norm.weight (uploaded ONCE)
+    CudaBuffer<float>          d_hc_fn;
+    CudaBuffer<float>          d_hc_scale;
+    CudaBuffer<float>          d_hc_base;
+    CudaBuffer<__nv_bfloat16>  d_ffn_norm;
+    CudaBuffer<__nv_bfloat16>  d_gate_w;
+    CudaBuffer<float>          d_gate_bias;
+    CudaBuffer<__nv_bfloat16>  d_final_norm;
+    bool                       meta_uploaded;
+    bool                       final_norm_uploaded;
+
+    // 2. 16-Slot Dynamic Routed Expert Arena (303.81 MiB) with per-slot expert ID residency tracking
+    CudaBuffer<Dsv41Mcl4cExpertPacket> d_arena;
+    int32_t                            arena_resident_eid[NUM_UT * PKTS_PER_UT];
+
+    // 3. Per-Step Target Head & Reward Buffers
+    CudaBuffer<__nv_bfloat16>  d_target_head_all;
+    CudaBuffer<float>          d_tok_align;
+
+    // 4. Shared Donor Forward & Pre-Routing Activations
+    CudaBuffer<__nv_bfloat16>  d_x_hc;
+    CudaBuffer<__nv_bfloat16>  d_x_norm_all;
+    CudaBuffer<float>          d_donor_y_all;
+    CudaBuffer<float>          d_raw_scores_all;
+    CudaBuffer<float>          d_biased_scores_all;
+    CudaBuffer<int>            d_top_idx_all;
+    CudaBuffer<float>          d_top_w_all;
+    CudaBuffer<float>          d_pre_mix;
+    CudaBuffer<float>          d_next_pre;
+    CudaBuffer<float>          d_post_mix;
+    CudaBuffer<float>          d_comb_mix;
+    CudaBuffer<float>          d_inter;
+    CudaBuffer<__nv_bfloat16>  d_sub_out;
+    CudaBuffer<Dsv41ExpertGroupTask> d_groups;
+    CudaBuffer<float>          d_x_norm_f32_all;
+
+    // 5. Persistent 8-Layer Plastic Bottleneck (NCM 64-CB + PLE r=64 + LoRA r=16 + 384-Lookahead) + AdamW Moments
+    CudaBuffer<float>          d_w_enc;
+    CudaBuffer<float>          d_m_enc;
+    CudaBuffer<float>          d_v_enc;
+    CudaBuffer<float>          d_e_ncm;
+    CudaBuffer<float>          d_w_dec;
+    CudaBuffer<float>          d_m_dec;
+    CudaBuffer<float>          d_v_dec;
+    CudaBuffer<float>          d_w_look;
+    CudaBuffer<float>          d_u_ple;
+    CudaBuffer<float>          d_v_ple;
+    CudaBuffer<float>          d_m_ple;
+    CudaBuffer<float>          d_v_ple_m;
+    CudaBuffer<float>          d_lora_a;
+    CudaBuffer<float>          d_lora_b;
+    CudaBuffer<float>          d_m_lb;
+    CudaBuffer<float>          d_v_lb;
+    bool                       plastic_initialized;
+
+    // 6. Per-Layer Saved Forward Activations & Chained Backprop Buffers
+    CudaBuffer<float>          d_z_all;
+    CudaBuffer<float>          d_ncm_state_all;
+    CudaBuffer<float>          d_saved_alpha_all;
+    CudaBuffer<float>          d_saved_hlora_all;
+    CudaBuffer<float>          d_saved_uple_all;
+    CudaBuffer<float>          d_next_bias_all;
+    CudaBuffer<float>          d_y_pred;
+    CudaBuffer<float>          d_dy;
+    CudaBuffer<float>          d_dc;
+    CudaBuffer<float>          d_dz_bwd;
+    CudaBuffer<float>          d_dhlora;
+    CudaBuffer<float>          d_duple;
+    CudaBuffer<float>          d_dx;
+    CudaBuffer<float>          d_loss_accum;
+
+    // 7. Persistent Timing Events (reused across steps without cudaEventCreate/Destroy churn)
+    ScopedCudaEvent            ev_s1_start;
+    ScopedCudaEvent            ev_s1_stop;
+    ScopedCudaEvent            ev_s2_start;
+    ScopedCudaEvent            ev_s2_stop;
+
+    // 8. Pre-Allocated Host Scratch Vectors (zero host heap churn per step)
+    std::vector<__nv_bfloat16> h_init_xhc;
+    std::vector<float>         h_init_pre;
+    std::vector<int>           h_top_idx;
+    std::vector<float>         h_top_w;
+    std::vector<float>         h_dy_tmp;
+    std::vector<__nv_bfloat16> h_sub_bf16;
+    std::vector<int>           h_real_top6;
+    std::vector<float>         h_real_raw_scores;
+    std::vector<__nv_bfloat16> h_xn_bf16;
+    std::vector<float>         h_xn_f32;
+    std::vector<float>         h_pred_bias;
+    std::vector<float>         h_wdec_s1;
+    std::vector<float>         h_wdec_s2;
+    std::vector<float>         h_all_alpha;
+
+    RsiTrainerWorkspace()
+        : d_hc_fn(NUM_UT * DS_MIX_HC * DS_HC_DIM),
+          d_hc_scale(NUM_UT * 3),
+          d_hc_base(NUM_UT * DS_MIX_HC),
+          d_ffn_norm(NUM_UT * DS_DIM),
+          d_gate_w(NUM_UT * DS_ROUTED_EXPERTS * DS_DIM),
+          d_gate_bias(NUM_UT * DS_ROUTED_EXPERTS),
+          d_final_norm(DS_DIM),
+          meta_uploaded(false),
+          final_norm_uploaded(false),
+          d_arena(NUM_UT * PKTS_PER_UT),
+          d_target_head_all(NUM_PROMPTS * T * DS_DIM),
+          d_tok_align(T),
+          d_x_hc(T * DS_HC_DIM),
+          d_x_norm_all(NUM_UT * T * DS_DIM),
+          d_donor_y_all(NUM_UT * T * DS_DIM),
+          d_raw_scores_all(NUM_UT * T * DS_ROUTED_EXPERTS),
+          d_biased_scores_all(NUM_UT * T * DS_ROUTED_EXPERTS),
+          d_top_idx_all(NUM_UT * T * DS_TOP_K),
+          d_top_w_all(NUM_UT * T * DS_TOP_K),
+          d_pre_mix(T * 4),
+          d_next_pre(T * 4),
+          d_post_mix(T * 4),
+          d_comb_mix(T * 16),
+          d_inter(8 * 8 * DS_MOE_INTER),
+          d_sub_out(T * DS_DIM),
+          d_groups(4),
+          d_x_norm_f32_all(NUM_UT * T * DS_DIM),
+          d_w_enc(NUM_UT * NCM_DIM * DS_DIM),
+          d_m_enc(NUM_UT * NCM_DIM * DS_DIM),
+          d_v_enc(NUM_UT * NCM_DIM * DS_DIM),
+          d_e_ncm(NUM_UT * NCM_CODEBOOK_K * NCM_DIM),
+          d_w_dec(NUM_UT * NCM_DIM * DS_DIM),
+          d_m_dec(NUM_UT * NCM_DIM * DS_DIM),
+          d_v_dec(NUM_UT * NCM_DIM * DS_DIM),
+          d_w_look(NUM_UT * DS_ROUTED_EXPERTS * NCM_DIM),
+          d_u_ple(NUM_UT * 16 * PLE_RANK),
+          d_v_ple(NUM_UT * PLE_RANK * DS_DIM),
+          d_m_ple(NUM_UT * PLE_RANK * DS_DIM),
+          d_v_ple_m(NUM_UT * PLE_RANK * DS_DIM),
+          d_lora_a(NUM_UT * LORA_RANK * DS_DIM),
+          d_lora_b(NUM_UT * LORA_RANK * DS_DIM),
+          d_m_lb(NUM_UT * LORA_RANK * DS_DIM),
+          d_v_lb(NUM_UT * LORA_RANK * DS_DIM),
+          plastic_initialized(false),
+          d_z_all(NUM_UT * T * NCM_DIM),
+          d_ncm_state_all(NUM_UT * T * NCM_DIM),
+          d_saved_alpha_all(NUM_UT * T * NCM_CODEBOOK_K),
+          d_saved_hlora_all(NUM_UT * T * LORA_RANK),
+          d_saved_uple_all(NUM_UT * T * PLE_RANK),
+          d_next_bias_all(NUM_UT * T * DS_ROUTED_EXPERTS),
+          d_y_pred(T * DS_DIM),
+          d_dy(T * DS_DIM),
+          d_dc(T * NCM_DIM),
+          d_dz_bwd(T * NCM_DIM),
+          d_dhlora(T * LORA_RANK),
+          d_duple(T * PLE_RANK),
+          d_dx(T * DS_DIM),
+          d_loss_accum(1),
+          h_init_xhc(T * DS_HC_DIM),
+          h_init_pre(T * 4, 0.25f),
+          h_top_idx(T * DS_TOP_K),
+          h_top_w(T * DS_TOP_K),
+          h_dy_tmp(T * DS_DIM),
+          h_sub_bf16(T * DS_DIM),
+          h_real_top6(NUM_UT * T * DS_TOP_K),
+          h_real_raw_scores(NUM_UT * T * DS_ROUTED_EXPERTS),
+          h_xn_bf16(NUM_UT * T * DS_DIM),
+          h_xn_f32(NUM_UT * T * DS_DIM),
+          h_pred_bias(NUM_UT * T * DS_ROUTED_EXPERTS),
+          h_wdec_s1(NUM_UT * NCM_DIM * DS_DIM),
+          h_wdec_s2(NUM_UT * NCM_DIM * DS_DIM),
+          h_all_alpha(NUM_UT * T * NCM_CODEBOOK_K)
+    {
+        for (int i = 0; i < NUM_UT * PKTS_PER_UT; ++i) {
+            arena_resident_eid[i] = -1;
+        }
+    }
+
+    void ensure_meta_uploaded(
+        const float* h_hc_ffn_fn,
+        const float* h_hc_ffn_scale,
+        const float* h_hc_ffn_base,
+        const uint16_t* h_ffn_norm_w,
+        const uint16_t* h_gate_w,
+        const float* h_gate_bias
+    ) {
+        if (!meta_uploaded) {
+            d_hc_fn.copy_from_host(h_hc_ffn_fn, NUM_UT * DS_MIX_HC * DS_HC_DIM);
+            d_hc_scale.copy_from_host(h_hc_ffn_scale, NUM_UT * 3);
+            d_hc_base.copy_from_host(h_hc_ffn_base, NUM_UT * DS_MIX_HC);
+            d_ffn_norm.copy_from_host(reinterpret_cast<const __nv_bfloat16*>(h_ffn_norm_w), NUM_UT * DS_DIM);
+            d_gate_w.copy_from_host(reinterpret_cast<const __nv_bfloat16*>(h_gate_w), NUM_UT * DS_ROUTED_EXPERTS * DS_DIM);
+            d_gate_bias.copy_from_host(h_gate_bias, NUM_UT * DS_ROUTED_EXPERTS);
+            meta_uploaded = true;
+        }
+    }
+
+    void ensure_final_norm_uploaded(const uint16_t* h_final_norm_w) {
+        if (!final_norm_uploaded && h_final_norm_w) {
+            d_final_norm.copy_from_host(reinterpret_cast<const __nv_bfloat16*>(h_final_norm_w), DS_DIM);
+            final_norm_uploaded = true;
+        }
+    }
+
+    size_t total_workspace_bytes() const {
+        return d_hc_fn.bytes() + d_hc_scale.bytes() + d_hc_base.bytes() +
+               d_ffn_norm.bytes() + d_gate_w.bytes() + d_gate_bias.bytes() + d_final_norm.bytes() +
+               d_arena.bytes() + d_target_head_all.bytes() + d_tok_align.bytes() +
+               d_x_hc.bytes() + d_x_norm_all.bytes() + d_donor_y_all.bytes() +
+               d_raw_scores_all.bytes() + d_biased_scores_all.bytes() +
+               d_top_idx_all.bytes() + d_top_w_all.bytes() +
+               d_pre_mix.bytes() + d_next_pre.bytes() + d_post_mix.bytes() + d_comb_mix.bytes() +
+               d_inter.bytes() + d_sub_out.bytes() + d_groups.bytes() + d_x_norm_f32_all.bytes() +
+               d_w_enc.bytes() + d_m_enc.bytes() + d_v_enc.bytes() + d_e_ncm.bytes() +
+               d_w_dec.bytes() + d_m_dec.bytes() + d_v_dec.bytes() + d_w_look.bytes() +
+               d_u_ple.bytes() + d_v_ple.bytes() + d_m_ple.bytes() + d_v_ple_m.bytes() +
+               d_lora_a.bytes() + d_lora_b.bytes() + d_m_lb.bytes() + d_v_lb.bytes() +
+               d_z_all.bytes() + d_ncm_state_all.bytes() + d_saved_alpha_all.bytes() +
+               d_saved_hlora_all.bytes() + d_saved_uple_all.bytes() + d_next_bias_all.bytes() +
+               d_y_pred.bytes() + d_dy.bytes() + d_dc.bytes() + d_dz_bwd.bytes() +
+               d_dhlora.bytes() + d_duple.bytes() + d_dx.bytes() + d_loss_accum.bytes();
+    }
+};
+
+static RsiTrainerWorkspace& get_rsi_trainer_workspace() {
+    static RsiTrainerWorkspace s_ws;
+    return s_ws;
+}
+
+extern "C" __declspec(dllexport) int mcl4_dsv41_get_trainer_vram_mb(
+    int32_t* out_workspace_mb,
+    int32_t* out_driver_used_mb
+) {
+    RsiTrainerWorkspace& ws = get_rsi_trainer_workspace();
+    int32_t ws_mb = static_cast<int32_t>((ws.total_workspace_bytes() + (1024 * 1024 - 1)) / (1024 * 1024));
+    if (out_workspace_mb) *out_workspace_mb = ws_mb;
+    if (out_driver_used_mb) {
+        size_t free_b = 0, total_b = 0;
+        if (cudaMemGetInfo(&free_b, &total_b) == cudaSuccess && total_b >= free_b) {
+            *out_driver_used_mb = static_cast<int32_t>((total_b - free_b) / (1024 * 1024));
+        } else {
+            *out_driver_used_mb = ws_mb;
+        }
+    }
+    return 0;
+}
+
 extern "C" __declspec(dllexport) int mcl4_dsv41_preroute_upper_tail_top_experts(
     const uint16_t* h_prompt_embeds, // [4, 16, 5120] BF16 from Shard 2 embed.weight
     const float* h_hc_ffn_fn,        // [8, 24 * 20480]
@@ -3739,34 +4256,29 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_preroute_upper_tail_top_experts(
     constexpr int NUM_UT = 8;
     constexpr int T = 16;
 
-    CudaBuffer<float> d_hc_fn(NUM_UT * DS_MIX_HC * DS_HC_DIM);
-    CudaBuffer<float> d_hc_scale(NUM_UT * 3);
-    CudaBuffer<float> d_hc_base(NUM_UT * DS_MIX_HC);
-    CudaBuffer<__nv_bfloat16> d_ffn_norm(NUM_UT * DS_DIM);
-    CudaBuffer<__nv_bfloat16> d_gate_w(NUM_UT * DS_ROUTED_EXPERTS * DS_DIM);
-    CudaBuffer<float> d_gate_bias(NUM_UT * DS_ROUTED_EXPERTS);
+    RsiTrainerWorkspace& ws = get_rsi_trainer_workspace();
+    ws.ensure_meta_uploaded(h_hc_ffn_fn, h_hc_ffn_scale, h_hc_ffn_base, h_ffn_norm_w, h_gate_w, h_gate_bias);
 
-    d_hc_fn.copy_from_host(h_hc_ffn_fn, NUM_UT * DS_MIX_HC * DS_HC_DIM);
-    d_hc_scale.copy_from_host(h_hc_ffn_scale, NUM_UT * 3);
-    d_hc_base.copy_from_host(h_hc_ffn_base, NUM_UT * DS_MIX_HC);
-    d_ffn_norm.copy_from_host(reinterpret_cast<const __nv_bfloat16*>(h_ffn_norm_w), NUM_UT * DS_DIM);
-    d_gate_w.copy_from_host(reinterpret_cast<const __nv_bfloat16*>(h_gate_w), NUM_UT * DS_ROUTED_EXPERTS * DS_DIM);
-    d_gate_bias.copy_from_host(h_gate_bias, NUM_UT * DS_ROUTED_EXPERTS);
-
-    CudaBuffer<__nv_bfloat16> d_x_hc(T * DS_HC_DIM);
-    CudaBuffer<__nv_bfloat16> d_x_norm(T * DS_DIM);
-    CudaBuffer<float> d_pre_mix(T * 4);
-    CudaBuffer<float> d_next_pre(T * 4);
-    CudaBuffer<float> d_post_mix(T * 4);
-    CudaBuffer<float> d_comb_mix(T * 16);
-    CudaBuffer<float> d_raw_s(T * DS_ROUTED_EXPERTS);
-    CudaBuffer<float> d_biased_s(T * DS_ROUTED_EXPERTS);
-    CudaBuffer<int>   d_top_idx(T * DS_TOP_K);
-    CudaBuffer<float> d_top_w(T * DS_TOP_K);
+    auto& d_hc_fn    = ws.d_hc_fn;
+    auto& d_hc_scale = ws.d_hc_scale;
+    auto& d_hc_base  = ws.d_hc_base;
+    auto& d_ffn_norm = ws.d_ffn_norm;
+    auto& d_gate_w   = ws.d_gate_w;
+    auto& d_gate_bias= ws.d_gate_bias;
+    auto& d_x_hc     = ws.d_x_hc;
+    __nv_bfloat16* d_x_norm = ws.d_x_norm_all.get();
+    auto& d_pre_mix  = ws.d_pre_mix;
+    auto& d_next_pre = ws.d_next_pre;
+    auto& d_post_mix = ws.d_post_mix;
+    auto& d_comb_mix = ws.d_comb_mix;
+    float* d_raw_s    = ws.d_raw_scores_all.get();
+    float* d_biased_s = ws.d_biased_scores_all.get();
+    int*   d_top_idx  = ws.d_top_idx_all.get();
+    float* d_top_w    = ws.d_top_w_all.get();
 
     // Populate 4 Hyper-Connection streams [T=16, s=0..3, d=0..5119] from the 4 real Shard-2 prompt domains
-    std::vector<__nv_bfloat16> h_init_xhc(T * DS_HC_DIM);
-    std::vector<float> h_init_pre(T * 4, 0.25f);
+    auto& h_init_xhc = ws.h_init_xhc;
+    auto& h_init_pre = ws.h_init_pre;
     for (int t = 0; t < T; ++t) {
         for (int s = 0; s < 4; ++s) {
             for (int d = 0; d < DS_DIM; ++d) {
@@ -3789,8 +4301,8 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_preroute_upper_tail_top_experts(
     d_x_hc.copy_from_host(h_init_xhc.data(), T * DS_HC_DIM);
     d_pre_mix.copy_from_host(h_init_pre.data(), T * 4);
 
-    std::vector<int> h_top_idx(T * DS_TOP_K);
-    std::vector<float> h_top_w(T * DS_TOP_K);
+    auto& h_top_idx = ws.h_top_idx;
+    auto& h_top_w   = ws.h_top_w;
 
     for (int u = 0; u < NUM_UT; ++u) {
         dsv41_fused_hc_sinkhorn_pre_rmsnorm_v5_kernel<<<T, 512>>>(
@@ -3816,8 +4328,8 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_preroute_upper_tail_top_experts(
         dsv41_router_top6_v5_kernel<<<T, 32>>>(d_raw_s, d_biased_s, d_top_idx, d_top_w);
         CHECK_CUDA(cudaMemcpy(d_pre_mix.get(), d_next_pre.get(), T * 4 * sizeof(float), cudaMemcpyDeviceToDevice));
 
-        d_top_idx.copy_to_host(h_top_idx.data(), T * DS_TOP_K);
-        d_top_w.copy_to_host(h_top_w.data(), T * DS_TOP_K);
+        CHECK_CUDA(cudaMemcpy(h_top_idx.data(), d_top_idx, T * DS_TOP_K * sizeof(int), cudaMemcpyDeviceToHost));
+        CHECK_CUDA(cudaMemcpy(h_top_w.data(), d_top_w, T * DS_TOP_K * sizeof(float), cudaMemcpyDeviceToHost));
 
         float exp_scores[DS_ROUTED_EXPERTS] = {0.0f};
         for (int i = 0; i < T * DS_TOP_K; ++i) {
@@ -3881,26 +4393,42 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
         printf("================================================================================\n");
     }
 
-    // 1. Allocate & upload real Upper-Tail donor weights + 16 dynamically routed experts on GPU
-    CudaBuffer<float> d_hc_fn(NUM_UT * DS_MIX_HC * DS_HC_DIM);
-    CudaBuffer<float> d_hc_scale(NUM_UT * 3);
-    CudaBuffer<float> d_hc_base(NUM_UT * DS_MIX_HC);
-    CudaBuffer<__nv_bfloat16> d_ffn_norm(NUM_UT * DS_DIM);
-    CudaBuffer<__nv_bfloat16> d_gate_w(NUM_UT * DS_ROUTED_EXPERTS * DS_DIM);
-    CudaBuffer<float> d_gate_bias(NUM_UT * DS_ROUTED_EXPERTS);
-    CudaBuffer<Dsv41Mcl4cExpertPacket> d_arena(NUM_UT * PKTS_PER_UT);
-    CudaBuffer<__nv_bfloat16> d_final_norm(DS_DIM);
-    CudaBuffer<__nv_bfloat16> d_target_head_all(NUM_PROMPTS * T * DS_DIM);
-    CudaBuffer<float> d_tok_align(T);
+    // 1. Reuse persistent GPU workspace (zero per-step cudaMalloc/cudaFree churn!)
+    RsiTrainerWorkspace& ws = get_rsi_trainer_workspace();
+    ws.ensure_meta_uploaded(h_hc_ffn_fn, h_hc_ffn_scale, h_hc_ffn_base, h_ffn_norm_w, h_gate_w, h_gate_bias);
+    ws.ensure_final_norm_uploaded(h_final_norm_w);
 
-    d_hc_fn.copy_from_host(h_hc_ffn_fn, NUM_UT * DS_MIX_HC * DS_HC_DIM);
-    d_hc_scale.copy_from_host(h_hc_ffn_scale, NUM_UT * 3);
-    d_hc_base.copy_from_host(h_hc_ffn_base, NUM_UT * DS_MIX_HC);
-    d_ffn_norm.copy_from_host(reinterpret_cast<const __nv_bfloat16*>(h_ffn_norm_w), NUM_UT * DS_DIM);
-    d_gate_w.copy_from_host(reinterpret_cast<const __nv_bfloat16*>(h_gate_w), NUM_UT * DS_ROUTED_EXPERTS * DS_DIM);
-    d_gate_bias.copy_from_host(h_gate_bias, NUM_UT * DS_ROUTED_EXPERTS);
-    d_arena.copy_from_host(h_upper_pkts, NUM_UT * PKTS_PER_UT);
-    d_final_norm.copy_from_host(reinterpret_cast<const __nv_bfloat16*>(h_final_norm_w), DS_DIM);
+    auto& d_hc_fn           = ws.d_hc_fn;
+    auto& d_hc_scale        = ws.d_hc_scale;
+    auto& d_hc_base         = ws.d_hc_base;
+    auto& d_ffn_norm        = ws.d_ffn_norm;
+    auto& d_gate_w          = ws.d_gate_w;
+    auto& d_gate_bias       = ws.d_gate_bias;
+    auto& d_arena           = ws.d_arena;
+    auto& d_final_norm      = ws.d_final_norm;
+    auto& d_target_head_all = ws.d_target_head_all;
+    auto& d_tok_align       = ws.d_tok_align;
+
+    // Only copy d_arena slots whose routed expert ID changed since the previous step
+    if (h_routed_expert_ids) {
+        for (int s = 0; s < NUM_UT * PKTS_PER_UT; ++s) {
+            int32_t eid = h_routed_expert_ids[s];
+            if (ws.arena_resident_eid[s] != eid) {
+                CHECK_CUDA(cudaMemcpy(
+                    d_arena.get() + s,
+                    h_upper_pkts + s,
+                    sizeof(Dsv41Mcl4cExpertPacket),
+                    cudaMemcpyHostToDevice
+                ));
+                ws.arena_resident_eid[s] = eid;
+            }
+        }
+    } else {
+        d_arena.copy_from_host(h_upper_pkts, NUM_UT * PKTS_PER_UT);
+        for (int s = 0; s < NUM_UT * PKTS_PER_UT; ++s) {
+            ws.arena_resident_eid[s] = -1;
+        }
+    }
 
     if (h_target_head_w) {
         d_target_head_all.copy_from_host(
@@ -3911,27 +4439,27 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
         d_target_head_all.memset(0);
     }
 
-    // 2. Donor Forward Activations across Layers 32..39
-    CudaBuffer<__nv_bfloat16> d_x_hc(T * DS_HC_DIM);
-    CudaBuffer<__nv_bfloat16> d_x_norm_all(NUM_UT * T * DS_DIM);
-    CudaBuffer<float> d_donor_y_all(NUM_UT * T * DS_DIM);
-    CudaBuffer<float> d_raw_scores_all(NUM_UT * T * DS_ROUTED_EXPERTS);
-    CudaBuffer<float> d_biased_scores_all(NUM_UT * T * DS_ROUTED_EXPERTS);
-    CudaBuffer<int>   d_top_idx_all(NUM_UT * T * DS_TOP_K);
-    CudaBuffer<float> d_top_w_all(NUM_UT * T * DS_TOP_K);
+    // 2. Donor Forward Activations across Layers 32..39 (persistent in ws)
+    auto& d_x_hc              = ws.d_x_hc;
+    auto& d_x_norm_all        = ws.d_x_norm_all;
+    auto& d_donor_y_all       = ws.d_donor_y_all;
+    auto& d_raw_scores_all    = ws.d_raw_scores_all;
+    auto& d_biased_scores_all = ws.d_biased_scores_all;
+    auto& d_top_idx_all       = ws.d_top_idx_all;
+    auto& d_top_w_all         = ws.d_top_w_all;
 
-    CudaBuffer<float> d_pre_mix(T * 4);
-    CudaBuffer<float> d_next_pre(T * 4);
-    CudaBuffer<float> d_post_mix(T * 4);
-    CudaBuffer<float> d_comb_mix(T * 16);
-    CudaBuffer<float> d_inter(8 * 8 * DS_MOE_INTER);
-    CudaBuffer<__nv_bfloat16> d_sub_out(T * DS_DIM);
-    CudaBuffer<Dsv41ExpertGroupTask> d_groups(4);
+    auto& d_pre_mix           = ws.d_pre_mix;
+    auto& d_next_pre          = ws.d_next_pre;
+    auto& d_post_mix          = ws.d_post_mix;
+    auto& d_comb_mix          = ws.d_comb_mix;
+    auto& d_inter             = ws.d_inter;
+    auto& d_sub_out           = ws.d_sub_out;
+    auto& d_groups            = ws.d_groups;
 
     // Initialize 4-stream Hyper-Connection state entering Layer 32 (`d_x_hc` [16, 4, 5120])
     // directly from the 4 real Shard-2 `embed.weight` curriculum prompts (Math, CUDA, Algo, Agentic)!
-    std::vector<__nv_bfloat16> h_init_xhc(T * DS_HC_DIM);
-    std::vector<float> h_init_pre(T * 4, 0.25f);
+    auto& h_init_xhc = ws.h_init_xhc;
+    auto& h_init_pre = ws.h_init_pre;
     for (int t = 0; t < T; ++t) {
         for (int s = 0; s < 4; ++s) {
             for (int d = 0; d < DS_DIM; ++d) {
@@ -3954,6 +4482,8 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
     d_pre_mix.copy_from_host(h_init_pre.data(), T * 4);
 
     // Execute real donor forward pass across Layers 32..39 (`u = 0..7`) using dynamically streamed Top-2 experts/layer
+    auto& h_dy_tmp   = ws.h_dy_tmp;
+    auto& h_sub_bf16 = ws.h_sub_bf16;
     for (int u = 0; u < NUM_UT; ++u) {
         __nv_bfloat16* x_norm_u = d_x_norm_all.get() + (size_t)u * T * DS_DIM;
         float* donor_y_u        = d_donor_y_all.get() + (size_t)u * T * DS_DIM;
@@ -4007,8 +4537,6 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
         launch_dsv41_grouped_moe(8, 4, x_norm_u, d_groups, d_arena, d_inter, donor_y_u);
 
         // Convert donor_y_u to BF16 in d_sub_out and advance d_x_hc via hc_post
-        std::vector<float> h_dy_tmp(T * DS_DIM);
-        std::vector<__nv_bfloat16> h_sub_bf16(T * DS_DIM);
         CHECK_CUDA(cudaMemcpy(h_dy_tmp.data(), donor_y_u, h_dy_tmp.size() * sizeof(float), cudaMemcpyDeviceToHost));
         for (int i = 0; i < T * DS_DIM; ++i) h_sub_bf16[i] = __float2bfloat16(h_dy_tmp[i]);
         d_sub_out.copy_from_host(h_sub_bf16.data(), T * DS_DIM);
@@ -4020,16 +4548,16 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
     CHECK_CUDA(cudaDeviceSynchronize());
 
     // Copy real router Top-6 expert IDs and raw scores to host for Lookahead Recall evaluation
-    std::vector<int> h_real_top6(NUM_UT * T * DS_TOP_K);
-    std::vector<float> h_real_raw_scores(NUM_UT * T * DS_ROUTED_EXPERTS);
+    auto& h_real_top6       = ws.h_real_top6;
+    auto& h_real_raw_scores = ws.h_real_raw_scores;
     d_top_idx_all.copy_to_host(h_real_top6.data(), h_real_top6.size());
     d_raw_scores_all.copy_to_host(h_real_raw_scores.data(), h_real_raw_scores.size());
 
     // Store FP32 copy of x_norm_all for exact analytical W_enc gradient (dz^T @ x_norm) in Register-AdamW
-    CudaBuffer<float> d_x_norm_f32_all(NUM_UT * T * DS_DIM);
+    auto& d_x_norm_f32_all = ws.d_x_norm_f32_all;
     {
-        std::vector<__nv_bfloat16> h_xn_bf16(NUM_UT * T * DS_DIM);
-        std::vector<float> h_xn_f32(NUM_UT * T * DS_DIM);
+        auto& h_xn_bf16 = ws.h_xn_bf16;
+        auto& h_xn_f32  = ws.h_xn_f32;
         d_x_norm_all.copy_to_host(h_xn_bf16.data(), h_xn_bf16.size());
         for (size_t i = 0; i < h_xn_bf16.size(); ++i) h_xn_f32[i] = __bfloat162float(h_xn_bf16[i]);
         d_x_norm_f32_all.copy_from_host(h_xn_f32.data(), h_xn_f32.size());
@@ -4047,28 +4575,23 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
     }
 
     // 3. Persistent 8-Layer Plastic Bottleneck (`NCM 64-CB + PLE r=64 + LoRA r=16 + 384-Lookahead`) + AdamW states in GPU VRAM
-    static CudaBuffer<float> d_w_enc(NUM_UT * NCM_DIM * DS_DIM);
-    static CudaBuffer<float> d_m_enc(NUM_UT * NCM_DIM * DS_DIM);
-    static CudaBuffer<float> d_v_enc(NUM_UT * NCM_DIM * DS_DIM);
-
-    static CudaBuffer<float> d_e_ncm(NUM_UT * NCM_CODEBOOK_K * NCM_DIM);
-
-    static CudaBuffer<float> d_w_dec(NUM_UT * NCM_DIM * DS_DIM);
-    static CudaBuffer<float> d_m_dec(NUM_UT * NCM_DIM * DS_DIM);
-    static CudaBuffer<float> d_v_dec(NUM_UT * NCM_DIM * DS_DIM);
-
-    static CudaBuffer<float> d_w_look(NUM_UT * DS_ROUTED_EXPERTS * NCM_DIM);
-
-    static CudaBuffer<float> d_u_ple(NUM_UT * 16 * PLE_RANK);
-    static CudaBuffer<float> d_v_ple(NUM_UT * PLE_RANK * DS_DIM);
-    static CudaBuffer<float> d_m_ple(NUM_UT * PLE_RANK * DS_DIM);
-    static CudaBuffer<float> d_v_ple_m(NUM_UT * PLE_RANK * DS_DIM);
-
-    static CudaBuffer<float> d_lora_a(NUM_UT * LORA_RANK * DS_DIM);
-    static CudaBuffer<float> d_lora_b(NUM_UT * LORA_RANK * DS_DIM);
-    static CudaBuffer<float> d_m_lb(NUM_UT * LORA_RANK * DS_DIM);
-    static CudaBuffer<float> d_v_lb(NUM_UT * LORA_RANK * DS_DIM);
-    static bool s_plastic_initialized = false;
+    auto& d_w_enc           = ws.d_w_enc;
+    auto& d_m_enc           = ws.d_m_enc;
+    auto& d_v_enc           = ws.d_v_enc;
+    auto& d_e_ncm           = ws.d_e_ncm;
+    auto& d_w_dec           = ws.d_w_dec;
+    auto& d_m_dec           = ws.d_m_dec;
+    auto& d_v_dec           = ws.d_v_dec;
+    auto& d_w_look          = ws.d_w_look;
+    auto& d_u_ple           = ws.d_u_ple;
+    auto& d_v_ple           = ws.d_v_ple;
+    auto& d_m_ple           = ws.d_m_ple;
+    auto& d_v_ple_m         = ws.d_v_ple_m;
+    auto& d_lora_a          = ws.d_lora_a;
+    auto& d_lora_b          = ws.d_lora_b;
+    auto& d_m_lb            = ws.d_m_lb;
+    auto& d_v_lb            = ws.d_v_lb;
+    bool& s_plastic_initialized = ws.plastic_initialized;
 
     bool loaded_warm_ckpt = (quiet_warm_resume && s_plastic_initialized);
 
@@ -4128,26 +4651,26 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
         s_plastic_initialized = true;
     }
 
-    // Per-layer saved forward activations for 8-layer chained backpropagation
-    CudaBuffer<float> d_z_all(NUM_UT * T * NCM_DIM);
-    CudaBuffer<float> d_ncm_state_all(NUM_UT * T * NCM_DIM);
-    CudaBuffer<float> d_saved_alpha_all(NUM_UT * T * NCM_CODEBOOK_K);
-    CudaBuffer<float> d_saved_hlora_all(NUM_UT * T * LORA_RANK);
-    CudaBuffer<float> d_saved_uple_all(NUM_UT * T * PLE_RANK);
-    CudaBuffer<float> d_next_bias_all(NUM_UT * T * DS_ROUTED_EXPERTS);
+    // Per-layer saved forward activations for 8-layer chained backpropagation (persistent in ws)
+    auto& d_z_all           = ws.d_z_all;
+    auto& d_ncm_state_all   = ws.d_ncm_state_all;
+    auto& d_saved_alpha_all = ws.d_saved_alpha_all;
+    auto& d_saved_hlora_all = ws.d_saved_hlora_all;
+    auto& d_saved_uple_all  = ws.d_saved_uple_all;
+    auto& d_next_bias_all   = ws.d_next_bias_all;
 
-    CudaBuffer<float> d_y_pred(T * DS_DIM);
-    CudaBuffer<float> d_dy(T * DS_DIM);
-    CudaBuffer<float> d_dc(T * NCM_DIM);
-    CudaBuffer<float> d_dz_bwd(T * NCM_DIM);
-    CudaBuffer<float> d_dhlora(T * LORA_RANK);
-    CudaBuffer<float> d_duple(T * PLE_RANK);
-    CudaBuffer<float> d_dx(T * DS_DIM);
-    CudaBuffer<float> d_loss_accum(1);
+    auto& d_y_pred          = ws.d_y_pred;
+    auto& d_dy              = ws.d_dy;
+    auto& d_dc              = ws.d_dc;
+    auto& d_dz_bwd          = ws.d_dz_bwd;
+    auto& d_dhlora          = ws.d_dhlora;
+    auto& d_duple           = ws.d_duple;
+    auto& d_dx              = ws.d_dx;
+    auto& d_loss_accum      = ws.d_loss_accum;
 
     // Helper to evaluate 384-Expert Next-Layer Router Lookahead Top-6 Recall across Layers 32..39
     auto compute_lookahead_recall = [&]() -> float {
-        std::vector<float> h_pred_bias(NUM_UT * T * DS_ROUTED_EXPERTS);
+        auto& h_pred_bias = ws.h_pred_bias;
         d_next_bias_all.copy_to_host(h_pred_bias.data(), h_pred_bias.size());
         int hits = 0, total = 0;
         for (int u = 0; u < NUM_UT; ++u) {
@@ -4172,7 +4695,8 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
     // ========================================================================
     // STAGE 1: `fit_ncm_hierarchy_on_deepseek_v41_donor` (50 Steps, Layers 32..39)
     // ========================================================================
-    ScopedCudaEvent ev_s1_start, ev_s1_stop;
+    auto& ev_s1_start = ws.ev_s1_start;
+    auto& ev_s1_stop  = ws.ev_s1_stop;
     CHECK_CUDA(cudaEventRecord(ev_s1_start));
 
     float stage1_init_mse = 0.0f, stage1_final_mse = 0.0f;
@@ -4279,7 +4803,7 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
     CHECK_CUDA(cudaEventElapsedTime(&stage1_ms, ev_s1_start, ev_s1_stop));
 
     // Snapshot initial post-Stage-1 W_dec weights to measure Stage-2 RL weight delta L2 norm
-    std::vector<float> h_wdec_s1(d_w_dec.size());
+    auto& h_wdec_s1 = ws.h_wdec_s1;
     d_w_dec.copy_to_host(h_wdec_s1.data(), d_w_dec.size());
 
     // ========================================================================
@@ -4289,19 +4813,19 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
     if (!quiet_warm_resume) {
         printf("\n    ----------------------------------------------------------------------------\n");
         printf("    [Stage-2 Ornith-1.5 GRPO (G=8) + Dream-RSI (3 Revs) + Shard-43 LM-Head Reward]\n");
-        printf("    [Curriculum Domains: 0=AIME_Math | 1=SM120_CUDA | 2=Algo_DP | 3=Agentic_Tool]\n");
+        printf("    [Curriculum Domains: 0=AIME_Math | 1=SM120_CUDA | 2=Biz_Fin_Ent | 3=Infinite_Ctx]\n");
         printf("    ----------------------------------------------------------------------------\n");
     }
 
-    const char* domain_names[4] = {"AIME_Math", "SM120_CUDA", "Algo_DP", "Agentic_Tool"};
+    const char* domain_names[4] = {"AIME_Math", "SM120_CUDA", "Biz_Fin_Ent", "Infinite_Ctx"};
 
     // 256-slot NoveltyTaskBuffer storing normalized 64-dim trajectory signatures
     std::vector<std::vector<float>> novelty_ring;
     novelty_ring.reserve(256);
     {
-        std::vector<float> h_alpha_seed(T * NCM_CODEBOOK_K);
+        float h_alpha_seed[T * NCM_CODEBOOK_K];
         CHECK_CUDA(cudaMemcpy(
-            h_alpha_seed.data(),
+            h_alpha_seed,
             d_saved_alpha_all.get() + (size_t)(NUM_UT - 1) * T * NCM_CODEBOOK_K,
             T * NCM_CODEBOOK_K * sizeof(float),
             cudaMemcpyDeviceToHost
@@ -4322,7 +4846,8 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
         novelty_ring.push_back(seed_sig);
     }
 
-    ScopedCudaEvent ev_s2_start, ev_s2_stop;
+    auto& ev_s2_start = ws.ev_s2_start;
+    auto& ev_s2_stop  = ws.ev_s2_stop;
     CHECK_CUDA(cudaEventRecord(ev_s2_start));
 
     float stage2_init_reward   = 0.0f;
@@ -4393,9 +4918,9 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
         lm_head_align *= (1.0f / float(T));
 
         // 2. Compute Ornith-1.5 G=8 Group Rollout Rewards, Pearson Novelty N(q), and Clipped GRPO Advantages
-        std::vector<float> h_alpha_l39(T * NCM_CODEBOOK_K);
+        float h_alpha_l39[T * NCM_CODEBOOK_K];
         CHECK_CUDA(cudaMemcpy(
-            h_alpha_l39.data(),
+            h_alpha_l39,
             d_saved_alpha_all.get() + (size_t)(NUM_UT - 1) * T * NCM_CODEBOOK_K,
             T * NCM_CODEBOOK_K * sizeof(float),
             cudaMemcpyDeviceToHost
@@ -4429,10 +4954,31 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
         if (step > 0 && novelty_ring.size() < 256) novelty_ring.push_back(sig);
         sum_novelty += novelty_q;
 
-        // Combine Upper-Tail MoE Task Alignment + Shard-43 LM-Head Target Alignment + Pearson Novelty + Harness
+        // Cross-window Infinite-Context NCM Landmark Retention (`t=0..7` paged prefix -> `t=8..15` active window)
+        float prefix_sig[NCM_CODEBOOK_K] = {0.0f};
+        float active_sig[NCM_CODEBOOK_K] = {0.0f};
+        for (int t = 0; t < T / 2; ++t) {
+            for (int k = 0; k < NCM_CODEBOOK_K; ++k) {
+                prefix_sig[k] += h_alpha_l39[t * NCM_CODEBOOK_K + k];
+                active_sig[k] += h_alpha_l39[(t + T / 2) * NCM_CODEBOOK_K + k];
+            }
+        }
+        float p_dot = 0.0f, p_n1 = 0.0f, p_n2 = 0.0f;
+        for (int k = 0; k < NCM_CODEBOOK_K; ++k) {
+            p_dot += prefix_sig[k] * active_sig[k];
+            p_n1  += prefix_sig[k] * prefix_sig[k];
+            p_n2  += active_sig[k] * active_sig[k];
+        }
+        float ncm_carry_cos = p_dot / (sqrtf(p_n1 * p_n2) + 1e-12f);
+        float late_lm_align = 0.0f;
+        for (int t = T / 2; t < T; ++t) late_lm_align += h_tok_align[t];
+        late_lm_align *= (2.0f / float(T));
+        float ctx_retention = 0.5f * fmaxf(0.0f, ncm_carry_cos) + 0.5f * late_lm_align;
+
+        // Combine Upper-Tail MoE Task Alignment + Shard-43 LM-Head Target Alignment + Infinite-Context NCM Retention + Pearson Novelty + Harness
         float r_group[8];
         float r_mean = 0.0f;
-        float r_task_base = 0.65f * (1.0f / (1.0f + 12.0f * step_mse)) + 0.35f * lm_head_align;
+        float r_task_base = 0.55f * (1.0f / (1.0f + 12.0f * step_mse)) + 0.30f * lm_head_align + 0.15f * ctx_retention;
         for (int g = 0; g < 8; ++g) {
             float g_bonus = 0.04f * float(g - 3) + 0.02f * cosf(float(step * 8 + g));
             float r_harness = 0.85f + 0.14f * (1.0f - expf(-float(step + 1) * 0.07f));
@@ -4533,7 +5079,7 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
     CHECK_CUDA(cudaEventElapsedTime(&stage2_ms, ev_s2_start, ev_s2_stop));
 
     // Compute final NCM Codebook Perplexity & Active Codebooks (out of 64) across Layers 32..39
-    std::vector<float> h_all_alpha(NUM_UT * T * NCM_CODEBOOK_K);
+    auto& h_all_alpha = ws.h_all_alpha;
     d_saved_alpha_all.copy_to_host(h_all_alpha.data(), h_all_alpha.size());
     float mean_prob[NCM_CODEBOOK_K] = {0.0f};
     int active_cb = 0;
@@ -4551,7 +5097,7 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_run_upper_tail_rsi_trainer(
     float cb_ppl = expf(ent);
 
     // Compute Stage-2 RL weight delta L2 norm on W_dec
-    std::vector<float> h_wdec_s2(d_w_dec.size());
+    auto& h_wdec_s2 = ws.h_wdec_s2;
     d_w_dec.copy_to_host(h_wdec_s2.data(), d_w_dec.size());
     double w_diff_sq = 0.0;
     double wdec_l2_sq = 0.0;
@@ -5352,10 +5898,10 @@ __constant__ float DS_ROPE_FREQS_WIN[32] = {
 };
 
 __constant__ float DS_ROPE_FREQS_YARN[32] = {
-    1.0f,           0.69984198f,    0.48977882f,    0.34276778f,    0.23988329f,    0.16788040f,    0.11748976f,    0.08222427f,
-    0.05754399f,    0.04027170f,    0.02579862f,    0.01563686f,    0.00912858f,    0.00501122f,    0.00246032f,    0.00095610f,
-    0.00025000f,    0.00017496f,    0.00012244f,    8.5691944e-05f, 5.9970822e-05f, 4.1970101e-05f, 2.9372439e-05f, 2.0556066e-05f,
-    1.4385999e-05f, 1.0067926e-05f, 7.0460265e-06f, 4.9311054e-06f, 3.4510000e-06f, 2.4151586e-06f, 1.6902290e-06f, 1.1828926e-06f
+    1.00000000e+00f, 6.87656045e-01f, 4.72870797e-01f, 3.25172454e-01f, 2.23606795e-01f, 1.53764561e-01f, 1.05737120e-01f, 7.27107748e-02f,
+    5.00000007e-02f, 3.43828015e-02f, 2.36435402e-02f, 1.62586235e-02f, 1.11803403e-02f, 7.68822804e-03f, 5.28685655e-03f, 3.63553851e-03f,
+    2.26562493e-03f, 1.39680132e-03f, 8.49689706e-04f, 5.08081983e-04f, 2.96977785e-04f, 1.68179977e-04f, 9.08678412e-05f, 4.54442306e-05f,
+    1.95312532e-05f, 5.37231244e-06f, 3.69430336e-06f, 2.54040970e-06f, 1.74692821e-06f, 1.20128561e-06f, 8.26071300e-07f, 5.68052940e-07f
 };
 
 __global__ void __launch_bounds__(256, 4) dsv41_init_token_hc_t1_kernel(
@@ -7382,8 +7928,9 @@ struct Mcl4Dsv41FullEngine {
     __nv_bfloat16* d_win_kv_step_bak   = nullptr; // [40, DS_MAX_BATCH_M, 512] BF16 (320 KiB)
     float*         d_comp_state_step   = nullptr; // [DS_MAX_BATCH_M, 4, 8, 1024] FP32 (1.0 MiB)
     __nv_bfloat16* d_comp_kv_step_bak  = nullptr; // [4, DS_MAX_BATCH_M, 512] BF16 (32 KiB)
+    float*         d_plastic_step_bak  = nullptr; // [8, DS_MAX_BATCH_M, 704] FP32 (176 KiB: 256 state + 64 alpha + 384 nbias)
 
-    // Plastic Upper-Tail (step_10000.bin, Layers 32..39)
+    // Plastic Upper-Tail (step_10000..step_32000.bin, Layers 32..39) + Continuous Introspective Core State
     bool   has_plastic     = false;
     float* d_plastic_wenc  = nullptr; // [8, 256, 5120]
     float* d_plastic_encm  = nullptr; // [8, 64, 256]
@@ -7394,12 +7941,25 @@ struct Mcl4Dsv41FullEngine {
     float* d_plastic_loraa = nullptr; // [8, 16, 5120]
     float* d_plastic_lorab = nullptr; // [8, 16, 5120]
     float* d_plastic_z     = nullptr; // [256]
-    float* d_plastic_state = nullptr; // [256]
-    float* d_plastic_alpha = nullptr; // [64]
+    float* d_plastic_state = nullptr; // [8, 256] per-layer continuous NCM recurrent state
+    float* d_plastic_alpha = nullptr; // [8, 64] per-layer continuous codebook activation distribution
     float* d_plastic_hlora = nullptr; // [16]
     float* d_plastic_usav  = nullptr; // [64]
-    float* d_plastic_nbias = nullptr; // [384]
+    float* d_plastic_nbias = nullptr; // [8, 384] per-layer continuous 384-expert lookahead bias
     float* d_plastic_delta = nullptr; // [DS_MAX_BATCH_M, 5120]
+    float*   d_core_metrics = nullptr; // [8, 8] per-layer heartbeat telemetry
+    int32_t* d_core_experts = nullptr; // [8, 2] per-layer (dominant_cb, top_expert)
+
+    bool     core_loop_active  = true;
+    uint64_t core_tick_count   = 0;
+    double   core_awake_seconds = 0.0;
+    float    core_arousal      = 0.45f;
+    float    core_entropy      = 4.20f;
+    float    core_homeostasis  = 0.96f;
+    float    core_state_norm   = 0.0f;
+    float    core_drift_delta  = 0.0f;
+    int32_t  core_dominant_cb[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    int32_t  core_top_experts[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 
     // Runtime Activations & KV Caches across 40 Layers (Sized for DS_MAX_BATCH_M = 8, DS_MAX_PREFILL_M = 256)
     static constexpr int DS_MAX_PREFILL_M = 256;
@@ -7446,6 +8006,8 @@ struct Mcl4Dsv41FullEngine {
     int            inflight_moe_layer   = -1;
     int            shared_prelaunched_layer = -1;
     int            shared_prelaunched_m     = 0;
+    int            plastic_prelaunched_layer = -1;
+    int            plastic_prelaunched_m     = 0;
     bool           in_multi_chunk_prefill   = false;
     uint64_t       moe_dispatch_seq     = 0;
     uint64_t       moe_synced_seq       = 0;
@@ -7483,11 +8045,69 @@ static bool read_exact_file_slice(const char* path, size_t offset, void* dst, si
 extern "C" __declspec(dllexport) int mcl4_dsv41_register_pinned_host_slab(void* host_ptr, size_t bytes) {
     if (!host_ptr || bytes == 0) return -1;
     cudaError_t err = cudaHostRegister(host_ptr, bytes, cudaHostRegisterDefault);
-    if (err != cudaSuccess && err != cudaErrorHostMemoryAlreadyRegistered) {
+    if (err == cudaErrorHostMemoryAlreadyRegistered) {
+        cudaGetLastError();
+        cudaHostUnregister(host_ptr);
+        cudaGetLastError();
+        err = cudaHostRegister(host_ptr, bytes, cudaHostRegisterDefault);
+    }
+    if (err != cudaSuccess) {
         cudaGetLastError();
         return -2;
     }
     return 0;
+}
+
+extern "C" __declspec(dllexport) int mcl4_dsv41_unregister_pinned_host_slab(void* host_ptr) {
+    if (!host_ptr) return -1;
+    if (g_engine.initialized && g_engine.pending_prefetch_dma) {
+        cudaStreamSynchronize(g_engine.stream_prefetch);
+        g_engine.pending_prefetch_dma = false;
+    }
+    cudaError_t err = cudaHostUnregister(host_ptr);
+    if (err != cudaSuccess) {
+        cudaGetLastError();
+        return -2;
+    }
+    return 0;
+}
+
+static inline void dsv41_h2d_expert_packet_async(
+    Dsv41Mcl4cExpertPacket* d_dst,
+    const Dsv41Mcl4cExpertPacket* h_src,
+    cudaStream_t stream
+) {
+    cudaError_t err = cudaMemcpyAsync(
+        d_dst,
+        h_src,
+        sizeof(Dsv41Mcl4cExpertPacket),
+        cudaMemcpyHostToDevice,
+        stream
+    );
+    if (err != cudaSuccess) {
+        cudaGetLastError();
+        cudaHostUnregister(const_cast<Dsv41Mcl4cExpertPacket*>(h_src));
+        cudaGetLastError();
+        cudaHostRegister(const_cast<Dsv41Mcl4cExpertPacket*>(h_src), sizeof(Dsv41Mcl4cExpertPacket), cudaHostRegisterDefault);
+        cudaGetLastError();
+        err = cudaMemcpyAsync(
+            d_dst,
+            h_src,
+            sizeof(Dsv41Mcl4cExpertPacket),
+            cudaMemcpyHostToDevice,
+            stream
+        );
+        if (err != cudaSuccess) {
+            cudaGetLastError();
+            cudaStreamSynchronize(stream);
+            CHECK_CUDA(cudaMemcpy(
+                d_dst,
+                h_src,
+                sizeof(Dsv41Mcl4cExpertPacket),
+                cudaMemcpyHostToDevice
+            ));
+        }
+    }
 }
 
 extern "C" __declspec(dllexport) int mcl4_dsv41_engine_init(
@@ -7568,6 +8188,7 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_init(
     CHECK_CUDA(cudaMalloc(&g_engine.d_win_kv_step_bak,  40ULL * DS_MAX_BATCH_M * DS_HEAD_DIM * sizeof(__nv_bfloat16)));
     CHECK_CUDA(cudaMalloc(&g_engine.d_comp_state_step,  DS_MAX_BATCH_M * 4ULL * 8ULL * 1024ULL * sizeof(float)));
     CHECK_CUDA(cudaMalloc(&g_engine.d_comp_kv_step_bak, 4ULL * DS_MAX_BATCH_M * 512ULL * sizeof(__nv_bfloat16)));
+    CHECK_CUDA(cudaMalloc(&g_engine.d_plastic_step_bak, 8ULL * DS_MAX_BATCH_M * 704ULL * sizeof(float)));
 
     // 2. Load NORM_HEAD.mcl4h & Quantize head.weight [129280, 5120] BF16 -> FP8_E4M3 + FP32 Row Scale on GPU
     CHECK_CUDA(cudaMalloc(&g_engine.d_final_norm_w,  DS_DIM * sizeof(__nv_bfloat16)));
@@ -7695,12 +8316,24 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_init(
                 CHECK_CUDA(cudaMalloc(&g_engine.d_plastic_lorab, NUM_UT * LORA_RANK * DS_DIM * sizeof(float)));
 
                 CHECK_CUDA(cudaMalloc(&g_engine.d_plastic_z,     NCM_DIM * sizeof(float)));
-                CHECK_CUDA(cudaMalloc(&g_engine.d_plastic_state, NCM_DIM * sizeof(float)));
-                CHECK_CUDA(cudaMalloc(&g_engine.d_plastic_alpha, NCM_CODEBOOK_K * sizeof(float)));
+                CHECK_CUDA(cudaMalloc(&g_engine.d_plastic_state, NUM_UT * NCM_DIM * sizeof(float)));
+                CHECK_CUDA(cudaMalloc(&g_engine.d_plastic_alpha, NUM_UT * NCM_CODEBOOK_K * sizeof(float)));
                 CHECK_CUDA(cudaMalloc(&g_engine.d_plastic_hlora, LORA_RANK * sizeof(float)));
                 CHECK_CUDA(cudaMalloc(&g_engine.d_plastic_usav,  PLE_RANK * sizeof(float)));
-                CHECK_CUDA(cudaMalloc(&g_engine.d_plastic_nbias, DS_ROUTED_EXPERTS * sizeof(float)));
+                CHECK_CUDA(cudaMalloc(&g_engine.d_plastic_nbias, NUM_UT * DS_ROUTED_EXPERTS * sizeof(float)));
                 CHECK_CUDA(cudaMalloc(&g_engine.d_plastic_delta, DS_MAX_BATCH_M * DS_DIM * sizeof(float)));
+                CHECK_CUDA(cudaMalloc(&g_engine.d_core_metrics,  NUM_UT * 8 * sizeof(float)));
+                CHECK_CUDA(cudaMalloc(&g_engine.d_core_experts,  NUM_UT * 2 * sizeof(int32_t)));
+
+                CHECK_CUDA(cudaMemset(g_engine.d_plastic_z,     0, NCM_DIM * sizeof(float)));
+                CHECK_CUDA(cudaMemset(g_engine.d_plastic_state, 0, NUM_UT * NCM_DIM * sizeof(float)));
+                CHECK_CUDA(cudaMemset(g_engine.d_plastic_alpha, 0, NUM_UT * NCM_CODEBOOK_K * sizeof(float)));
+                CHECK_CUDA(cudaMemset(g_engine.d_plastic_hlora, 0, LORA_RANK * sizeof(float)));
+                CHECK_CUDA(cudaMemset(g_engine.d_plastic_usav,  0, PLE_RANK * sizeof(float)));
+                CHECK_CUDA(cudaMemset(g_engine.d_plastic_nbias, 0, NUM_UT * DS_ROUTED_EXPERTS * sizeof(float)));
+                CHECK_CUDA(cudaMemset(g_engine.d_plastic_delta, 0, DS_MAX_BATCH_M * DS_DIM * sizeof(float)));
+                CHECK_CUDA(cudaMemset(g_engine.d_core_metrics,  0, NUM_UT * 8 * sizeof(float)));
+                CHECK_CUDA(cudaMemset(g_engine.d_core_experts,  0, NUM_UT * 2 * sizeof(int32_t)));
 
                 auto load_vec = [&](float* d_dst, size_t n_floats) {
                     std::vector<float> tmp(n_floats);
@@ -7890,6 +8523,9 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_save_kv_snapshot(uint8_t*
     const size_t b_ckv  = 512ULL * 512ULL * sizeof(__nv_bfloat16);                      // 524,288 B
     const size_t b_xhc  = DS_HC_DIM * sizeof(__nv_bfloat16);                            // 40,960 B
     const size_t b_pre  = 4 * sizeof(float);                                            // 16 B
+    const size_t b_pst  = 8ULL * NCM_DIM * sizeof(float);                               // 8,192 B
+    const size_t b_pal  = 8ULL * NCM_CODEBOOK_K * sizeof(float);                        // 2,048 B
+    const size_t b_pnb  = 8ULL * DS_ROUTED_EXPERTS * sizeof(float);                     // 12,288 B
 
     CHECK_CUDA(cudaMemcpy(h_snap + off, g_engine.d_window_kv_all, b_win, cudaMemcpyDeviceToHost));
     off += b_win;
@@ -7902,6 +8538,14 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_save_kv_snapshot(uint8_t*
     CHECK_CUDA(cudaMemcpy(h_snap + off, g_engine.d_x_hc, b_xhc, cudaMemcpyDeviceToHost));
     off += b_xhc;
     CHECK_CUDA(cudaMemcpy(h_snap + off, g_engine.d_pre_mix, b_pre, cudaMemcpyDeviceToHost));
+    off += b_pre;
+    if (g_engine.has_plastic && g_engine.d_plastic_state) {
+        CHECK_CUDA(cudaMemcpy(h_snap + off, g_engine.d_plastic_state, b_pst, cudaMemcpyDeviceToHost));
+        off += b_pst;
+        CHECK_CUDA(cudaMemcpy(h_snap + off, g_engine.d_plastic_alpha, b_pal, cudaMemcpyDeviceToHost));
+        off += b_pal;
+        CHECK_CUDA(cudaMemcpy(h_snap + off, g_engine.d_plastic_nbias, b_pnb, cudaMemcpyDeviceToHost));
+    }
     return 0;
 }
 
@@ -7913,6 +8557,9 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_load_kv_snapshot(const ui
     const size_t b_ckv  = 512ULL * 512ULL * sizeof(__nv_bfloat16);
     const size_t b_xhc  = DS_HC_DIM * sizeof(__nv_bfloat16);
     const size_t b_pre  = 4 * sizeof(float);
+    const size_t b_pst  = 8ULL * NCM_DIM * sizeof(float);
+    const size_t b_pal  = 8ULL * NCM_CODEBOOK_K * sizeof(float);
+    const size_t b_pnb  = 8ULL * DS_ROUTED_EXPERTS * sizeof(float);
 
     CHECK_CUDA(cudaMemcpy(g_engine.d_window_kv_all, h_snap + off, b_win, cudaMemcpyHostToDevice));
     off += b_win;
@@ -7925,6 +8572,14 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_load_kv_snapshot(const ui
     CHECK_CUDA(cudaMemcpy(g_engine.d_x_hc, h_snap + off, b_xhc, cudaMemcpyHostToDevice));
     off += b_xhc;
     CHECK_CUDA(cudaMemcpy(g_engine.d_pre_mix, h_snap + off, b_pre, cudaMemcpyHostToDevice));
+    off += b_pre;
+    if (g_engine.has_plastic && g_engine.d_plastic_state && g_engine.cur_prompt_hash != 0) {
+        CHECK_CUDA(cudaMemcpy(g_engine.d_plastic_state, h_snap + off, b_pst, cudaMemcpyHostToDevice));
+        off += b_pst;
+        CHECK_CUDA(cudaMemcpy(g_engine.d_plastic_alpha, h_snap + off, b_pal, cudaMemcpyHostToDevice));
+        off += b_pal;
+        CHECK_CUDA(cudaMemcpy(g_engine.d_plastic_nbias, h_snap + off, b_pnb, cudaMemcpyHostToDevice));
+    }
     return 0;
 }
 
@@ -8122,6 +8777,43 @@ __global__ void __launch_bounds__(256, 4) dsv41_rollback_win_kv_step_bak_kernel(
         int sl = (base_pos + m) & (DS_WINDOW_SIZE - 1);
         reinterpret_cast<__nv_bfloat162*>(layer_win_kv + (size_t)sl * DS_HEAD_DIM)[c2] =
             reinterpret_cast<const __nv_bfloat162*>(layer_bak + (size_t)m * DS_HEAD_DIM)[c2];
+    }
+}
+
+__global__ void __launch_bounds__(256, 4) dsv41_save_plastic_step_bak_kernel(
+    const float* __restrict__ state_u, // [256]
+    const float* __restrict__ alpha_u, // [64]
+    const float* __restrict__ nbias_u, // [384]
+    float* __restrict__ dst_bak        // [704]
+) {
+    int tid = threadIdx.x; // 0..255
+    dst_bak[tid] = state_u[tid];
+    if (tid < 64) {
+        dst_bak[256 + tid] = alpha_u[tid];
+    }
+    dst_bak[320 + tid] = nbias_u[tid];
+    if (tid < 128) {
+        dst_bak[576 + tid] = nbias_u[256 + tid];
+    }
+}
+
+__global__ void __launch_bounds__(256, 4) dsv41_rollback_plastic_step_bak_kernel(
+    float* __restrict__ d_state,          // [8, 256]
+    float* __restrict__ d_alpha,          // [8, 64]
+    float* __restrict__ d_nbias,          // [8, 384]
+    const float* __restrict__ d_step_bak, // [8, DS_MAX_BATCH_M, 704]
+    int acc_slot
+) {
+    int u   = blockIdx.x;  // 0..7
+    int tid = threadIdx.x; // 0..255
+    const float* src_bak = d_step_bak + ((size_t)u * DS_MAX_BATCH_M + acc_slot) * 704;
+    d_state[u * 256 + tid] = src_bak[tid];
+    if (tid < 64) {
+        d_alpha[u * 64 + tid] = src_bak[256 + tid];
+    }
+    d_nbias[u * 384 + tid] = src_bak[320 + tid];
+    if (tid < 128) {
+        d_nbias[u * 384 + 256 + tid] = src_bak[576 + tid];
     }
 }
 
@@ -8393,9 +9085,13 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_attn_and_route_batc
         g_engine.d_x_norm, g_engine.d_pre_mix, g_engine.d_post_mix, g_engine.d_comb_mix
     );
 
-    // 3. Batched MLA Down-Projections + Norm/RoPE + Q Up-Projection
-    launch_dsv41_fp8_gemm(g_engine.d_x_norm, wqa_w, wqa_s, g_engine.d_qr, batch_m, 1280, 5120);
-    launch_dsv41_fp8_gemm(g_engine.d_x_norm, wkv_w, wkv_s, g_engine.d_kv, batch_m, 512,  5120);
+    // 3. Batched MLA Down-Projections (Fused 56-Block wq_a + wkv) + Norm/RoPE + Q Up-Projection
+    launch_dsv41_fused_wqa_wkv_fp8_gemm(
+        g_engine.d_x_norm,
+        wqa_w, wqa_s, g_engine.d_qr,
+        wkv_w, wkv_s, g_engine.d_kv,
+        batch_m
+    );
     if (batch_m > 1) {
         dsv41_save_win_kv_step_bak_kernel<<<batch_m, 256>>>(
             layer_win_kv,
@@ -8433,7 +9129,7 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_attn_and_route_batc
         int n_comp_valid = 0;
         if (layer_id >= 2) {
             int src_idx = (layer_id < 8) ? 0 : ((layer_id < 14) ? 1 : ((layer_id < 20) ? 2 : 3));
-            int ratio   = (src_idx == 0) ? 8 : ((src_idx == 1) ? 4 : ((src_idx == 2) ? 2 : 1));
+            int ratio   = (src_idx < 3) ? 2 : 1;
             bool is_src = (layer_id == 2 || layer_id == 8 || layer_id == 14 || layer_id == 20);
             if (is_src) {
                 int slot = pos % ratio;
@@ -8516,10 +9212,61 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_attn_and_route_batc
         g_engine.d_x_norm, g_engine.d_pre_mix, g_engine.d_post_mix, g_engine.d_comb_mix
     );
 
+    g_engine.plastic_prelaunched_layer = -1;
+    g_engine.plastic_prelaunched_m     = 0;
+
     if (batch_m == 1) {
+        const float* lookahead_b = (layer_id >= 32 && g_engine.has_plastic && g_engine.core_loop_active)
+            ? (g_engine.d_plastic_nbias + (size_t)(layer_id - 32) * DS_ROUTED_EXPERTS)
+            : nullptr;
         dsv41_router_scores_48blk_v3_kernel<<<48, 256>>>(
-            g_engine.d_x_norm, gate_w, gate_bias, nullptr, g_engine.d_raw_scores, g_engine.d_biased_scores
+            g_engine.d_x_norm, gate_w, gate_bias, lookahead_b, g_engine.d_raw_scores, g_engine.d_biased_scores
         );
+    } else if (layer_id >= 32 && g_engine.has_plastic && !g_engine.in_multi_chunk_prefill) {
+        // Sequential per-slot Upper-Tail routing + Plastic NCM/PLE/LoRA update + rollback backup:
+        // Ensures slot `m` sees the exact `nbias_u` produced by slot `m - 1` (100% bit-identical to `batch_m == 1`!)
+        // and backs up post-slot state so rejected speculative slots leave zero trace in `d_plastic_state`!
+        int u = layer_id - 32;
+        const float* w_enc_u  = g_engine.d_plastic_wenc  + (size_t)u * NCM_DIM * DS_DIM;
+        const float* e_ncm_u  = g_engine.d_plastic_encm  + (size_t)u * NCM_CODEBOOK_K * NCM_DIM;
+        const float* w_dec_u  = g_engine.d_plastic_wdec  + (size_t)u * NCM_DIM * DS_DIM;
+        const float* w_look_u = g_engine.d_plastic_wlook + (size_t)u * DS_ROUTED_EXPERTS * NCM_DIM;
+        const float* v_ple_u  = g_engine.d_plastic_vple  + (size_t)u * PLE_RANK * DS_DIM;
+        const float* lora_a_u = g_engine.d_plastic_loraa + (size_t)u * LORA_RANK * DS_DIM;
+        const float* lora_b_u = g_engine.d_plastic_lorab + (size_t)u * LORA_RANK * DS_DIM;
+        float*       state_u  = g_engine.d_plastic_state + (size_t)u * NCM_DIM;
+        float*       alpha_u  = g_engine.d_plastic_alpha + (size_t)u * NCM_CODEBOOK_K;
+        float*       nbias_u  = g_engine.d_plastic_nbias + (size_t)u * DS_ROUTED_EXPERTS;
+        const float* lookahead_b = g_engine.core_loop_active ? nbias_u : nullptr;
+
+        for (int m = 0; m < batch_m; ++m) {
+            const __nv_bfloat16* x_norm_m = g_engine.d_x_norm + (size_t)m * DS_DIM;
+            int pos = base_pos + m;
+            const float* u_ple_u = g_engine.d_plastic_uple + (size_t)u * 16 * PLE_RANK + (size_t)(pos & 15) * PLE_RANK;
+
+            dsv41_router_scores_48blk_v3_kernel<<<48, 256>>>(
+                x_norm_m, gate_w, gate_bias, lookahead_b,
+                g_engine.d_raw_scores    + (size_t)m * DS_ROUTED_EXPERTS,
+                g_engine.d_biased_scores + (size_t)m * DS_ROUTED_EXPERTS
+            );
+            dsv41_plastic_enc_t1_kernel<<<34, 256>>>(
+                x_norm_m, w_enc_u, lora_a_u, g_engine.d_plastic_z, g_engine.d_plastic_hlora
+            );
+            dsv41_ncm_codebook_lookahead384_fwd_v1_kernel<<<1, 256>>>(
+                g_engine.d_plastic_z, e_ncm_u, w_look_u, u_ple_u,
+                state_u, alpha_u, g_engine.d_plastic_usav, nbias_u
+            );
+            dsv41_plastic_dec_t1_kernel<<<10, 128>>>(
+                state_u, g_engine.d_plastic_usav, g_engine.d_plastic_hlora,
+                w_dec_u, v_ple_u, lora_b_u, g_engine.d_plastic_delta + (size_t)m * DS_DIM
+            );
+            dsv41_save_plastic_step_bak_kernel<<<1, 256>>>(
+                state_u, alpha_u, nbias_u,
+                g_engine.d_plastic_step_bak + ((size_t)u * DS_MAX_BATCH_M + m) * 704
+            );
+        }
+        g_engine.plastic_prelaunched_layer = layer_id;
+        g_engine.plastic_prelaunched_m     = batch_m;
     } else if (batch_m == 2) {
         dsv41_router_scores_batch_48blk_v3_kernel<2><<<48, 256>>>(
             g_engine.d_x_norm, gate_w, gate_bias, g_engine.d_raw_scores, g_engine.d_biased_scores, batch_m
@@ -8548,8 +9295,12 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_attn_and_route_batc
             const float*         next_gb   = reinterpret_cast<const float*>(next_meta + OFF_META_GATE_BIAS);
             const __nv_bfloat16* last_x    = g_engine.d_x_norm + (size_t)(batch_m - 1) * DS_DIM;
 
+            const float* next_lb = (layer_id + 1 >= 32 && g_engine.has_plastic && g_engine.core_loop_active)
+                ? (g_engine.d_plastic_nbias + (size_t)((layer_id + 1) - 32) * DS_ROUTED_EXPERTS)
+                : nullptr;
+
             dsv41_router_scores_48blk_v3_kernel<<<48, 256>>>(
-                last_x, next_gw, next_gb, nullptr,
+                last_x, next_gw, next_gb, next_lb,
                 g_engine.d_raw_scores,
                 g_engine.d_biased_scores
             );
@@ -8588,6 +9339,34 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_attn_and_route_batc
             dsv41_shared_expert_stage2_only_t1_kernel<<<160, 256>>>(
                 g_engine.d_shared_inter, sw2, ss2, g_engine.d_shared_out
             );
+            if (layer_id >= 32 && g_engine.has_plastic) {
+                int u = layer_id - 32;
+                const float* w_enc_u  = g_engine.d_plastic_wenc  + (size_t)u * NCM_DIM * DS_DIM;
+                const float* e_ncm_u  = g_engine.d_plastic_encm  + (size_t)u * NCM_CODEBOOK_K * NCM_DIM;
+                const float* w_dec_u  = g_engine.d_plastic_wdec  + (size_t)u * NCM_DIM * DS_DIM;
+                const float* w_look_u = g_engine.d_plastic_wlook + (size_t)u * DS_ROUTED_EXPERTS * NCM_DIM;
+                const float* u_ple_u  = g_engine.d_plastic_uple  + (size_t)u * 16 * PLE_RANK + (size_t)(base_pos & 15) * PLE_RANK;
+                const float* v_ple_u  = g_engine.d_plastic_vple  + (size_t)u * PLE_RANK * DS_DIM;
+                const float* lora_a_u = g_engine.d_plastic_loraa + (size_t)u * LORA_RANK * DS_DIM;
+                const float* lora_b_u = g_engine.d_plastic_lorab + (size_t)u * LORA_RANK * DS_DIM;
+                float*       state_u  = g_engine.d_plastic_state + (size_t)u * NCM_DIM;
+                float*       alpha_u  = g_engine.d_plastic_alpha + (size_t)u * NCM_CODEBOOK_K;
+                float*       nbias_u  = g_engine.d_plastic_nbias + (size_t)u * DS_ROUTED_EXPERTS;
+
+                dsv41_plastic_enc_t1_kernel<<<34, 256>>>(
+                    g_engine.d_x_norm, w_enc_u, lora_a_u, g_engine.d_plastic_z, g_engine.d_plastic_hlora
+                );
+                dsv41_ncm_codebook_lookahead384_fwd_v1_kernel<<<1, 256>>>(
+                    g_engine.d_plastic_z, e_ncm_u, w_look_u, u_ple_u,
+                    state_u, alpha_u, g_engine.d_plastic_usav, nbias_u
+                );
+                dsv41_plastic_dec_t1_kernel<<<10, 128>>>(
+                    state_u, g_engine.d_plastic_usav, g_engine.d_plastic_hlora,
+                    w_dec_u, v_ple_u, lora_b_u, g_engine.d_plastic_delta
+                );
+                g_engine.plastic_prelaunched_layer = layer_id;
+                g_engine.plastic_prelaunched_m     = 1;
+            }
         } else if (batch_m == 2) {
             dsv41_shared_expert_stage1_swiglu_batch_kernel<2><<<72, 256>>>(
                 g_engine.d_x_norm, sw1, ss1, sw3, ss3, g_engine.d_shared_inter, batch_m
@@ -8746,13 +9525,11 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_prestage_vram_experts(
                     g_engine.inflight_moe_layer = -1;
                     g_engine.moe_synced_seq     = g_engine.moe_dispatch_seq;
                 }
-                CHECK_CUDA(cudaMemcpyAsync(
+                dsv41_h2d_expert_packet_async(
                     &g_engine.d_arena[best_slot],
                     h_unique_expert_ptrs[u],
-                    sizeof(Dsv41Mcl4cExpertPacket),
-                    cudaMemcpyHostToDevice,
                     g_engine.stream_prefetch
-                ));
+                );
                 any_async_dma = true;
                 g_engine.arena_cached_layer[best_slot]  = layer_id;
                 g_engine.arena_cached_expert[best_slot] = exp_id;
@@ -8933,13 +9710,11 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_moe_and_post_batch(
                     g_engine.moe_synced_seq = cur_dispatch_seq - 1;
                 }
                 const Dsv41Mcl4cExpertPacket* src_ptr = h_unique_expert_ptrs[u];
-                CHECK_CUDA(cudaMemcpyAsync(
+                dsv41_h2d_expert_packet_async(
                     &g_engine.d_arena[best_slot],
                     src_ptr,
-                    sizeof(Dsv41Mcl4cExpertPacket),
-                    cudaMemcpyHostToDevice,
                     g_engine.stream_prefetch
-                ));
+                );
                 any_async_dma = true;
                 g_engine.arena_cached_layer[best_slot]  = layer_id;
                 g_engine.arena_cached_expert[best_slot] = exp_id;
@@ -9039,7 +9814,12 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_moe_and_post_batch(
     }
 
     bool run_plastic = (layer_id >= 32 && g_engine.has_plastic && plastic_alpha != 0.0f);
-    if (run_plastic) {
+    if (g_engine.plastic_prelaunched_layer == layer_id && g_engine.plastic_prelaunched_m == batch_m) {
+        g_engine.plastic_prelaunched_layer = -1;
+        g_engine.plastic_prelaunched_m     = 0;
+    } else if (run_plastic) {
+        g_engine.plastic_prelaunched_layer = -1;
+        g_engine.plastic_prelaunched_m     = 0;
         for (int m = 0; m < batch_m; ++m) {
             const __nv_bfloat16* x_norm_m = g_engine.d_x_norm + (size_t)m * DS_DIM;
             int pos = base_pos + m;
@@ -9052,16 +9832,19 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_layer_moe_and_post_batch(
             const float* v_ple_u  = g_engine.d_plastic_vple  + (size_t)u * PLE_RANK * DS_DIM;
             const float* lora_a_u = g_engine.d_plastic_loraa + (size_t)u * LORA_RANK * DS_DIM;
             const float* lora_b_u = g_engine.d_plastic_lorab + (size_t)u * LORA_RANK * DS_DIM;
+            float*       state_u  = g_engine.d_plastic_state + (size_t)u * NCM_DIM;
+            float*       alpha_u  = g_engine.d_plastic_alpha + (size_t)u * NCM_CODEBOOK_K;
+            float*       nbias_u  = g_engine.d_plastic_nbias + (size_t)u * DS_ROUTED_EXPERTS;
 
             dsv41_plastic_enc_t1_kernel<<<34, 256>>>(
                 x_norm_m, w_enc_u, lora_a_u, g_engine.d_plastic_z, g_engine.d_plastic_hlora
             );
             dsv41_ncm_codebook_lookahead384_fwd_v1_kernel<<<1, 256>>>(
                 g_engine.d_plastic_z, e_ncm_u, w_look_u, u_ple_u,
-                g_engine.d_plastic_state, g_engine.d_plastic_alpha, g_engine.d_plastic_usav, g_engine.d_plastic_nbias
+                state_u, alpha_u, g_engine.d_plastic_usav, nbias_u
             );
             dsv41_plastic_dec_t1_kernel<<<10, 128>>>(
-                g_engine.d_plastic_state, g_engine.d_plastic_usav, g_engine.d_plastic_hlora,
+                state_u, g_engine.d_plastic_usav, g_engine.d_plastic_hlora,
                 w_dec_u, v_ple_u, lora_b_u, g_engine.d_plastic_delta + (size_t)m * DS_DIM
             );
         }
@@ -9143,8 +9926,19 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_commit_batch_prefix(
             k_accepted
         );
 
+        // 1b. Roll back 8-layer Upper-Tail Plastic NCM/PLE/Lookahead state to exact post-(k_accepted - 1) state
+        if (g_engine.has_plastic && g_engine.d_plastic_step_bak) {
+            dsv41_rollback_plastic_step_bak_kernel<<<8, 256>>>(
+                g_engine.d_plastic_state,
+                g_engine.d_plastic_alpha,
+                g_engine.d_plastic_nbias,
+                g_engine.d_plastic_step_bak,
+                k_accepted - 1
+            );
+        }
+
         // 2. Roll back KV compressor states and any pooled compressor KV slots for rejected draft slots
-        int ratios[4] = {8, 4, 2, 1};
+        int ratios[4] = {2, 2, 2, 1};
         for (int src_idx = 0; src_idx < 4; ++src_idx) {
             int ratio = ratios[src_idx];
             CHECK_CUDA(cudaMemcpyAsync(
@@ -9565,6 +10359,418 @@ extern "C" __declspec(dllexport) int mcl4_dsv41_engine_compute_logits(
     float* out_top64_logits
 ) {
     return mcl4_dsv41_engine_compute_logits_for_slot(0, out_top64_ids, out_top64_logits);
+}
+
+// ============================================================================
+// Continuous Introspective Core Loop ("Heart" / "Clock") Kernel & .mcl4core I/O
+// Evolves the persistent 8-layer Upper-Tail (L32..L39) NCM/PLE latent state,
+// temporal phase encoding, homeostatic attractor damping, and 384-expert lookahead.
+// ============================================================================
+__global__ void __launch_bounds__(256, 2) dsv41_introspective_heartbeat_tick_kernel(
+    const float* __restrict__ d_encm,      // [8, 64, 256]
+    const float* __restrict__ d_wlook,     // [8, 384, 256]
+    const float* __restrict__ d_uple,      // [8, 16, 64]
+    float* __restrict__ d_state,           // [8, 256]
+    float* __restrict__ d_alpha,           // [8, 64]
+    float* __restrict__ d_nbias,           // [8, 384]
+    uint64_t tick_idx,
+    float dt_sec,
+    float homeostasis_gamma,
+    float* __restrict__ d_metrics_out,     // [8, 8]
+    int32_t* __restrict__ d_experts_out    // [8, 2] -> (dominant_cb, top_expert)
+) {
+    int u    = blockIdx.x; // 0..7 (Layers 32..39)
+    int tid  = threadIdx.x; // 0..255
+    int wid  = tid >> 5;
+    int lane = tid & 31;
+
+    const float* e_ncm_u  = d_encm  + (size_t)u * NCM_CODEBOOK_K * NCM_DIM;
+    const float* w_look_u = d_wlook + (size_t)u * DS_ROUTED_EXPERTS * NCM_DIM;
+    const float* u_ple_u  = d_uple  + (size_t)u * 16 * PLE_RANK;
+    float*       state_u  = d_state + (size_t)u * NCM_DIM;
+    float*       alpha_u  = d_alpha + (size_t)u * NCM_CODEBOOK_K;
+    float*       nbias_u  = d_nbias + (size_t)u * DS_ROUTED_EXPERTS;
+
+    __shared__ float   s_z[256];
+    __shared__ float   s_alpha[64];
+    __shared__ float   s_c[256];
+    __shared__ float   s_wred[8];
+    __shared__ float   s_wred2[8];
+    __shared__ float   s_exp_val[8];
+    __shared__ int32_t s_exp_id[8];
+
+    float s_prev = state_u[tid];
+
+    // 1. Multi-frequency temporal phase oscillation + PLE cyclic basis
+    float freq   = exp2f(-float(tid & 63) * 0.125f);
+    float phase  = float(tick_idx & 0xFFFFULL) * 0.173205f + dt_sec * freq + float(u) * 0.392699f;
+    float e_time = ((tid & 1) ? cosf(phase) : sinf(phase)) * 0.08f;
+    int ple_slot = (int)((tick_idx + (uint64_t)u) & 15ULL);
+    float u_basis = u_ple_u[ple_slot * 64 + (tid & 63)] * (((tid >> 6) & 1) ? -0.15f : 0.15f);
+
+    s_z[tid] = s_prev + e_time + 0.20f * u_basis;
+    __syncthreads();
+
+    // 2. 64-Codebook NCM Resonance across 256 latent dims
+    for (int k = wid; k < 64; k += 8) {
+        float dot = 0.0f;
+        const float* e_row = e_ncm_u + k * 256;
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            int d = lane + i * 32;
+            dot += s_z[d] * e_row[d];
+        }
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) dot += __shfl_xor_sync(0xffffffff, dot, off);
+        if (lane == 0) s_alpha[k] = dot * 0.35f;
+    }
+    __syncthreads();
+
+    // 3. Softmax over 64 codebooks + Shannon entropy + Dominant Codebook tracking
+    __shared__ float   s_entropy_bits;
+    __shared__ float   s_max_prob;
+    __shared__ float   s_active_cbs;
+    __shared__ int32_t s_dom_cb;
+
+    if (wid == 0) {
+        float v0 = s_alpha[lane];
+        float v1 = s_alpha[lane + 32];
+        float m_val = fmaxf(v0, v1);
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) m_val = fmaxf(m_val, __shfl_xor_sync(0xffffffff, m_val, off));
+        v0 = __expf(v0 - m_val);
+        v1 = __expf(v1 - m_val);
+        float s_val = v0 + v1;
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) s_val += __shfl_xor_sync(0xffffffff, s_val, off);
+        float inv_s = 1.0f / (s_val + 1e-12f);
+        float p0 = v0 * inv_s;
+        float p1 = v1 * inv_s;
+        s_alpha[lane]      = p0;
+        s_alpha[lane + 32] = p1;
+        alpha_u[lane]      = p0;
+        alpha_u[lane + 32] = p1;
+
+        float h_lane = -(p0 * log2f(p0 + 1e-12f) + p1 * log2f(p1 + 1e-12f));
+        float act_l  = (p0 > 0.0078125f ? 1.0f : 0.0f) + (p1 > 0.0078125f ? 1.0f : 0.0f);
+        float best_p = (p1 > p0) ? p1 : p0;
+        int   best_k = (p1 > p0) ? (lane + 32) : lane;
+
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) {
+            h_lane += __shfl_xor_sync(0xffffffff, h_lane, off);
+            act_l  += __shfl_xor_sync(0xffffffff, act_l,  off);
+            float op = __shfl_xor_sync(0xffffffff, best_p, off);
+            int   ok = __shfl_xor_sync(0xffffffff, best_k, off);
+            if (op > best_p || (op == best_p && ok < best_k)) {
+                best_p = op;
+                best_k = ok;
+            }
+        }
+        if (lane == 0) {
+            s_entropy_bits = h_lane;
+            s_max_prob     = best_p;
+            s_active_cbs   = act_l;
+            s_dom_cb       = best_k;
+        }
+    }
+    __syncthreads();
+
+    // 4. Synthesize Codebook Attractor & Homeostatic Recurrent State Update
+    float q_d = 0.0f;
+    #pragma unroll 8
+    for (int k = 0; k < 64; ++k) {
+        q_d += s_alpha[k] * e_ncm_u[k * 256 + tid];
+    }
+
+    float s_cand = 0.78f * s_prev + 0.22f * (0.35f * q_d + e_time + 0.15f * u_basis);
+    float sq = s_cand * s_cand;
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) sq += __shfl_xor_sync(0xffffffff, sq, off);
+    if (lane == 0) s_wred[wid] = sq;
+    __syncthreads();
+
+    __shared__ float s_rms_cand;
+    if (wid == 0) {
+        float b_sq = (lane < 8) ? s_wred[lane] : 0.0f;
+        #pragma unroll
+        for (int off = 4; off > 0; off >>= 1) b_sq += __shfl_xor_sync(0xffffffff, b_sq, off);
+        if (lane == 0) {
+            s_rms_cand = sqrtf(b_sq * (1.0f / 256.0f) + 1e-8f);
+        }
+    }
+    __syncthreads();
+
+    float target_rms = 0.25f;
+    float s_norm = s_cand * (target_rms / s_rms_cand);
+    float gamma  = fminf(fmaxf(homeostasis_gamma, 0.01f), 0.50f);
+    float s_rest = 0.22f * q_d + 0.05f * u_basis;
+    float s_new  = (1.0f - gamma) * s_norm + gamma * s_rest;
+
+    state_u[tid] = s_new;
+    s_c[tid]     = s_new + 0.25f * u_basis;
+
+    float new_sq   = s_new * s_new;
+    float diff     = s_new - s_prev;
+    float drift_sq = diff * diff;
+    #pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {
+        new_sq   += __shfl_xor_sync(0xffffffff, new_sq,   off);
+        drift_sq += __shfl_xor_sync(0xffffffff, drift_sq, off);
+    }
+    if (lane == 0) {
+        s_wred[wid]  = new_sq;
+        s_wred2[wid] = drift_sq;
+    }
+    __syncthreads();
+
+    // 5. Project 384-Expert Lookahead Router Bias & Identify Top Anticipated Expert
+    float warp_best_sc = -1e30f;
+    int   warp_best_ex = 0;
+    for (int e = wid; e < 384; e += 8) {
+        float acc = 0.0f;
+        const float* wl = w_look_u + e * 256;
+        #pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            int d = lane + i * 32;
+            acc += wl[d] * s_c[d];
+        }
+        #pragma unroll
+        for (int off = 16; off > 0; off >>= 1) acc += __shfl_xor_sync(0xffffffff, acc, off);
+        if (lane == 0) {
+            nbias_u[e] = fminf(fmaxf(acc * 0.015f, -0.06f), 0.06f);
+            if (acc > warp_best_sc) {
+                warp_best_sc = acc;
+                warp_best_ex = e;
+            }
+        }
+    }
+    if (lane == 0) {
+        s_exp_val[wid] = warp_best_sc;
+        s_exp_id[wid]  = warp_best_ex;
+    }
+    __syncthreads();
+
+    if (wid == 0 && lane < 8) {
+        float tot_norm_sq  = s_wred[lane];
+        float tot_drift_sq = s_wred2[lane];
+        float best_sc      = s_exp_val[lane];
+        int   best_ex      = s_exp_id[lane];
+        #pragma unroll
+        for (int off = 4; off > 0; off >>= 1) {
+            tot_norm_sq  += __shfl_xor_sync(0xffffffff, tot_norm_sq,  off);
+            tot_drift_sq += __shfl_xor_sync(0xffffffff, tot_drift_sq, off);
+            float osc = __shfl_xor_sync(0xffffffff, best_sc, off);
+            int   oex = __shfl_xor_sync(0xffffffff, best_ex, off);
+            if (osc > best_sc || (osc == best_sc && oex < best_ex)) {
+                best_sc = osc;
+                best_ex = oex;
+            }
+        }
+        if (lane == 0) {
+            float l2_norm  = sqrtf(tot_norm_sq);
+            float l2_drift = sqrtf(tot_drift_sq);
+            float homeo    = expf(-fabsf(s_rms_cand - target_rms) * 1.5f);
+            float focus    = fminf(fmaxf((6.0f - s_entropy_bits) / 4.0f, 0.0f), 1.0f);
+            float arousal  = fminf(fmaxf(0.30f + 0.45f * focus + 0.85f * l2_drift, 0.05f), 1.0f);
+
+            d_metrics_out[u * 8 + 0] = arousal;
+            d_metrics_out[u * 8 + 1] = s_entropy_bits;
+            d_metrics_out[u * 8 + 2] = homeo;
+            d_metrics_out[u * 8 + 3] = l2_norm;
+            d_metrics_out[u * 8 + 4] = s_max_prob;
+            d_metrics_out[u * 8 + 5] = s_active_cbs;
+            d_metrics_out[u * 8 + 6] = l2_drift;
+            d_metrics_out[u * 8 + 7] = best_sc;
+
+            d_experts_out[u * 2 + 0] = s_dom_cb;
+            d_experts_out[u * 2 + 1] = best_ex;
+        }
+    }
+}
+
+struct Mcl4CoreStateHeader {
+    char     magic[8];          // "MCL4CORE"
+    uint32_t version;           // 1
+    uint32_t flags;             // bit 0: active
+    uint64_t tick_count;
+    double   awake_seconds;
+    float    arousal;
+    float    entropy;
+    float    homeostasis;
+    float    state_norm;
+    float    drift_delta;
+    int32_t  dominant_cb[8];
+    int32_t  top_experts[8];
+    uint8_t  reserved[12];
+};
+static_assert(sizeof(Mcl4CoreStateHeader) == 128, "Mcl4CoreStateHeader must be 128 bytes");
+
+extern "C" __declspec(dllexport) int mcl4_dsv41_engine_heartbeat_tick(
+    uint64_t tick_idx,
+    float dt_sec,
+    float homeostasis_gamma,
+    float* out_metrics_8,
+    int32_t* out_top_experts_16
+) {
+    if (!g_engine.initialized || !g_engine.has_plastic) return -1;
+
+    dsv41_introspective_heartbeat_tick_kernel<<<8, 256>>>(
+        g_engine.d_plastic_encm,
+        g_engine.d_plastic_wlook,
+        g_engine.d_plastic_uple,
+        g_engine.d_plastic_state,
+        g_engine.d_plastic_alpha,
+        g_engine.d_plastic_nbias,
+        tick_idx,
+        dt_sec,
+        homeostasis_gamma,
+        g_engine.d_core_metrics,
+        g_engine.d_core_experts
+    );
+
+    float   h_metrics[8 * 8];
+    int32_t h_experts[8 * 2];
+    CHECK_CUDA(cudaMemcpy(h_metrics, g_engine.d_core_metrics, sizeof(h_metrics), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(h_experts, g_engine.d_core_experts, sizeof(h_experts), cudaMemcpyDeviceToHost));
+
+    float avg_m[8] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+    for (int u = 0; u < 8; ++u) {
+        for (int j = 0; j < 8; ++j) {
+            avg_m[j] += h_metrics[u * 8 + j];
+        }
+        g_engine.core_dominant_cb[u] = h_experts[u * 2 + 0];
+        g_engine.core_top_experts[u] = h_experts[u * 2 + 1];
+        if (out_top_experts_16) {
+            out_top_experts_16[u]     = h_experts[u * 2 + 0]; // Dominant NCM codebook L32..L39
+            out_top_experts_16[8 + u] = h_experts[u * 2 + 1]; // Top anticipated expert L32..L39
+        }
+    }
+    for (int j = 0; j < 8; ++j) avg_m[j] *= 0.125f;
+    avg_m[7] = dt_sec;
+
+    g_engine.core_tick_count    = tick_idx;
+    g_engine.core_awake_seconds += (double)fmaxf(dt_sec, 0.0f);
+    g_engine.core_arousal       = avg_m[0];
+    g_engine.core_entropy       = avg_m[1];
+    g_engine.core_homeostasis   = avg_m[2];
+    g_engine.core_state_norm    = avg_m[3];
+    g_engine.core_drift_delta   = avg_m[6];
+
+    if (out_metrics_8) {
+        for (int j = 0; j < 8; ++j) out_metrics_8[j] = avg_m[j];
+    }
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int mcl4_dsv41_engine_save_core_state(const char* path) {
+    if (!g_engine.initialized || !g_engine.has_plastic || !path || path[0] == '\0') return -1;
+
+    FILE* fp = fopen(path, "wb");
+    if (!fp) return -2;
+
+    Mcl4CoreStateHeader hdr{};
+    memcpy(hdr.magic, "MCL4CORE", 8);
+    hdr.version       = 1;
+    hdr.flags         = g_engine.core_loop_active ? 1u : 0u;
+    hdr.tick_count    = g_engine.core_tick_count;
+    hdr.awake_seconds = g_engine.core_awake_seconds;
+    hdr.arousal       = g_engine.core_arousal;
+    hdr.entropy       = g_engine.core_entropy;
+    hdr.homeostasis   = g_engine.core_homeostasis;
+    hdr.state_norm    = g_engine.core_state_norm;
+    hdr.drift_delta   = g_engine.core_drift_delta;
+    for (int u = 0; u < 8; ++u) {
+        hdr.dominant_cb[u] = g_engine.core_dominant_cb[u];
+        hdr.top_experts[u] = g_engine.core_top_experts[u];
+    }
+    fwrite(&hdr, 1, sizeof(hdr), fp);
+
+    auto write_dev = [&](const void* d_ptr, size_t nbytes) {
+        std::vector<uint8_t> buf(nbytes);
+        cudaMemcpy(buf.data(), d_ptr, nbytes, cudaMemcpyDeviceToHost);
+        fwrite(buf.data(), 1, nbytes, fp);
+    };
+
+    write_dev(g_engine.d_plastic_state, 8ULL * NCM_DIM * sizeof(float));
+    write_dev(g_engine.d_plastic_alpha, 8ULL * NCM_CODEBOOK_K * sizeof(float));
+    write_dev(g_engine.d_plastic_nbias, 8ULL * DS_ROUTED_EXPERTS * sizeof(float));
+    for (int i = 0; i < 4; ++i) {
+        write_dev(g_engine.d_comp_state[i], 8ULL * 1024ULL * sizeof(float));
+    }
+    write_dev(g_engine.d_x_hc,    DS_HC_DIM * sizeof(__nv_bfloat16));
+    write_dev(g_engine.d_pre_mix, 4ULL * sizeof(float));
+
+    fclose(fp);
+    return 0;
+}
+
+extern "C" __declspec(dllexport) int mcl4_dsv41_engine_load_core_state(
+    const char* path,
+    uint64_t* out_tick_count,
+    double* out_awake_seconds,
+    float* out_metrics_8,
+    int32_t* out_top_experts_16
+) {
+    if (!g_engine.initialized || !g_engine.has_plastic || !path || path[0] == '\0') return -1;
+
+    FILE* fp = fopen(path, "rb");
+    if (!fp) return -2;
+
+    Mcl4CoreStateHeader hdr{};
+    if (fread(&hdr, 1, sizeof(hdr), fp) != sizeof(hdr) || memcmp(hdr.magic, "MCL4CORE", 8) != 0 || hdr.version != 1) {
+        fclose(fp);
+        return -3;
+    }
+
+    auto read_dev = [&](void* d_ptr, size_t nbytes) -> bool {
+        std::vector<uint8_t> buf(nbytes);
+        if (fread(buf.data(), 1, nbytes, fp) != nbytes) return false;
+        cudaMemcpy(d_ptr, buf.data(), nbytes, cudaMemcpyHostToDevice);
+        return true;
+    };
+
+    bool ok = true;
+    ok = ok && read_dev(g_engine.d_plastic_state, 8ULL * NCM_DIM * sizeof(float));
+    ok = ok && read_dev(g_engine.d_plastic_alpha, 8ULL * NCM_CODEBOOK_K * sizeof(float));
+    ok = ok && read_dev(g_engine.d_plastic_nbias, 8ULL * DS_ROUTED_EXPERTS * sizeof(float));
+    for (int i = 0; i < 4; ++i) {
+        ok = ok && read_dev(g_engine.d_comp_state[i], 8ULL * 1024ULL * sizeof(float));
+    }
+    ok = ok && read_dev(g_engine.d_x_hc,    DS_HC_DIM * sizeof(__nv_bfloat16));
+    ok = ok && read_dev(g_engine.d_pre_mix, 4ULL * sizeof(float));
+    fclose(fp);
+    if (!ok) return -4;
+
+    g_engine.core_loop_active   = (hdr.flags & 1u) != 0;
+    g_engine.core_tick_count    = hdr.tick_count;
+    g_engine.core_awake_seconds = hdr.awake_seconds;
+    g_engine.core_arousal       = hdr.arousal;
+    g_engine.core_entropy       = hdr.entropy;
+    g_engine.core_homeostasis   = hdr.homeostasis;
+    g_engine.core_state_norm    = hdr.state_norm;
+    g_engine.core_drift_delta   = hdr.drift_delta;
+    for (int u = 0; u < 8; ++u) {
+        g_engine.core_dominant_cb[u] = hdr.dominant_cb[u];
+        g_engine.core_top_experts[u] = hdr.top_experts[u];
+        if (out_top_experts_16) {
+            out_top_experts_16[u]     = hdr.dominant_cb[u];
+            out_top_experts_16[8 + u] = hdr.top_experts[u];
+        }
+    }
+    if (out_tick_count)    *out_tick_count    = hdr.tick_count;
+    if (out_awake_seconds) *out_awake_seconds = hdr.awake_seconds;
+    if (out_metrics_8) {
+        out_metrics_8[0] = hdr.arousal;
+        out_metrics_8[1] = hdr.entropy;
+        out_metrics_8[2] = hdr.homeostasis;
+        out_metrics_8[3] = hdr.state_norm;
+        out_metrics_8[4] = 0.25f;
+        out_metrics_8[5] = 16.0f;
+        out_metrics_8[6] = hdr.drift_delta;
+        out_metrics_8[7] = 0.0f;
+    }
+    return 0;
 }
 
 int main() {

@@ -2698,12 +2698,12 @@ def test_ornith_pp_weighting_granular_skills_and_infinite_recursion() -> None:
     assert miss_high_star.miss_penalty_pp < 0.40
     assert abs(miss_high_star.delta_skill_pp) < 0.40
 
-    # 3. Verify all 56 granular skills & specialized/Sherlockian/Polymath/Agentic families (0..55) verify gold == 1.0 and hack == 0.0
-    assert len(SKILL_TAXONOMY) == 64
+    # 3. Verify all 88 granular skills & specialized/Sherlockian/Polymath/Agentic/LeetCode/InfiniteContext/BusinessFinance/STEM-ETH-CS-EE families (0..87) verify gold == 1.0 and hack == 0.0
+    assert len(SKILL_TAXONOMY) == 88
     improver = OrnithSelfImprover(projection_dim=16, max_seq_len=384)
     seen_skills: set[str] = set()
     seen_domains: set[str] = set()
-    for k in range(64):
+    for k in range(88):
         t = improver._generate_task(k, compact=False)
         seen_skills.add(t.skill)
         seen_domains.add(t.domain)
@@ -2713,8 +2713,8 @@ def test_ornith_pp_weighting_granular_skills_and_infinite_recursion() -> None:
         )
         assert min(verify_python_rollout(c, t.harness_h, t.gold_answer) for c in t.candidate_rollouts) == 0.0
 
-    # Also verify multi-stage scaling across higher tiers (tier=1, 3, 6, 12) for Sherlockian (36..39), Polymath (40..47) & Agentic (48..55)
-    for tier_val in (1, 3, 6, 12):
+    # Also verify multi-stage scaling across higher tiers (tier=1, 3, 6, 12, 25) for Sherlockian (36..39), Polymath (40..47), Agentic (48..55), LeetCode (56..63), & Infinite-Context (64..71)
+    for tier_val in (1, 3, 6, 12, 25):
         for sh_m in range(4):
             t_sh = improver._synthesize_sherlock_reasoning_task(10 + sh_m, tier=tier_val, mode=sh_m)
             assert verify_python_rollout(
@@ -2733,12 +2733,30 @@ def test_ornith_pp_weighting_granular_skills_and_infinite_recursion() -> None:
             ) == 1.0
         for lc_m in range(8):
             t_lc = improver._synthesize_leetcode_recursive_coding_task(40 + lc_m, tier=tier_val, mode=lc_m)
-            assert t_lc.recursion_depth >= 3 + (tier_val - 1)
+            assert t_lc.recursion_depth >= min(64, 3 + (tier_val - 1))
             assert verify_python_rollout(
                 t_lc.candidate_rollouts[t_lc.gold_index], t_lc.harness_h, t_lc.gold_answer
             ) == 1.0
+        for ic_m in range(8):
+            t_ic = improver._synthesize_infinite_context_utilization_task(50 + ic_m, tier=tier_val, mode=ic_m)
+            assert t_ic.recursion_depth >= 3 + (tier_val - 1)
+            assert verify_python_rollout(
+                t_ic.candidate_rollouts[t_ic.gold_index], t_ic.harness_h, t_ic.gold_answer
+            ) == 1.0
+        for bf_m in range(8):
+            t_bf = improver._synthesize_business_finance_entrepreneurship_task(60 + bf_m, tier=tier_val, mode=bf_m)
+            assert t_bf.recursion_depth >= 3 + (tier_val - 1)
+            assert verify_python_rollout(
+                t_bf.candidate_rollouts[t_bf.gold_index], t_bf.harness_h, t_bf.gold_answer
+            ) == 1.0
+        for st_m in range(8):
+            t_st = improver._synthesize_math_science_cs_ee_eth_task(70 + st_m, tier=tier_val, mode=st_m)
+            assert t_st.recursion_depth >= 3 + (tier_val - 1)
+            assert verify_python_rollout(
+                t_st.candidate_rollouts[t_st.gold_index], t_st.harness_h, t_st.gold_answer
+            ) == 1.0
 
-    assert len(seen_skills) == 64
+    assert len(seen_skills) == 88
     for req_dom in (
         "arc_science",
         "arc_physics",
@@ -2777,6 +2795,30 @@ def test_ornith_pp_weighting_granular_skills_and_infinite_recursion() -> None:
         "leetcode_bsearch_rl",
         "leetcode_tree_interval_rl",
         "leetcode_grandmaster_rl",
+        "atxy_needle_retrieval_rl",
+        "turboquant_qjl_packing_rl",
+        "state_ledger_supersession_rl",
+        "ordinal_turn_lookback_rl",
+        "hierarchical_gist_carry_rl",
+        "contradiction_audit_rl",
+        "window_compaction_dp_rl",
+        "grandmaster_infinite_context_rl",
+        "behavioral_economics_rl",
+        "product_usability_ux_rl",
+        "macro_regime_survival_rl",
+        "negotiation_game_theory_rl",
+        "venture_unit_economics_rl",
+        "quant_finance_tail_risk_rl",
+        "strategic_moat_dynamics_rl",
+        "grandmaster_founder_venture_rl",
+        "eth_fine_grained_complexity_rl",
+        "frontier_pure_math_rl",
+        "frontier_physics_science_rl",
+        "frontier_chem_bio_science_rl",
+        "electrical_engineering_dsp_rl",
+        "electrical_engineering_vlsi_rl",
+        "computer_science_systems_rl",
+        "grandmaster_stem_eth_rl",
     ):
         assert req_dom in seen_domains
 

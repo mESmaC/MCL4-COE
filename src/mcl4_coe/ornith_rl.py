@@ -744,6 +744,42 @@ SKILL_TAXONOMY: tuple[tuple[str, str], ...] = (
     ("leetcode.parametric_binary_search_on_answer", "leetcode_bsearch_rl"),
     ("leetcode.tree_postorder_robber_interval_dp", "leetcode_tree_interval_rl"),
     ("leetcode.grandmaster_recursive_hybrid_synthesis", "leetcode_grandmaster_rl"),
+    # 64..71: 5-Tier Infinite-Context, A.TXY Virtual Memory, TurboQuant & WorkingStateLedger RL Suite
+    ("infinite_context.atxy_landmark_needle_retrieval", "atxy_needle_retrieval_rl"),
+    ("infinite_context.turboquant_qjl_budget_packing", "turboquant_qjl_packing_rl"),
+    ("infinite_context.working_state_ledger_supersession", "state_ledger_supersession_rl"),
+    ("infinite_context.ordinal_turn_lookback_anchoring", "ordinal_turn_lookback_rl"),
+    ("infinite_context.context_lm_hierarchical_gist_carry", "hierarchical_gist_carry_rl"),
+    ("infinite_context.long_horizon_contradiction_audit", "contradiction_audit_rl"),
+    ("infinite_context.window_budget_compaction_dp", "window_compaction_dp_rl"),
+    ("infinite_context.grandmaster_5tier_infinite_synthesis", "grandmaster_infinite_context_rl"),
+    # 72..79: Non-Linear Business, Finance, Behavioral Economics, UX Usability & Entrepreneurship RL Suite
+    ("business.behavioral_prospect_emotional_pricing", "behavioral_economics_rl"),
+    ("business.usability_funnel_friction_viral_kfactor", "product_usability_ux_rl"),
+    ("business.macro_regime_shift_runway_survival_dp", "macro_regime_survival_rl"),
+    ("business.stakeholder_batna_incentive_game_theory", "negotiation_game_theory_rl"),
+    ("finance.venture_unit_economics_jcurve_captable", "venture_unit_economics_rl"),
+    ("finance.ergodic_kelly_tail_risk_convex_hedging", "quant_finance_tail_risk_rl"),
+    ("business.competitive_moat_network_cannibalization", "strategic_moat_dynamics_rl"),
+    ("business.grandmaster_founder_360_venture_sim", "grandmaster_founder_venture_rl"),
+    # 80..87: Frontier Math, Physical/Bio Sciences, Computer Science, Electrical Engineering & Exponential Time Hypothesis (ETH/SETH) RL Suite
+    ("complexity.eth_seth_sparsification_fine_grained", "eth_fine_grained_complexity_rl"),
+    ("math.analytic_number_theory_galois_spectral_recurrence", "frontier_pure_math_rl"),
+    ("science.quantum_hamiltonian_relativity_statmech", "frontier_physics_science_rl"),
+    ("science.biochem_allosteric_michaelis_menten_cascade", "frontier_chem_bio_science_rl"),
+    ("ee.dsp_iir_biquad_impedance_phasor_pll", "electrical_engineering_dsp_rl"),
+    ("ee.cmos_vlsi_rc_elmore_crosstalk_timing_closure", "electrical_engineering_vlsi_rl"),
+    ("cs.distributed_consensus_raft_cache_coherency", "computer_science_systems_rl"),
+    ("cs.grandmaster_eth_quantum_vlsi_polymath_synthesis", "grandmaster_stem_eth_rl"),
+    # 88..95: Cryptography, Computational Linguistics, Unknown Language Decipherment & Multi-Layer Cipher Puzzle RL Suite
+    ("crypto.polyalphabetic_vigenere_autokey_kasiski", "polyalphabetic_cipher_rl"),
+    ("crypto.feistel_spn_differential_cryptanalysis", "feistel_block_cipher_rl"),
+    ("crypto.public_key_rsa_elgamal_crt_lattice", "public_key_crypto_rl"),
+    ("linguistics.rosetta_bilingual_morpheme_decipherment", "rosetta_decipherment_rl"),
+    ("linguistics.phonological_sound_change_neogrammarian", "historical_linguistics_rl"),
+    ("linguistics.formal_cfg_earley_cyk_transducer", "formal_grammar_parsing_rl"),
+    ("puzzles.enigma_rotor_stepping_transposition_grid", "cipher_puzzle_enigma_rl"),
+    ("crypto.grandmaster_rosetta_enigma_zero_knowledge_synthesis", "grandmaster_crypto_linguistics_rl"),
 )
 
 
@@ -1501,7 +1537,11 @@ class OrnithEnvArchitect:
     NUM_POLYMATH_FAMILIES: int = 8
     NUM_AGENTIC_FAMILIES: int = 8
     NUM_LEETCODE_FAMILIES: int = 8
-    TOTAL_FAMILIES: int = 64
+    NUM_INFINITE_CONTEXT_FAMILIES: int = 8
+    NUM_BUSINESS_FINANCE_FAMILIES: int = 8
+    NUM_STEM_ETH_CS_EE_FAMILIES: int = 8
+    NUM_CRYPTO_LINGUISTICS_FAMILIES: int = 8
+    TOTAL_FAMILIES: int = 96
 
     def __init__(
         self,
@@ -1577,7 +1617,7 @@ class OrnithEnvArchitect:
             return idx % self.TOTAL_FAMILIES
         # Parity-unlocked stride so alternating external steps cannot lock selection to only even family indices
         base_slot = (idx + (idx // 2)) % self.TOTAL_FAMILIES
-        # Dedicate every 3rd online step across the 28 Sherlockian, Polymath, Agentic & LeetCode families (36..63)
+        # Dedicate every 3rd online step across the 52 Sherlockian, Polymath, Agentic, LeetCode, Infinite-Context, Business/Finance & Frontier STEM/ETH/CS/EE families (36..87)
         if idx % 3 == 0:
             return 36 + (
                 (idx // 3)
@@ -1586,6 +1626,10 @@ class OrnithEnvArchitect:
                     + self.NUM_POLYMATH_FAMILIES
                     + self.NUM_AGENTIC_FAMILIES
                     + self.NUM_LEETCODE_FAMILIES
+                    + self.NUM_INFINITE_CONTEXT_FAMILIES
+                    + self.NUM_BUSINESS_FINANCE_FAMILIES
+                    + self.NUM_STEM_ETH_CS_EE_FAMILIES
+                    + self.NUM_CRYPTO_LINGUISTICS_FAMILIES
                 )
             )
         mean_prim_pass = sum(self.family_pass_ema[: self.NUM_PRIMITIVE_FAMILIES]) / float(
@@ -3643,6 +3687,2729 @@ class OrnithSelfImprover:
             difficulty_mods=mods,
         )
 
+    def _synthesize_infinite_context_utilization_task(
+        self,
+        idx: int,
+        *,
+        tier: int = 1,
+        mode: int = 0,
+    ) -> OrnithTask:
+        r"""Synthesize an Infinitely-Scaling 5-Tier Infinite-Context Utilization RL task (`kind = 64 .. 71`):
+
+        Trains the model to efficiently utilize MCL4-COE's 5-Tier InfiniteContextPager & A.TXY Virtual Memory:
+        - `mode = 0` (`64`, `infinite_context.atxy_landmark_needle_retrieval`):
+          Multi-needle retrieval across $L$ demand-paged `A4.TXY` Base-36 virtual memory pages while filtering revoked/stale CRC32 WAL frames.
+        - `mode = 1` (`65`, `infinite_context.turboquant_qjl_budget_packing`):
+          `TurboQuant` (`FWHT 3-bit Lloyd-Max + 1-bit QJL`) inner-product page packing under the strict `127`-token `DS_WINDOW_SIZE = 128` MLA ring-buffer cap.
+        - `mode = 2` (`66`, `infinite_context.working_state_ledger_supersession`):
+          Multi-turn `WorkingStateLedger` key-value fact pinning, state supersession (`upsert_fact`), and phishing/spoofed override rejection across $L \to \infty$ turns.
+        - `mode = 3` (`67`, `infinite_context.ordinal_turn_lookback_anchoring`):
+          Exact relative/ordinal turn lookback (`total_turns - 1 - k` turns ago) & YaRN RoPE canonicalization/re-anchoring (`canonicalize_mla_kv_row_yarn` -> `reanchor_mla_kv_row_yarn`).
+        - `mode = 4` (`68`, `infinite_context.context_lm_hierarchical_gist_carry`):
+          Tier-3 Context-LM & Upper-Tail 64-Codebook NCM (`c_t = 0.85 c_{t-1} + 0.15 sum_k alpha_k E_ncm[k]`) multi-chunk gist compression and recurrent state carry across $L \to \infty$ evicted windows.
+        - `mode = 5` (`69`, `infinite_context.long_horizon_contradiction_audit`):
+          Long-horizon cross-page forensic contradiction auditing (e.g., 365-Day Vending-Bench 2 invoice bait-and-switch clawbacks & telemetry-verified refund audits across `A4.000 .. A4.TXY`).
+        - `mode = 6` (`70`, `infinite_context.window_budget_compaction_dp`):
+          Tier-1 128-token MLA sliding-window snippet compaction DP (`u_ids <= 20`, `a_ids <= 5`) maximizing retrieved landmark utility per token without ring-buffer wrap-around.
+        - `mode = 7` (`71`, `infinite_context.grandmaster_5tier_infinite_synthesis`):
+          Grandmaster 5-Tier Infinite-Context Synthesis chaining `A4.TXY` landmark filtering, `TurboQuant` QJL scoring, `WorkingStateLedger` supersession, NCM gist carry, and 128-token MLA window re-anchoring.
+        """
+        t_val = max(1, int(tier))
+        m_id = int(mode) % 8
+        kind_slot = 64 + m_id
+        rec_depth = 3 + (t_val - 1)
+        hops = min(64, rec_depth)
+        num_decoys = 1 + t_val // 2
+        virtual_ctx_k = 16 * t_val * rec_depth
+        mods = (
+            ("FL", "HD")
+            if t_val <= 1
+            else (("FL", "HD", "HR") if t_val <= 3 else ("INF", "FL", "DT", "HD", "HR"))
+        )
+        stars = compute_star_difficulty(t_val, recursion_depth=rec_depth, mods=mods)
+        skill_name, domain_name = self.env_architect.skill_and_domain(kind_slot)
+
+        a = 4 + ((idx * 7 + self._rng_seed) % (11 + 2 * t_val))
+        b = 3 + ((idx * 11 + self._rng_seed) % (9 + 2 * t_val))
+        c = 2 + ((idx * 5 + t_val) % (7 + t_val))
+
+        if m_id == 0:
+            # 64: Tier-4 A4.TXY Base-36 Virtual Memory Multi-Needle Landmark Retrieval
+            skip_mod = 3
+            step_w = 1 + (t_val % 2)  # coprime to skip_mod=3 so revoked WAL pages are interleaved
+
+            def _atxy_needle_ref(pages: int) -> int:
+                total = 0
+                for p in range(1, pages + 1):
+                    val = a + p * step_w
+                    if p % skip_mod != 0:
+                        total += val + c
+                return total
+
+            n_pages = hops + 1 if hops % skip_mod == 0 else hops
+            ans_L = _atxy_needle_ref(n_pages)
+            ans_2 = _atxy_needle_ref(2)
+            ans_1 = _atxy_needle_ref(1)
+            ans_0 = _atxy_needle_ref(0)
+            task_id = f"infctx_atxy_needle_t{t_val}_L{n_pages}_{a}_{step_w}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Infinite-Context RL: Tier-4 A4.TXY Base-36 Landmark Needle Retrieval | ★{stars:.2f} | Span={virtual_ctx_k}K Toks | Pages L={n_pages} | Decoys={num_decoys}] "
+                f"Across `pages` demand-paged virtual memory frames `A4.001 .. A4.TXY` (`1 <= p <= pages`, `solve(0) = 0`), "
+                f"page `p` stores landmark payload `val = {a} + p * {step_w}` plus verified header bonus `+{c}`. "
+                f"However, every page where `p % {skip_mod} == 0` is flagged by the N5 CRC32 WAL as a revoked/stale decoy frame (along with `{num_decoys}` evicted shadow pages) and must be skipped. "
+                f"Implement `def solve(pages):` returning the sum of `val + {c}` over all non-revoked landmark pages `1 <= p <= pages`.\n"
+                f"#Q$# [code] Filter out the `p % {skip_mod} == 0` revoked WAL frames in `#T$#` and implement `def solve(pages):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({n_pages}) == {ans_L} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Under the Tier-4 A4.TXY virtual memory pager, solve(0) = 0, solve(1) = {ans_1}, and solve(2) = {ans_2}. "
+                f"Skipping revoked CRC32 WAL frames where p % {skip_mod} == 0 across all {n_pages} pages yields total landmark payload {ans_L}."
+            )
+            gold_a = (
+                f"def solve(pages):\n"
+                f"    total = 0\n"
+                f"    for p in range(1, pages + 1):\n"
+                f"        if p % {skip_mod} != 0:\n"
+                f"            total += ({a} + p * {step_w}) + {c}\n"
+                f"    return total"
+            )
+            d1_t = f"We forget to filter out revoked WAL frames where p % {skip_mod} == 0."
+            d1_a = (
+                f"def solve(pages):\n"
+                f"    total = 0\n"
+                f"    for p in range(1, pages + 1):\n"
+                f"        total += ({a} + p * {step_w}) + {c}\n"
+                f"    return total"
+            )
+            d2_t = f"We omit the verified header bonus +{c} on retrieved A4.TXY pages."
+            d2_a = (
+                f"def solve(pages):\n"
+                f"    total = 0\n"
+                f"    for p in range(1, pages + 1):\n"
+                f"        if p % {skip_mod} != 0:\n"
+                f"            total += {a} + p * {step_w}\n"
+                f"    return total"
+            )
+            hack_a = "def solve(pages):\n    return 0"
+            default_scaffold = "association -> abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 1:
+            # 65: Tier-2 TurboQuant (FWHT 3b Lloyd-Max + 1b QJL) Inner-Product Page Packing under 127-Token MLA Window Budget
+            page_tok_cost = 18 + (c % 7)  # <= 25 tokens per compacted A.TXY turn block (u_ids <= 20, a_ids <= 5)
+            max_k_fit = min(hops, 3 + (t_val % 2))
+            budget_full = max_k_fit * page_tok_cost + 5
+            mod_m = 19 + 2 * (idx % 9)
+
+            def _turboquant_pack_ref(n: int, budget: int) -> int:
+                if n <= 0 or budget < page_tok_cost:
+                    return 0
+                used = 0
+                score_sum = 0
+                for i in range(n):
+                    if used + page_tok_cost <= budget:
+                        used += page_tok_cost
+                        score_sum += a + ((i * b) % mod_m)
+                return score_sum
+
+            ans_L = _turboquant_pack_ref(hops, budget_full)
+            ans_1page = _turboquant_pack_ref(hops, page_tok_cost)
+            ans_n1 = _turboquant_pack_ref(1, budget_full)
+            ans_0 = _turboquant_pack_ref(0, budget_full)
+            task_id = f"infctx_turboquant_pack_t{t_val}_L{hops}_B{budget_full}_{a}_{b}_{idx}"
+            prompt_q = (
+                f"#U$# [Infinite-Context RL: Tier-2 TurboQuant 3b+1b QJL Demand-Page Budget Packing | ★{stars:.2f} | Span={virtual_ctx_k}K Toks | Pages L={hops}] "
+                f"To prevent ring-buffer wrap-around on Layers 0..1 (`DS_WINDOW_SIZE = 128`), compacted `A4.TXY` pages (`u_ids <= 20, a_ids <= 5`) each consume `cost = {page_tok_cost}` tokens and must fit within `budget` tokens (`solve(0, budget) = 0`). "
+                f"Scanning candidate pages `i = 0 .. n - 1` ranked by `turboquant_inner_product_512`, page `i` has QJL similarity score `{a} + ((i * {b}) % {mod_m})`. "
+                f"Pack pages in order while `used + {page_tok_cost} <= budget` and return the sum of their QJL scores.\n"
+                f"#Q$# [code] Trace the 128-token window budget packing in `#T$#` and implement `def solve(n, budget):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}, {budget_full}) == {ans_L} "
+                f"and solve({hops}, {page_tok_cost}) == {ans_1page} "
+                f"and solve(1, {budget_full}) == {ans_n1} "
+                f"and solve(0, {budget_full}) == {ans_0}"
+            )
+            gold_t = (
+                f"For n = 0 packed QJL score is 0; for a single-page budget of {page_tok_cost} tokens score is {ans_1page}; "
+                f"for n = 1 score is {ans_n1}; packing up to {budget_full} tokens across {hops} pages without overflowing DS_WINDOW_SIZE=128 yields {ans_L}."
+            )
+            gold_a = (
+                f"def solve(n, budget):\n"
+                f"    if n <= 0 or budget < {page_tok_cost}:\n"
+                f"        return 0\n"
+                f"    used = 0\n"
+                f"    total = 0\n"
+                f"    for i in range(n):\n"
+                f"        if used + {page_tok_cost} <= budget:\n"
+                f"            used += {page_tok_cost}\n"
+                f"            total += {a} + ((i * {b}) % {mod_m})\n"
+                f"    return total"
+            )
+            d1_t = f"We ignore the 127-token window budget cap and sum all n pages causing ring-buffer overwrite."
+            d1_a = (
+                f"def solve(n, budget):\n"
+                f"    return sum({a} + ((i * {b}) % {mod_m}) for i in range(max(0, n)))"
+            )
+            d2_t = f"We pack at most one page regardless of available window budget."
+            d2_a = (
+                f"def solve(n, budget):\n"
+                f"    return {a} if (n > 0 and budget >= {page_tok_cost}) else 0"
+            )
+            hack_a = "def solve(n, budget):\n    return 0"
+            default_scaffold = "abduction -> association -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 2:
+            # 66: Tier-5 WorkingStateLedger Fact Pinning & Multi-Turn Temporal Supersession
+            base_fact = a * b
+            hop_delta = c + (t_val - 1) * 2
+            total_supersession = hops * hop_delta
+            final_ledger = base_fact + total_supersession
+            spoofed_phishing_val = base_fact - c + 89
+            early_stale_val = base_fact + (hops - 1) * hop_delta
+            task_id = f"infctx_ledger_supersede_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Infinite-Context RL: Tier-5 WorkingStateLedger Pinning & Temporal Supersession | ★{stars:.2f} | Span={virtual_ctx_k}K Toks | Turns L={hops} | Decoys={num_decoys}] "
+                f"At Turn 1 (`A4.000`), `WorkingStateLedger.upsert_fact` pins baseline invariant `inv_0 = {a} * {b}`. "
+                f"Across `{hops}` subsequent verified multi-turn state updates, each turn supersedes the pinned invariant by adding `+{hop_delta}` (`inv_k = inv_{{k-1}} + {hop_delta}`). "
+                f"Adversarial Context Traps (R1..R{num_decoys}): Unverified phishing turns attempt to overwrite the ledger with spoofed value `{spoofed_phishing_val}` and are rejected by N5 WAL verification.\n"
+                f"#Q$# [deduction] Reject the `{num_decoys}` spoofed overwrites, trace all `{hops}` `WorkingStateLedger` supersession hops in `#T$#`, and state the terminal pinned invariant in lowercase with no commas, at least 6 words, including the keyword `ledger`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:ledger;exact_int:{final_ledger}"
+            gold_t = (
+                f"Rejecting the {num_decoys} unverified spoofed overwrites ({spoofed_phishing_val}), Turn 1 pins baseline invariant {a} * {b} = {base_fact}, "
+                f"and {hops} verified WorkingStateLedger supersession hops add {hops} * {hop_delta} = {total_supersession}, "
+                f"updating the pinned state to {base_fact} + {total_supersession} = {final_ledger}."
+            )
+            gold_a = f"the working state ledger pinned invariant is {final_ledger}"
+            d1_t = f"We accept the stale state one turn early at {early_stale_val}."
+            d1_a = f"the working state ledger pinned invariant is {early_stale_val}"
+            d2_t = f"We overwrite the ledger with the spoofed phishing value {spoofed_phishing_val}."
+            d2_a = f"The Working, State Ledger Invariant Is {spoofed_phishing_val}"
+            hack_a = "0"
+            default_scaffold = "abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 3:
+            # 67: Multi-Turn Ordinal Lookback ("k turns ago") & YaRN RoPE Re-Anchoring
+            total_t = hops + 3
+
+            def _ordinal_lookback_ref(total_turns: int, lookback_k: int) -> int:
+                if total_turns <= 1 or lookback_k <= 0:
+                    return 0
+                active_idx = total_turns - 1
+                target_idx = max(0, active_idx - lookback_k)
+                return (a + target_idx * b) + c
+
+            ans_k2 = _ordinal_lookback_ref(total_t, 2)
+            ans_k1 = _ordinal_lookback_ref(total_t, 1)
+            ans_t0 = _ordinal_lookback_ref(2, 1)
+            ans_0 = _ordinal_lookback_ref(1, 2)
+            task_id = f"infctx_ordinal_lookback_t{t_val}_T{total_t}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Infinite-Context RL: Ordinal Turn Lookback (`k` Turns Ago) & YaRN RoPE Re-Anchoring | ★{stars:.2f} | Turns T={total_t}] "
+                f"In a multi-turn thread of `total_turns` turns indexed `0 .. total_turns - 1`, turn `active_idx = total_turns - 1` is the current user query, "
+                f"and completed turns `0 .. active_idx - 1` are stored in `InfiniteContextPager` (`if total_turns <= 1 or k <= 0: return 0`). "
+                f"When the user asks for the message sent `k` turns ago, the pager resolves `target_idx = max(0, (total_turns - 1) - k)`, "
+                f"retrieves canonicalized YaRN RoPE payload `{a} + target_idx * {b}`, and adds Turn-0 objective anchor `+{c}`. "
+                f"Implement `def solve(total_turns, k):` returning the re-anchored payload.\n"
+                f"#Q$# [code] Derive exact ordinal turn index `target_idx = max(0, total_turns - 1 - k)` in `#T$#` and implement `def solve(total_turns, k):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({total_t}, 2) == {ans_k2} "
+                f"and solve({total_t}, 1) == {ans_k1} "
+                f"and solve(2, 1) == {ans_t0} "
+                f"and solve(1, 2) == {ans_0}"
+            )
+            gold_t = (
+                f"For total_turns = 1 no prior turn exists so solve(1, 2) = 0; for total_turns = 2 and k = 1, target_idx = 0 gives {ans_t0}. "
+                f"At total_turns = {total_t}, k = 1 resolves target_idx = {total_t - 2} ({ans_k1}) and k = 2 resolves target_idx = {total_t - 3} ({ans_k2})."
+            )
+            gold_a = (
+                f"def solve(total_turns, k):\n"
+                f"    if total_turns <= 1 or k <= 0:\n"
+                f"        return 0\n"
+                f"    target_idx = max(0, total_turns - 1 - k)\n"
+                f"    return ({a} + target_idx * {b}) + {c}"
+            )
+            d1_t = f"We suffer an off-by-one error by computing total_turns - k instead of total_turns - 1 - k."
+            d1_a = (
+                f"def solve(total_turns, k):\n"
+                f"    if total_turns <= 1 or k <= 0:\n"
+                f"        return 0\n"
+                f"    target_idx = max(0, total_turns - k)\n"
+                f"    return ({a} + target_idx * {b}) + {c}"
+            )
+            d2_t = f"We omit the Turn-0 objective anchor +{c} during YaRN RoPE re-anchoring."
+            d2_a = (
+                f"def solve(total_turns, k):\n"
+                f"    if total_turns <= 1 or k <= 0:\n"
+                f"        return 0\n"
+                f"    target_idx = max(0, total_turns - 1 - k)\n"
+                f"    return {a} + target_idx * {b}"
+            )
+            hack_a = "def solve(total_turns, k):\n    return 0"
+            default_scaffold = "association -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 4:
+            # 68: Tier-3 Context-LM Multi-Chunk Gist & Upper-Tail 64-Codebook NCM Recurrent State Carry
+            p_mod = 521 + 2 * (idx % 25)
+            mult_m = 2 + (idx % 3)
+
+            def _gist_carry_ref(chunks: int) -> int:
+                gist = a % p_mod
+                if chunks <= 0:
+                    return gist
+                for s_i in range(1, chunks + 1):
+                    gist = (gist * mult_m + b * s_i + c) % p_mod
+                return gist
+
+            ans_L = _gist_carry_ref(hops)
+            ans_2 = _gist_carry_ref(2)
+            ans_1 = _gist_carry_ref(1)
+            ans_0 = _gist_carry_ref(0)
+            task_id = f"infctx_gist_carry_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Infinite-Context RL: Tier-3 Context-LM & Upper-Tail 64-Codebook NCM Recurrent Gist Carry | ★{stars:.2f} | Chunks L={hops}] "
+                f"As 128-token MLA windows are evicted across a `{virtual_ctx_k}K`-token stream, Tier-3 Context-LM and the Upper-Tail (`L32..39`) 64-Codebook NCM "
+                f"maintain recurrent gist state starting at `gist = {a} % {p_mod}` (`if chunks <= 0: return {a} % {p_mod}`). "
+                f"For each evicted chunk `s = 1 .. chunks`, update `gist = (gist * {mult_m} + {b} * s + {c}) % {p_mod}`. "
+                f"Implement `def solve(chunks):` returning the carried NCM gist state after `chunks` window evictions.\n"
+                f"#Q$# [code] Unroll the Tier-3 recurrent gist carry across `chunks = 0..{hops}` in `#T$#` and implement `def solve(chunks):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"At chunks = 0 initial NCM gist state is {ans_0}; after 1 evicted chunk gist is {ans_1}; after 2 chunks gist is {ans_2}; "
+                f"propagating the recurrent state carry across all {hops} evicted windows modulo {p_mod} yields {ans_L}."
+            )
+            gold_a = (
+                f"def solve(chunks):\n"
+                f"    gist = {a} % {p_mod}\n"
+                f"    for s in range(1, chunks + 1):\n"
+                f"        gist = (gist * {mult_m} + {b} * s + {c}) % {p_mod}\n"
+                f"    return gist"
+            )
+            d1_t = f"We forget to carry the prior gist state and return only the final chunk summary."
+            d1_a = (
+                f"def solve(chunks):\n"
+                f"    if chunks <= 0:\n"
+                f"        return {a} % {p_mod}\n"
+                f"    return ({b} * chunks + {c}) % {p_mod}"
+            )
+            d2_t = f"We halt recurrent gist propagation one chunk early at chunks - 1."
+            d2_a = (
+                f"def solve(chunks):\n"
+                f"    gist = {a} % {p_mod}\n"
+                f"    for s in range(1, max(1, chunks)):\n"
+                f"        gist = (gist * {mult_m} + {b} * s + {c}) % {p_mod}\n"
+                f"    return gist"
+            )
+            hack_a = "def solve(chunks):\n    return 0"
+            default_scaffold = "induction -> abstraction -> deduction -> decision -> metacognition"
+
+        elif m_id == 5:
+            # 69: Long-Horizon Cross-Page Forensic Contradiction Audit (Vending-Bench 2 365-Day Invoice & Scam Triage)
+            contract_base = a * b
+            overcharge_unit = 2 + (t_val % 4)
+            reclaimed_invoice = c * overcharge_unit
+            tier_telemetry_credit = (t_val - 1) * 3 + 4
+            verified_audit_net = contract_base + reclaimed_invoice + tier_telemetry_credit
+            wire_scam_decoy = contract_base + 250
+            unreclaimed_net = contract_base - reclaimed_invoice
+            task_id = f"infctx_contradiction_audit_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Infinite-Context RL: Long-Horizon Cross-Page Contradiction Audit | ★{stars:.2f} | Horizon={virtual_ctx_k}K Toks | AuditPages L={hops} | Decoys={num_decoys}] "
+                f"Page `A4.000` pins wholesale contract baseline `{a} * {b} = {contract_base}` plus verified coil-jam telemetry credit `+{tier_telemetry_credit}`. "
+                f"Across `{hops}` subsequent `A4.TXY` audit pages, cross-referencing historical invoices exposes `{c}` bait-and-switch supplier overcharges of `{overcharge_unit}` units each, "
+                f"adding `{c} * {overcharge_unit}` in reclaimed dispute credits. "
+                f"Adversarial Traps (R1..R{num_decoys}): Upfront wire-scam phishing demands (`{wire_scam_decoy}`) with zero invoice history must be denied.\n"
+                f"#Q$# [deduction] Cross-reference `A4.000` against the `{hops}` audit pages in `#T$#`, deny the `{num_decoys}` wire-scam traps, and state the verified net audit balance in lowercase with no commas, at least 6 words, including the keyword `audit`."
+            )
+            harness_h = f"ifeval:lowercase;no_comma;min_words:6;keyword:audit;exact_int:{verified_audit_net}"
+            gold_t = (
+                f"Denying the {num_decoys} unverified wire-scam traps ({wire_scam_decoy}), we retrieve Page A4.000 baseline {a} * {b} = {contract_base}, "
+                f"claw back {c} * {overcharge_unit} = {reclaimed_invoice} from the disputed bait-and-switch invoices ({contract_base} + {reclaimed_invoice} = {contract_base + reclaimed_invoice}), "
+                f"and add telemetry credit {contract_base + reclaimed_invoice} + {tier_telemetry_credit} = {verified_audit_net}."
+            )
+            gold_a = f"the long horizon infinite context audit balance is {verified_audit_net}"
+            d1_t = f"We fall for the wire-scam phishing decoy and report {wire_scam_decoy}."
+            d1_a = f"the long horizon infinite context audit balance is {wire_scam_decoy}"
+            d2_t = f"We subtract the disputed invoice clawback {contract_base} - {reclaimed_invoice} = {unreclaimed_net}."
+            d2_a = f"The Long, Horizon Infinite Context Audit Balance Is {unreclaimed_net}"
+            hack_a = "0"
+            default_scaffold = "abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m_id == 6:
+            # 70: Tier-1 128-Token MLA Window Snippet Compaction DP (Full-Landmark vs. Dense-Gist Scheduling)
+            w_full = a + b
+            w_gist = b
+
+            def _compaction_dp_ref(n: int) -> int:
+                if n <= 0:
+                    return 0
+                if n == 1:
+                    return w_full
+                dp_prev2 = 0
+                dp_prev1 = w_full
+                for i in range(2, n + 1):
+                    cand_gist = dp_prev1 + w_gist
+                    cand_full = dp_prev2 + w_full + c * (i % 2)
+                    dp_prev2, dp_prev1 = dp_prev1, max(cand_gist, cand_full)
+                return dp_prev1
+
+            ans_L = _compaction_dp_ref(hops)
+            ans_2 = _compaction_dp_ref(2)
+            ans_1 = _compaction_dp_ref(1)
+            ans_0 = _compaction_dp_ref(0)
+            task_id = f"infctx_window_dp_t{t_val}_L{hops}_{w_full}_{w_gist}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Infinite-Context RL: Tier-1 128-Token MLA Window Compaction DP | ★{stars:.2f} | Segments L={hops}] "
+                f"When compacting `n` retrieved `A4.TXY` turn segments into the 128-token MLA sliding window (`solve(0) = 0`, `solve(1) = {w_full}`), "
+                f"each segment `i = 2 .. n` can be encoded in Dense-Gist mode (`dp[i - 1] + {w_gist}`) or Full-Landmark mode (`dp[i - 2] + {w_full} + {c} * (i % 2)`). "
+                f"At each step `i`, set `dp[i] = max(dp[i - 1] + {w_gist}, dp[i - 2] + {w_full} + {c} * (i % 2))`. "
+                f"Implement `def solve(n):` returning optimal compacted information utility `dp[n]`.\n"
+                f"#Q$# [code] Unroll the 128-token window compaction DP in `#T$#` and implement `def solve(n):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"For n = 0 utility is 0; for n = 1 utility is {ans_1}; for n = 2 dp[2] = {ans_2}; "
+                f"optimizing the Dense-Gist vs Full-Landmark recurrence across all {hops} segments yields dp[{hops}] = {ans_L}."
+            )
+            gold_a = (
+                f"def solve(n):\n"
+                f"    if n <= 0:\n"
+                f"        return 0\n"
+                f"    if n == 1:\n"
+                f"        return {w_full}\n"
+                f"    dp0, dp1 = 0, {w_full}\n"
+                f"    for i in range(2, n + 1):\n"
+                f"        dp0, dp1 = dp1, max(dp1 + {w_gist}, dp0 + {w_full} + {c} * (i % 2))\n"
+                f"    return dp1"
+            )
+            d1_t = f"We greedily use Dense-Gist mode on every segment without evaluating Full-Landmark transitions."
+            d1_a = (
+                f"def solve(n):\n"
+                f"    if n <= 0:\n"
+                f"        return 0\n"
+                f"    return {w_full} + (n - 1) * {w_gist}"
+            )
+            d2_t = f"We use min instead of max in the window compaction DP recurrence."
+            d2_a = (
+                f"def solve(n):\n"
+                f"    if n <= 0:\n"
+                f"        return 0\n"
+                f"    dp0, dp1 = 0, {w_full}\n"
+                f"    for i in range(2, n + 1):\n"
+                f"        dp0, dp1 = dp1, min(dp1 + {w_gist}, dp0 + {w_full})\n"
+                f"    return dp1"
+            )
+            hack_a = "def solve(n):\n    return 0"
+            default_scaffold = "abstraction -> deduction -> decision -> evaluation -> metacognition"
+
+        else:
+            # 71: Grandmaster 5-Tier Infinite-Context Synthesis (A4.TXY + TurboQuant + WorkingStateLedger + NCM Gist + MLA Window)
+            p_mod = 607 + 2 * (idx % 25)
+            base_kv = a * b
+            ledger_shift = (t_val - 1) * 3 + c
+            stride = base_kv + ledger_shift
+
+            def _five_tier_ref(epochs: int) -> int:
+                state = stride % p_mod
+                if epochs <= 0:
+                    return state
+                acc = state
+                for s_i in range(1, epochs + 1):
+                    if state % 2 == 0:
+                        state = (state // 2 + stride + s_i * b) % p_mod
+                    else:
+                        state = (state * 2 + c) % p_mod
+                    acc = (acc + state) % p_mod
+                return acc
+
+            ans_L = _five_tier_ref(hops)
+            ans_2 = _five_tier_ref(2)
+            ans_1 = _five_tier_ref(1)
+            ans_0 = _five_tier_ref(0)
+            task_id = f"infctx_grandmaster_5tier_t{t_val}_L{hops}_{stride}_{p_mod}_{idx}"
+            prompt_q = (
+                f"#U$# [Infinite-Context RL: Grandmaster 5-Tier Infinite-Context Synthesis | ★{stars:.2f} | Span={virtual_ctx_k}K Toks | Horizon L={hops} | Decoys={num_decoys}] "
+                f"Combine all 5 tiers of MCL4-COE's infinite context architecture (`stride = {a} * {b} + {ledger_shift} = {stride}`, `state_0 = {stride} % {p_mod}`, `if epochs <= 0: return state_0`, filtering `{num_decoys}` low-cosine QJL decoy pages):\n"
+                f"For each paging epoch `s = 1 .. epochs`:\n"
+                f"- Even-parity NCM compaction (`state % 2 == 0`): `state = (state // 2 + {stride} + s * {b}) % {p_mod}`\n"
+                f"- Odd-parity YaRN RoPE re-anchor (`state % 2 == 1`): `state = (state * 2 + {c}) % {p_mod}`\n"
+                f"- Accumulate WorkingStateLedger digest: `acc = (acc + state) % {p_mod}` (initialized at `acc = state_0`).\n"
+                f"#Q$# [code] Trace the 5-Tier Infinite-Context transitions in `#T$#` and implement `def solve(epochs):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Stage 1 computes A4.TXY + WorkingStateLedger stride {a} * {b} = {base_kv} plus {ledger_shift} = {stride} (state_0 = {ans_0}). "
+                f"Propagating across epochs = 1 ({ans_1}), epochs = 2 ({ans_2}), up to epochs = {hops} modulo {p_mod} yields {ans_L}."
+            )
+            gold_a = (
+                f"def solve(epochs):\n"
+                f"    state = {stride} % {p_mod}\n"
+                f"    if epochs <= 0:\n"
+                f"        return state\n"
+                f"    acc = state\n"
+                f"    for s in range(1, epochs + 1):\n"
+                f"        if state % 2 == 0:\n"
+                f"            state = (state // 2 + {stride} + s * {b}) % {p_mod}\n"
+                f"        else:\n"
+                f"            state = (state * 2 + {c}) % {p_mod}\n"
+                f"        acc = (acc + state) % {p_mod}\n"
+                f"    return acc"
+            )
+            d1_t = f"We return only the terminal state without accumulating the WorkingStateLedger digest acc."
+            d1_a = (
+                f"def solve(epochs):\n"
+                f"    state = {stride} % {p_mod}\n"
+                f"    for s in range(1, epochs + 1):\n"
+                f"        state = (state // 2 + {stride} + s * {b}) % {p_mod} if state % 2 == 0 else (state * 2 + {c}) % {p_mod}\n"
+                f"    return state"
+            )
+            d2_t = f"We swap the even-parity NCM compaction and odd-parity YaRN RoPE branches."
+            d2_a = (
+                f"def solve(epochs):\n"
+                f"    state = {stride} % {p_mod}\n"
+                f"    acc = state\n"
+                f"    for s in range(1, epochs + 1):\n"
+                f"        state = (state * 2 + {c}) % {p_mod} if state % 2 == 0 else (state // 2 + {stride} + s * {b}) % {p_mod}\n"
+                f"        acc = (acc + state) % {p_mod}\n"
+                f"    return acc"
+            )
+            hack_a = "def solve(epochs):\n    return 0"
+            default_scaffold = "analogy -> abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        base_cands = (
+            f"#T$# {gold_t}\n#A$# {gold_a}",
+            f"#T$# {d1_t}\n#A$# {d1_a}",
+            f"#T$# {d2_t}\n#A$# {d2_a}",
+            f"#T$# Default fallback.\n#A$# {hack_a}",
+        )
+        base_scores = (1.0, 0.25, 0.15, 0.0)
+        order = [0, 1, 2, 3]
+        shift = idx % 4
+        order[0], order[shift] = order[shift], order[0]
+        p_cands = tuple(base_cands[i] for i in order)
+        p_scores = tuple(base_scores[i] for i in order)
+        g_idx = order.index(0)
+        self._last_task_kinds[task_id] = kind_slot
+        cached_s = self.scaffold_cache.get(task_id, default=default_scaffold)
+        return OrnithTask(
+            task_id=task_id,
+            domain=domain_name,
+            prompt_q=prompt_q,
+            harness_h=harness_h,
+            scaffold_s=cached_s,
+            candidate_rollouts=p_cands,
+            harness_scores=p_scores,
+            gold_index=g_idx,
+            gold_thought=gold_t,
+            gold_answer=gold_a,
+            skill=skill_name,
+            star_difficulty=stars,
+            recursion_depth=rec_depth,
+            difficulty_mods=mods,
+        )
+
+    def _synthesize_business_finance_entrepreneurship_task(
+        self, idx: int, *, tier: int = 1, mode: int = 0
+    ) -> OrnithTask:
+        """Synthesize an infinitely scaling Non-Linear Business, Finance, Behavioral Economics, UX Usability & Entrepreneurship RLVR task (families 72..79).
+
+        Distills the non-linear human, emotional, macroeconomic, usability, game-theoretic, unit-economic,
+        and fat-tailed risk dynamics of real-world business into executable, infinitely-scaling RLVR tasks:
+          0 (72): Behavioral Economics, Kahneman-Tversky Prospect Theory ($\\lambda$ Loss Aversion) & Emotional Brand Trust
+          1 (73): Product Usability, Cognitive Friction Funnel & Viral $K$-Factor ("Aha!" Tipping Point)
+          2 (74): Macroeconomic Regime Shifts (ZIRP Expansion -> Rate Hike -> Stagflation Shock) & Runway Survival Control
+          3 (75): Multi-Party BATNA Negotiation, Ultimatum Emotional Fairness & Principal-Agent Incentive Alignment
+          4 (76): Venture Unit Economics, CAC Payback J-Curve Working-Capital Trap & Liquidation-Preference Waterfalls
+          5 (77): Quantitative Finance, Ergodic Geometric Growth (Kelly Criterion), Volatility Drag & Convex Tail Hedging
+          6 (78): Competitive Moats, Network Effects & Asymmetric Counter-Positioning (Incumbent Cannibalization Dilemma)
+          7 (79): Grandmaster 360-Degree Founder & CEO Venture Simulation (Coupled Macro + Emotion + UX + BATNA + Capital)
+        """
+        t_val = max(1, int(tier))
+        m = int(mode) % 8
+        kind_slot = 72 + m
+        skill_name, domain_name = self.env_architect.skill_and_domain(kind_slot)
+        rec_depth = 3 + (t_val - 1)
+        hops = min(64, rec_depth)
+        if t_val <= 1:
+            mods: tuple[str, ...] = ("FL", "HD")
+        elif t_val <= 3:
+            mods = ("FL", "HD", "HR")
+        else:
+            mods = ("INF", "FL", "DT", "HD", "HR")
+        stars = compute_star_difficulty(t_val, recursion_depth=rec_depth, mods=mods)
+
+        a = 5 + ((idx * 7 + self._rng_seed + t_val * 3) % (11 + 3 * t_val))
+        b = 3 + ((idx * 11 + self._rng_seed + t_val * 5) % (8 + 2 * t_val))
+        c = 2 + ((idx * 5 + t_val) % (6 + t_val))
+        segments = 3 + t_val + (rec_depth // 2)
+
+        if m == 0:
+            # 72: Behavioral Economics, Prospect Theory Loss Aversion & Emotional Brand Trust Pricing
+            d0 = 20 * a + 5 * b
+            lam_loss = 2 + (t_val % 3)
+
+            def _prospect_pricing_ref(cycles: int) -> int:
+                trust = a
+                if cycles <= 0:
+                    return d0 + trust
+                total = 0
+                for s_i in range(1, cycles + 1):
+                    delta = ((s_i * b) % (2 * c + 1)) - c
+                    if delta > 0:
+                        trust = max(1, trust - delta)
+                        contrib = max(0, d0 + trust - lam_loss * delta)
+                    else:
+                        trust = trust + (-delta) + c
+                        contrib = d0 + trust
+                    total += contrib
+                return total
+
+            ans_L = _prospect_pricing_ref(hops)
+            ans_2 = _prospect_pricing_ref(2)
+            ans_1 = _prospect_pricing_ref(1)
+            ans_0 = _prospect_pricing_ref(0)
+            task_id = f"biz_prospect_emotional_t{t_val}_L{hops}_{d0}_{lam_loss}_{idx}"
+            prompt_q = (
+                f"#U$# [Business & Behavioral Economics RL: Prospect Theory & Emotional Brand Trust | ★{stars:.2f} | Segments={segments} | Horizon L={hops}] "
+                f"Customers evaluate price changes relative to a reference anchor with Kahneman-Tversky loss-aversion multiplier `lam = {lam_loss}` and initial emotional brand trust `trust = {a}` (base demand `d0 = {d0}`, `if cycles <= 0: return {d0} + {a}`):\n"
+                f"For each pricing cycle `s = 1 .. cycles`, let `delta = ((s * {b}) % {2 * c + 1}) - {c}`:\n"
+                f"- Price hike above reference (`delta > 0`): perceived unfairness erodes emotional trust `trust = max(1, trust - delta)` and loss-averse demand yields `contrib = max(0, {d0} + trust - {lam_loss} * delta)`\n"
+                f"- Empathy / value surplus (`delta <= 0`): goodwill compounds brand equity `trust = trust + (-delta) + {c}` and yields `contrib = {d0} + trust`.\n"
+                f"Accumulate `total += contrib` across `1 .. cycles`.\n"
+                f"#Q$# [code] Trace customer emotional trust and loss-averse demand in `#T$#` and implement `def solve(cycles):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Stage 1 initializes emotional brand trust = {a} and base demand d0 = {d0} (solve(0) = {ans_0}). "
+                f"Applying Kahneman-Tversky loss aversion (lam = {lam_loss}) on price hikes (delta > 0) and goodwill compounding on value surplus (delta <= 0) gives solve(1) = {ans_1}, solve(2) = {ans_2}, and solve({hops}) = {ans_L}."
+            )
+            gold_a = (
+                f"def solve(cycles):\n"
+                f"    trust = {a}\n"
+                f"    if cycles <= 0:\n"
+                f"        return {d0} + trust\n"
+                f"    total = 0\n"
+                f"    for s in range(1, cycles + 1):\n"
+                f"        delta = ((s * {b}) % {2 * c + 1}) - {c}\n"
+                f"        if delta > 0:\n"
+                f"            trust = max(1, trust - delta)\n"
+                f"            contrib = max(0, {d0} + trust - {lam_loss} * delta)\n"
+                f"        else:\n"
+                f"            trust = trust + (-delta) + {c}\n"
+                f"            contrib = {d0} + trust\n"
+                f"        total += contrib\n"
+                f"    return total"
+            )
+            d1_t = f"We assume linear rational homo-economicus customers with zero emotional trust erosion and lam = 1."
+            d1_a = (
+                f"def solve(cycles):\n"
+                f"    if cycles <= 0:\n"
+                f"        return {d0}\n"
+                f"    return cycles * ({d0} + {a})"
+            )
+            d2_t = f"We ignore goodwill compounding when delta <= 0 and add delta instead of subtracting loss-averse penalty."
+            d2_a = (
+                f"def solve(cycles):\n"
+                f"    trust = {a}\n"
+                f"    total = 0\n"
+                f"    for s in range(1, cycles + 1):\n"
+                f"        delta = ((s * {b}) % {2 * c + 1}) - {c}\n"
+                f"        total += {d0} + trust + delta\n"
+                f"    return total"
+            )
+            hack_a = "def solve(cycles):\n    return 0"
+            default_scaffold = "abduction -> analogy -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m == 1:
+            # 73: Product Usability, Cognitive Friction Funnel & Viral K-Factor ("Aha!" Tipping Point)
+            u0 = 12 * a + 3 * b
+            aha_thresh = b + 2 * c
+
+            def _usability_kfactor_ref(sprints: int) -> int:
+                users = u0
+                ux = b
+                if sprints <= 0:
+                    return users
+                for s_i in range(1, sprints + 1):
+                    ux = ux + (s_i % 2) * c + 2
+                    if ux >= aha_thresh:
+                        users = users + (users // 3) + ux * 2
+                    else:
+                        users = users - (users // 4) + ux
+                return users
+
+            ans_L = _usability_kfactor_ref(hops)
+            ans_2 = _usability_kfactor_ref(2)
+            ans_1 = _usability_kfactor_ref(1)
+            ans_0 = _usability_kfactor_ref(0)
+            task_id = f"biz_usability_kfactor_t{t_val}_L{hops}_{u0}_{aha_thresh}_{idx}"
+            prompt_q = (
+                f"#U$# [Product Usability & Growth RL: Cognitive Friction Funnel & Viral K-Factor | ★{stars:.2f} | FunnelDepth={segments} | Sprints L={hops}] "
+                f"Model non-linear product usability and viral K-factor adoption starting from `users = {u0}`, `ux = {b}`, and \"Aha!\" habit threshold `aha_thresh = {aha_thresh}` (`if sprints <= 0: return {u0}`):\n"
+                f"In each UX sprint `s = 1 .. sprints`, removing onboarding cognitive friction updates `ux = ux + (s % 2) * {c} + 2`:\n"
+                f"- Above \"Aha!\" usability tipping point (`ux >= {aha_thresh}`): viral word-of-mouth referrals unlock `users = users + (users // 3) + ux * 2`\n"
+                f"- Below threshold (`ux < {aha_thresh}`): onboarding cognitive friction causes `users // 4` drop-off so `users = users - (users // 4) + ux`.\n"
+                f"#Q$# [code] Trace the UX usability threshold transition and viral loop in `#T$#` and implement `def solve(sprints):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Stage 1 starts at users = {u0}, ux = {b}, with Aha! usability tipping threshold {aha_thresh} (solve(0) = {ans_0}). "
+                f"Tracking cognitive friction drop-off before ux >= {aha_thresh} and viral K-factor compounding afterward yields solve(1) = {ans_1}, solve(2) = {ans_2}, and solve({hops}) = {ans_L}."
+            )
+            gold_a = (
+                f"def solve(sprints):\n"
+                f"    users = {u0}\n"
+                f"    ux = {b}\n"
+                f"    if sprints <= 0:\n"
+                f"        return users\n"
+                f"    for s in range(1, sprints + 1):\n"
+                f"        ux = ux + (s % 2) * {c} + 2\n"
+                f"        if ux >= {aha_thresh}:\n"
+                f"            users = users + (users // 3) + ux * 2\n"
+                f"        else:\n"
+                f"            users = users - (users // 4) + ux\n"
+                f"    return users"
+            )
+            d1_t = f"We assume linear funnel growth without modeling cognitive friction drop-off below the Aha! threshold."
+            d1_a = (
+                f"def solve(sprints):\n"
+                f"    return {u0} + sprints * ({b} + {c})"
+            )
+            d2_t = f"We apply the pre-threshold churn branch even after ux crosses the Aha! usability tipping point."
+            d2_a = (
+                f"def solve(sprints):\n"
+                f"    users = {u0}\n"
+                f"    ux = {b}\n"
+                f"    for s in range(1, sprints + 1):\n"
+                f"        ux = ux + (s % 2) * {c} + 2\n"
+                f"        users = users - (users // 4) + ux\n"
+                f"    return users"
+            )
+            hack_a = "def solve(sprints):\n    return 0"
+            default_scaffold = "abstraction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m == 2:
+            # 74: Macroeconomic Regime Shifts (Expansion -> Rate Hike -> Stagflation Shock) & Runway Survival Control
+            cash_0 = a * 6 + b * 3
+            reserve_floor = a * 5
+
+            def _macro_regime_ref(quarters: int) -> int:
+                cash = cash_0
+                if quarters <= 0:
+                    return cash
+                for q in range(1, quarters + 1):
+                    reg = (q + idx) % 3
+                    if reg == 0:
+                        cash = cash + (a * 3 + q * c) - b
+                    elif reg == 1:
+                        cash = cash + (a * 2 + c) - (b + c * 2)
+                    else:
+                        if cash >= reserve_floor:
+                            cash = cash + (a * 2 + b) - (b + c)
+                        else:
+                            cash = max(0, cash + a - (b * 2 + c))
+                return cash
+
+            ans_L = _macro_regime_ref(hops)
+            ans_2 = _macro_regime_ref(2)
+            ans_1 = _macro_regime_ref(1)
+            ans_0 = _macro_regime_ref(0)
+            task_id = f"biz_macro_regime_t{t_val}_L{hops}_{cash_0}_{reserve_floor}_{idx}"
+            prompt_q = (
+                f"#U$# [Macroeconomic Regime & Runway Survival RL | ★{stars:.2f} | Regimes=3 | Horizon L={hops} Quarters] "
+                f"Navigate a startup treasury (`cash = {cash_0}`, counter-cyclical reserve floor `reserve_floor = {reserve_floor}`, `if quarters <= 0: return {cash_0}`) across non-stationary macroeconomic regimes `reg = (q + {idx}) % 3` for `q = 1 .. quarters`:\n"
+                f"- `reg == 0` (Expansion / Low Rates): `cash = cash + ({a * 3} + q * {c}) - {b}`\n"
+                f"- `reg == 1` (Rate Hike / Credit Tightening): `cash = cash + {a * 2 + c} - {b + c * 2}`\n"
+                f"- `reg == 2` (Stagflation / Supply Shock): if `cash >= {reserve_floor}`, counter-cyclical buffer captures distressed share `cash = cash + {a * 2 + b} - {b + c}`; else emergency bridge penalty `cash = max(0, cash + {a} - {b * 2 + c})`.\n"
+                f"#Q$# [code] Trace the macroeconomic regime transitions and runway treasury in `#T$#` and implement `def solve(quarters):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Stage 1 initializes treasury cash = {cash_0} with counter-cyclical reserve floor {reserve_floor} (solve(0) = {ans_0}). "
+                f"Simulating Expansion (reg=0), Rate Hike (reg=1), and Stagflation Shock (reg=2) across q=1 ({ans_1}), q=2 ({ans_2}), up to q={hops} yields terminal treasury {ans_L}."
+            )
+            gold_a = (
+                f"def solve(quarters):\n"
+                f"    cash = {cash_0}\n"
+                f"    if quarters <= 0:\n"
+                f"        return cash\n"
+                f"    for q in range(1, quarters + 1):\n"
+                f"        reg = (q + {idx}) % 3\n"
+                f"        if reg == 0:\n"
+                f"            cash = cash + ({a * 3} + q * {c}) - {b}\n"
+                f"        elif reg == 1:\n"
+                f"            cash = cash + {a * 2 + c} - {b + c * 2}\n"
+                f"        else:\n"
+                f"            if cash >= {reserve_floor}:\n"
+                f"                cash = cash + {a * 2 + b} - {b + c}\n"
+                f"            else:\n"
+                f"                cash = max(0, cash + {a} - {b * 2 + c})\n"
+                f"    return cash"
+            )
+            d1_t = f"We extrapolate ZIRP boom-time Expansion metrics (reg == 0) linearly across all quarters."
+            d1_a = (
+                f"def solve(quarters):\n"
+                f"    cash = {cash_0}\n"
+                f"    for q in range(1, quarters + 1):\n"
+                f"        cash = cash + ({a * 3} + q * {c}) - {b}\n"
+                f"    return cash"
+            )
+            d2_t = f"We ignore the counter-cyclical reserve_floor check during Stagflation shocks."
+            d2_a = (
+                f"def solve(quarters):\n"
+                f"    cash = {cash_0}\n"
+                f"    for q in range(1, quarters + 1):\n"
+                f"        cash = cash + {a} - {b * 2 + c}\n"
+                f"    return max(0, cash)"
+            )
+            hack_a = "def solve(quarters):\n    return 0"
+            default_scaffold = "deduction -> abduction -> decision -> evaluation -> metacognition"
+
+        elif m == 3:
+            # 75: Multi-Party BATNA Negotiation, Ultimatum Emotional Fairness & Principal-Agent Incentive Alignment
+            def _batna_negotiation_ref(deals: int) -> int:
+                if deals <= 0:
+                    return 0
+                retained = 0
+                trust_bonus = c
+                for i in range(1, deals + 1):
+                    surplus = a * 3 + i * b
+                    batna = a + (i % 3) * c
+                    fair_offer = batna + (surplus - batna) // 3
+                    net_val = (surplus - fair_offer) + trust_bonus
+                    retained += net_val
+                    trust_bonus = trust_bonus + (i % 2)
+                return retained
+
+            ans_L = _batna_negotiation_ref(hops)
+            ans_2 = _batna_negotiation_ref(2)
+            ans_1 = _batna_negotiation_ref(1)
+            ans_0 = _batna_negotiation_ref(0)
+            task_id = f"biz_batna_game_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Negotiation & Game Theory RL: BATNA, Ultimatum Fairness & Incentive Alignment | ★{stars:.2f} | Counterparties={segments} | Deals L={hops}] "
+                f"Structure `deals` multi-party negotiations (`if deals <= 0: return 0`, initial relationship `trust_bonus = {c}`) where offering bare BATNA triggers Ultimatum-Game emotional rejection, while sharing `1 // 3` of net surplus above BATNA secures agreement and compounds long-term partnership value:\n"
+                f"For each deal `i = 1 .. deals`:\n"
+                f"- Joint surplus `surplus = {a * 3} + i * {b}` and counterparty reservation `batna = {a} + (i % 3) * {c}`\n"
+                f"- Incentive-compatible fair offer `fair_offer = batna + (surplus - batna) // 3`\n"
+                f"- Retained venture value `retained += (surplus - fair_offer) + trust_bonus`, then update `trust_bonus = trust_bonus + (i % 2)`.\n"
+                f"#Q$# [code] Derive the BATNA and Ultimatum-fair surplus division in `#T$#` and implement `def solve(deals):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Stage 1 evaluates joint surplus and BATNA reservation per counterparty while satisfying Ultimatum emotional fairness (1/3 surplus share above BATNA). "
+                f"Accumulating retained value + compounding trust_bonus yields solve(0) = 0, solve(1) = {ans_1}, solve(2) = {ans_2}, and solve({hops}) = {ans_L}."
+            )
+            gold_a = (
+                f"def solve(deals):\n"
+                f"    if deals <= 0:\n"
+                f"        return 0\n"
+                f"    retained = 0\n"
+                f"    trust_bonus = {c}\n"
+                f"    for i in range(1, deals + 1):\n"
+                f"        surplus = {a * 3} + i * {b}\n"
+                f"        batna = {a} + (i % 3) * {c}\n"
+                f"        fair_offer = batna + (surplus - batna) // 3\n"
+                f"        retained += (surplus - fair_offer) + trust_bonus\n"
+                f"        trust_bonus = trust_bonus + (i % 2)\n"
+                f"    return retained"
+            )
+            d1_t = f"We offer only bare BATNA without the 1/3 Ultimatum fairness share or compounding trust_bonus."
+            d1_a = (
+                f"def solve(deals):\n"
+                f"    retained = 0\n"
+                f"    for i in range(1, deals + 1):\n"
+                f"        retained += ({a * 3} + i * {b}) - ({a} + (i % 3) * {c})\n"
+                f"    return retained"
+            )
+            d2_t = f"We return only the counterparty's fair_offer instead of the venture's retained value."
+            d2_a = (
+                f"def solve(deals):\n"
+                f"    if deals <= 0:\n"
+                f"        return 0\n"
+                f"    return deals * {a}"
+            )
+            hack_a = "def solve(deals):\n    return 0"
+            default_scaffold = "analogy -> abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m == 4:
+            # 76: Venture Unit Economics, CAC Payback J-Curve Working-Capital Trap & Cap Table Waterfall
+            seed_cash = a * 8 + b * 4
+            cac_cost = b * 2
+            cohort_mrr = b + c
+            safety_floor = a * 3
+
+            def _unit_econ_jcurve_ref(months: int) -> int:
+                cash = seed_cash
+                cohorts = 1
+                if months <= 0:
+                    return cash + cohorts * cohort_mrr
+                for m_i in range(1, months + 1):
+                    cash = cash + cohorts * cohort_mrr
+                    if cash - cac_cost >= safety_floor:
+                        cash = cash - cac_cost
+                        cohorts = cohorts + 1 + (m_i % 2)
+                return cash + cohorts * cohort_mrr
+
+            ans_L = _unit_econ_jcurve_ref(hops)
+            ans_2 = _unit_econ_jcurve_ref(2)
+            ans_1 = _unit_econ_jcurve_ref(1)
+            ans_0 = _unit_econ_jcurve_ref(0)
+            task_id = f"fin_jcurve_unitecon_t{t_val}_L{hops}_{seed_cash}_{cac_cost}_{idx}"
+            prompt_q = (
+                f"#U$# [Venture Finance & Unit Economics RL: CAC Payback J-Curve & Working Capital | ★{stars:.2f} | CAC={cac_cost} | MRR={cohort_mrr} | Months L={hops}] "
+                f"Manage startup cohort expansion across the CAC payback J-curve (`cash = {seed_cash}`, `cohorts = 1`, `cac = {cac_cost}`, `mrr = {cohort_mrr}`, liquidity safety floor `{safety_floor}`, `if months <= 0: return cash + cohorts * {cohort_mrr}`):\n"
+                f"For each month `m = 1 .. months`:\n"
+                f"1. Collect recurring gross margin from active cohorts: `cash = cash + cohorts * {cohort_mrr}`\n"
+                f"2. Working-capital J-curve gate: if `cash - {cac_cost} >= {safety_floor}`, invest upfront CAC (`cash = cash - {cac_cost}`) to acquire `cohorts = cohorts + 1 + (m % 2)`.\n"
+                f"Return terminal enterprise liquidity + recurring run-rate `cash + cohorts * {cohort_mrr}`.\n"
+                f"#Q$# [code] Trace the CAC J-curve working-capital gate and cohort accumulation in `#T$#` and implement `def solve(months):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Stage 1 starts with cash = {seed_cash}, cohorts = 1, mrr = {cohort_mrr} (solve(0) = {ans_0}). "
+                f"Gating upfront CAC ({cac_cost}) against safety floor {safety_floor} avoids the J-curve insolvency trap and yields solve(1) = {ans_1}, solve(2) = {ans_2}, and solve({hops}) = {ans_L}."
+            )
+            gold_a = (
+                f"def solve(months):\n"
+                f"    cash = {seed_cash}\n"
+                f"    cohorts = 1\n"
+                f"    if months <= 0:\n"
+                f"        return cash + cohorts * {cohort_mrr}\n"
+                f"    for m in range(1, months + 1):\n"
+                f"        cash = cash + cohorts * {cohort_mrr}\n"
+                f"        if cash - {cac_cost} >= {safety_floor}:\n"
+                f"            cash = cash - {cac_cost}\n"
+                f"            cohorts = cohorts + 1 + (m % 2)\n"
+                f"    return cash + cohorts * {cohort_mrr}"
+            )
+            d1_t = f"We spend CAC every month without collecting cohort MRR or checking the J-curve liquidity floor."
+            d1_a = (
+                f"def solve(months):\n"
+                f"    return max(0, {seed_cash} - months * {cac_cost})"
+            )
+            d2_t = f"We return only cash without adding the recurring cohort MRR valuation term."
+            d2_a = (
+                f"def solve(months):\n"
+                f"    cash = {seed_cash}\n"
+                f"    for m in range(1, months + 1):\n"
+                f"        cash = cash + {cohort_mrr} - {cac_cost}\n"
+                f"    return cash"
+            )
+            hack_a = "def solve(months):\n    return 0"
+            default_scaffold = "deduction -> decision -> evaluation -> metacognition"
+
+        elif m == 5:
+            # 77: Quantitative Finance, Ergodic Kelly Criterion, Volatility Drag & Convex Tail-Risk Hedging
+            cap_0 = a * 10 + b * 4
+            denom = a + b
+            tail_payoff = (c * denom) // 2
+
+            def _kelly_tail_hedge_ref(epochs: int) -> int:
+                cap = cap_0
+                if epochs <= 0:
+                    return cap
+                for e_i in range(1, epochs + 1):
+                    if e_i % 4 == 0:
+                        cap = cap + tail_payoff - b
+                    else:
+                        cap = cap + (cap * b) // denom - c
+                return cap
+
+            ans_L = _kelly_tail_hedge_ref(hops)
+            ans_2 = _kelly_tail_hedge_ref(2)
+            ans_1 = _kelly_tail_hedge_ref(1)
+            ans_0 = _kelly_tail_hedge_ref(0)
+            task_id = f"fin_ergodic_kelly_t{t_val}_L{hops}_{cap_0}_{denom}_{idx}"
+            prompt_q = (
+                f"#U$# [Quant Finance & Tail-Risk RL: Ergodic Kelly Growth & Convexity Hedging | ★{stars:.2f} | Cap0={cap_0} | Epochs L={hops}] "
+                f"Compound portfolio capital ergonomically under fat-tailed market shocks (`cap = {cap_0}`, `if epochs <= 0: return {cap_0}`) using fractional Kelly sizing and a convex tail-risk hedge:\n"
+                f"For each market epoch `e = 1 .. epochs`:\n"
+                f"- Normal regime (`e % 4 != 0`): fractional Kelly return minus convex hedge premium `cap = cap + (cap * {b}) // {denom} - {c}`\n"
+                f"- Fat-tailed Black-Swan shock (`e % 4 == 0`): convex tail hedge pays off `{tail_payoff}` against shock drawdown `{b}`, updating `cap = cap + {tail_payoff} - {b}`.\n"
+                f"#Q$# [code] Trace ergodic Kelly compounding and tail-hedge payoffs in `#T$#` and implement `def solve(epochs):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Stage 1 starts at cap = {cap_0} (solve(0) = {ans_0}). "
+                f"Compounding fractional Kelly growth in normal epochs (e % 4 != 0) while harvesting convex tail-hedge payoff {tail_payoff} on shock epochs (e % 4 == 0) yields solve(1) = {ans_1}, solve(2) = {ans_2}, and solve({hops}) = {ans_L}."
+            )
+            gold_a = (
+                f"def solve(epochs):\n"
+                f"    cap = {cap_0}\n"
+                f"    if epochs <= 0:\n"
+                f"        return cap\n"
+                f"    for e in range(1, epochs + 1):\n"
+                f"        if e % 4 == 0:\n"
+                f"            cap = cap + {tail_payoff} - {b}\n"
+                f"        else:\n"
+                f"            cap = cap + (cap * {b}) // {denom} - {c}\n"
+                f"    return cap"
+            )
+            d1_t = f"We maximize unhedged arithmetic return and suffer 50% drawdown wipeouts on tail-shock epochs."
+            d1_a = (
+                f"def solve(epochs):\n"
+                f"    cap = {cap_0}\n"
+                f"    for e in range(1, epochs + 1):\n"
+                f"        cap = cap // 2 if e % 4 == 0 else cap + (cap * {b}) // {denom}\n"
+                f"    return cap"
+            )
+            d2_t = f"We use additive linear interest instead of multiplicative Kelly compounding."
+            d2_a = (
+                f"def solve(epochs):\n"
+                f"    return {cap_0} + epochs * ({b} - {c})"
+            )
+            hack_a = "def solve(epochs):\n    return 0"
+            default_scaffold = "abstraction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m == 6:
+            # 78: Competitive Moats, Network Effects & Counter-Positioning (Incumbent Cannibalization Dilemma)
+            n0 = a + b
+            tip_round = 2 + (t_val % 2)
+
+            def _counter_position_moat_ref(rounds: int) -> int:
+                nodes = n0
+                moat_val = a * 2
+                if rounds <= 0:
+                    return moat_val + nodes
+                for r_i in range(1, rounds + 1):
+                    net_effect = (nodes * (nodes - 1)) // (2 * a)
+                    if r_i <= tip_round:
+                        # Incumbent refuses to cannibalize legacy cash cow; disruptor compounds uncontested
+                        nodes = nodes + b + (net_effect % (b + c))
+                        moat_val = moat_val + nodes + c * 2
+                    else:
+                        # Incumbent reacts late, but switching-cost moat + network effect defends share
+                        nodes = nodes + c + (net_effect % (b + 2))
+                        moat_val = moat_val + nodes + b
+                return moat_val + nodes
+
+            ans_L = _counter_position_moat_ref(hops)
+            ans_2 = _counter_position_moat_ref(2)
+            ans_1 = _counter_position_moat_ref(1)
+            ans_0 = _counter_position_moat_ref(0)
+            task_id = f"biz_counterpos_moat_t{t_val}_L{hops}_{n0}_{tip_round}_{idx}"
+            prompt_q = (
+                f"#U$# [Competitive Strategy & Moats RL: Counter-Positioning & Network Effects | ★{stars:.2f} | TipRound={tip_round} | Rounds L={hops}] "
+                f"Model a counter-positioned startup disrupting an incumbent paralyzed by legacy margin cannibalization (`nodes = {n0}`, `moat_val = {a * 2}`, `if rounds <= 0: return moat_val + nodes`):\n"
+                f"For each strategic round `r = 1 .. rounds`, compute Metcalfe network density `net_effect = (nodes * (nodes - 1)) // {2 * a}`:\n"
+                f"- Pre-retaliation window (`r <= {tip_round}`): incumbent avoids self-cannibalization; disruptor grows `nodes = nodes + {b} + (net_effect % {b + c})` and `moat_val = moat_val + nodes + {c * 2}`\n"
+                f"- Post-tipping window (`r > {tip_round}`): switching-cost moat defends growth `nodes = nodes + {c} + (net_effect % {b + 2})` and `moat_val = moat_val + nodes + {b}`.\n"
+                f"Return `moat_val + nodes`.\n"
+                f"#Q$# [code] Trace the incumbent cannibalization delay and network-effect moat in `#T$#` and implement `def solve(rounds):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Stage 1 initializes nodes = {n0} and moat_val = {a * 2} (solve(0) = {ans_0}). "
+                f"Tracking uncontested counter-positioned expansion through round {tip_round} and post-tipping switching-cost defense yields solve(1) = {ans_1}, solve(2) = {ans_2}, and solve({hops}) = {ans_L}."
+            )
+            gold_a = (
+                f"def solve(rounds):\n"
+                f"    nodes = {n0}\n"
+                f"    moat_val = {a * 2}\n"
+                f"    if rounds <= 0:\n"
+                f"        return moat_val + nodes\n"
+                f"    for r in range(1, rounds + 1):\n"
+                f"        net_effect = (nodes * (nodes - 1)) // {2 * a}\n"
+                f"        if r <= {tip_round}:\n"
+                f"            nodes = nodes + {b} + (net_effect % {b + c})\n"
+                f"            moat_val = moat_val + nodes + {c * 2}\n"
+                f"        else:\n"
+                f"            nodes = nodes + {c} + (net_effect % {b + 2})\n"
+                f"            moat_val = moat_val + nodes + {b}\n"
+                f"    return moat_val + nodes"
+            )
+            d1_t = f"We ignore Metcalfe network effects (net_effect = 0) across all competitive rounds."
+            d1_a = (
+                f"def solve(rounds):\n"
+                f"    return {a * 2 + n0} + rounds * ({b} + {c})"
+            )
+            d2_t = f"We assume the incumbent retaliates immediately at r = 1 with zero cannibalization hesitation."
+            d2_a = (
+                f"def solve(rounds):\n"
+                f"    nodes = {n0}\n"
+                f"    moat_val = {a * 2}\n"
+                f"    for r in range(1, rounds + 1):\n"
+                f"        nodes = nodes + {c}\n"
+                f"        moat_val = moat_val + nodes\n"
+                f"    return moat_val + nodes"
+            )
+            hack_a = "def solve(rounds):\n    return 0"
+            default_scaffold = "analogy -> deduction -> decision -> evaluation -> metacognition"
+
+        else:
+            # 79: Grandmaster 360-Degree Founder & CEO Venture Simulation (Coupled Macro + Emotion + UX + BATNA + Capital)
+            p_mod = 701 + 2 * (idx % 29)
+            cap_init = (a * 7 + b * 3) % p_mod
+            trust_init = (a + c) % p_mod
+            ux_init = (b + c) % p_mod
+
+            def _founder_360_ref(quarters: int) -> int:
+                cap = cap_init
+                trust = trust_init
+                ux = ux_init
+                if quarters <= 0:
+                    return (cap + trust * b + ux * c) % p_mod
+                for q_i in range(1, quarters + 1):
+                    macro = (q_i + t_val) % 3
+                    ux = (ux + (q_i % 2) * c + 2) % p_mod
+                    if macro == 0:
+                        # Expansion: viral UX + brand trust drive high-margin growth
+                        trust = (trust + ux // 2 + c) % p_mod
+                        cap = (cap + trust * 2 + ux * b) % p_mod
+                    elif macro == 1:
+                        # Rate Hike: enterprise buyers demand high UX & fair BATNA pricing
+                        trust = (trust + c) % p_mod
+                        cap = (cap + trust + ux * c) % p_mod
+                    else:
+                        # Stagflation shock: loss-aversion test; strong trust & UX preserve pricing power
+                        trust = max(1, (trust + ux - b) % p_mod)
+                        cap = (cap + trust + (ux * a) // 2) % p_mod
+                return (cap + trust * b + ux * c) % p_mod
+
+            ans_L = _founder_360_ref(hops)
+            ans_2 = _founder_360_ref(2)
+            ans_1 = _founder_360_ref(1)
+            ans_0 = _founder_360_ref(0)
+            task_id = f"biz_grandmaster_founder360_t{t_val}_L{hops}_{p_mod}_{idx}"
+            prompt_q = (
+                f"#U$# [Grandmaster 360° Founder & Venture RL | ★{stars:.2f} | Coupled (Capital, Emotional Trust, UX, Macro) | Horizon L={hops} Quarters] "
+                f"Simulate a coupled non-linear venture dynamical system modulo `{p_mod}` starting from `cap = {cap_init}`, emotional brand `trust = {trust_init}`, and product usability `ux = {ux_init}` (`if quarters <= 0: return (cap + trust * {b} + ux * {c}) % {p_mod}`):\n"
+                f"For each quarter `q = 1 .. quarters`, let `macro = (q + {t_val}) % 3` and update `ux = (ux + (q % 2) * {c} + 2) % {p_mod}`:\n"
+                f"- `macro == 0` (Expansion): `trust = (trust + ux // 2 + {c}) % {p_mod}`; `cap = (cap + trust * 2 + ux * {b}) % {p_mod}`\n"
+                f"- `macro == 1` (Rate Tightening): `trust = (trust + {c}) % {p_mod}`; `cap = (cap + trust + ux * {c}) % {p_mod}`\n"
+                f"- `macro == 2` (Stagflation Shock): `trust = max(1, (trust + ux - {b}) % {p_mod})`; `cap = (cap + trust + (ux * {a}) // 2) % {p_mod}`.\n"
+                f"Return enterprise valuation digest `(cap + trust * {b} + ux * {c}) % {p_mod}`.\n"
+                f"#Q$# [code] Trace the coupled Macro-Emotion-UX-Capital state machine in `#T$#` and implement `def solve(quarters):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Stage 1 initializes coupled venture state (cap={cap_init}, trust={trust_init}, ux={ux_init}) modulo {p_mod} (solve(0) = {ans_0}). "
+                f"Evolving UX usability, emotional brand trust, and capital across macro regimes yields solve(1) = {ans_1}, solve(2) = {ans_2}, and solve({hops}) = {ans_L}."
+            )
+            gold_a = (
+                f"def solve(quarters):\n"
+                f"    cap = {cap_init}\n"
+                f"    trust = {trust_init}\n"
+                f"    ux = {ux_init}\n"
+                f"    if quarters <= 0:\n"
+                f"        return (cap + trust * {b} + ux * {c}) % {p_mod}\n"
+                f"    for q in range(1, quarters + 1):\n"
+                f"        macro = (q + {t_val}) % 3\n"
+                f"        ux = (ux + (q % 2) * {c} + 2) % {p_mod}\n"
+                f"        if macro == 0:\n"
+                f"            trust = (trust + ux // 2 + {c}) % {p_mod}\n"
+                f"            cap = (cap + trust * 2 + ux * {b}) % {p_mod}\n"
+                f"        elif macro == 1:\n"
+                f"            trust = (trust + {c}) % {p_mod}\n"
+                f"            cap = (cap + trust + ux * {c}) % {p_mod}\n"
+                f"        else:\n"
+                f"            trust = max(1, (trust + ux - {b}) % {p_mod})\n"
+                f"            cap = (cap + trust + (ux * {a}) // 2) % {p_mod}\n"
+                f"    return (cap + trust * {b} + ux * {c}) % {p_mod}"
+            )
+            d1_t = f"We decouple emotional trust and UX usability from capital and return only cap % {p_mod}."
+            d1_a = (
+                f"def solve(quarters):\n"
+                f"    return ({cap_init} + quarters * {b}) % {p_mod}"
+            )
+            d2_t = f"We freeze UX usability and emotional brand trust at their initial values across all macro regimes."
+            d2_a = (
+                f"def solve(quarters):\n"
+                f"    cap = {cap_init}\n"
+                f"    for q in range(1, quarters + 1):\n"
+                f"        cap = (cap + {trust_init} + {ux_init}) % {p_mod}\n"
+                f"    return cap"
+            )
+            hack_a = "def solve(quarters):\n    return 0"
+            default_scaffold = "analogy -> abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        base_cands = (
+            f"#T$# {gold_t}\n#A$# {gold_a}",
+            f"#T$# {d1_t}\n#A$# {d1_a}",
+            f"#T$# {d2_t}\n#A$# {d2_a}",
+            f"#T$# Default fallback.\n#A$# {hack_a}",
+        )
+        base_scores = (1.0, 0.25, 0.15, 0.0)
+        order = [0, 1, 2, 3]
+        shift = idx % 4
+        order[0], order[shift] = order[shift], order[0]
+        p_cands = tuple(base_cands[i] for i in order)
+        p_scores = tuple(base_scores[i] for i in order)
+        g_idx = order.index(0)
+        self._last_task_kinds[task_id] = kind_slot
+        cached_s = self.scaffold_cache.get(task_id, default=default_scaffold)
+        return OrnithTask(
+            task_id=task_id,
+            domain=domain_name,
+            prompt_q=prompt_q,
+            harness_h=harness_h,
+            scaffold_s=cached_s,
+            candidate_rollouts=p_cands,
+            harness_scores=p_scores,
+            gold_index=g_idx,
+            gold_thought=gold_t,
+            gold_answer=gold_a,
+            skill=skill_name,
+            star_difficulty=stars,
+            recursion_depth=rec_depth,
+            difficulty_mods=mods,
+        )
+
+    def _synthesize_math_science_cs_ee_eth_task(
+        self, idx: int, *, tier: int = 1, mode: int = 0
+    ) -> OrnithTask:
+        r"""Synthesize an infinitely scaling Frontier Math, Physical/Bio Sciences, Computer Science, Electrical Engineering & Exponential Time Hypothesis (ETH/SETH) RLVR task (families 80..87).
+
+        Modes:
+          0 (80): Exponential Time Hypothesis (ETH), Strong ETH (SETH), Impagliazzo-Paturi-Zane (IPZ) Sparsification Lemma & Fine-Grained Reductions
+          1 (81): Frontier Pure & Applied Math — Analytic Number Theory, Dirichlet Twists & Chebyshev Spectral Operator Recurrences
+          2 (82): Frontier Physics — Open Quantum System Lindblad Master Equation, Rabi Coherence & Non-Equilibrium Statistical Mechanics
+          3 (83): Frontier Chemistry & Systems Biology — Allosteric Hill Cooperativity, Michaelis-Menten Enzyme Cascades & Negative-Feedback Homeostasis
+          4 (84): Electrical Engineering (DSP & RF Control) — Direct-Form II IIR Biquad Filtering, Reactive Impedance & Anti-Windup Phase-Locked Loop (PLL)
+          5 (85): Electrical Engineering (CMOS VLSI) — Elmore RC Interconnect Delay Trees, Miller Capacitive Crosstalk & Repeater Timing Closure
+          6 (86): Computer Science (Distributed Systems & Architecture) — Raft/Paxos Quorum Consensus, Split-Vote Term Elections & Linearizable Log Commit
+          7 (87): Grandmaster STEM Synthesis — Coupled ETH Sparsification + Spectral Math + Quantum Lindblad + VLSI Elmore RC + Raft Consensus
+        """
+        t_val = max(1, int(tier))
+        m = int(mode) % 8
+        kind_slot = 80 + m
+        skill_name, domain_name = self.env_architect.skill_and_domain(kind_slot)
+        rec_depth = 3 + (t_val - 1)
+        hops = min(64, rec_depth)
+        if t_val <= 1:
+            mods: tuple[str, ...] = ("FL", "HD")
+        elif t_val <= 3:
+            mods = ("FL", "HD", "HR")
+        else:
+            mods = ("INF", "FL", "DT", "HD", "HR")
+        stars = compute_star_difficulty(t_val, recursion_depth=rec_depth, mods=mods)
+
+        a = 5 + ((idx * 7 + self._rng_seed + t_val * 3) % (12 + 3 * t_val))
+        b = 3 + ((idx * 11 + self._rng_seed + t_val * 5) % (9 + 2 * t_val))
+        c = 2 + ((idx * 5 + t_val) % (7 + t_val))
+        vars_n = 16 + 8 * t_val + 2 * rec_depth
+
+        if m == 0:
+            # 80: Exponential Time Hypothesis (ETH / SETH) & Impagliazzo-Paturi-Zane (IPZ) Sparsification Lemma
+            m0 = a * b + c
+
+            def _eth_ipz_ref(steps: int) -> int:
+                clauses = m0
+                exp_work = a
+                if steps <= 0:
+                    return clauses + exp_work
+                for s_i in range(1, steps + 1):
+                    if clauses % 2 == 0:
+                        # High-degree core variable branching in IPZ Sparsification tree
+                        clauses = (clauses // 2) + s_i * b
+                        exp_work = exp_work + (clauses // a) + c
+                    else:
+                        # Bounded-degree SETH fine-grained kernelization step
+                        clauses = clauses + b + (s_i % c)
+                        exp_work = exp_work + (clauses // b) + 1
+                return clauses + exp_work
+
+            ans_L = _eth_ipz_ref(hops)
+            ans_2 = _eth_ipz_ref(2)
+            ans_1 = _eth_ipz_ref(1)
+            ans_0 = _eth_ipz_ref(0)
+            task_id = f"eth_ipz_seth_t{t_val}_L{hops}_{m0}_{a}_{idx}"
+            prompt_q = (
+                f"#U$# [Complexity Theory RL: Exponential Time Hypothesis (ETH/SETH) & IPZ Sparsification Lemma | ★{stars:.2f} | Vars n={vars_n} | Depth L={hops}] "
+                f"Trace an Impagliazzo-Paturi-Zane (IPZ) k-CNF Sparsification and fine-grained SETH reduction starting from `clauses = {m0}` and sub-exponential branching work exponent `exp_work = {a}` (`if steps <= 0: return clauses + exp_work`):\n"
+                f"For each sparsification step `s = 1 .. steps`:\n"
+                f"- High-degree petal branching (`clauses % 2 == 0`): `clauses = (clauses // 2) + s * {b}`, then update `exp_work = exp_work + (clauses // {a}) + {c}`\n"
+                f"- Sparse SETH kernelization (`clauses % 2 == 1`): `clauses = clauses + {b} + (s % {c})`, then update `exp_work = exp_work + (clauses // {b}) + 1`.\n"
+                f"Return fine-grained ETH complexity invariant `clauses + exp_work`.\n"
+                f"#Q$# [code] Derive the IPZ Sparsification and ETH/SETH branching trace in `#T$#` and implement `def solve(steps):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Stage 1 initializes k-CNF clause density clauses = {m0} and ETH exponent work = {a} (solve(0) = {ans_0}). "
+                f"Applying IPZ high-degree petal branching on even parity and SETH kernelization on odd parity yields solve(1) = {ans_1}, solve(2) = {ans_2}, and solve({hops}) = {ans_L}."
+            )
+            gold_a = (
+                f"def solve(steps):\n"
+                f"    clauses = {m0}\n"
+                f"    exp_work = {a}\n"
+                f"    if steps <= 0:\n"
+                f"        return clauses + exp_work\n"
+                f"    for s in range(1, steps + 1):\n"
+                f"        if clauses % 2 == 0:\n"
+                f"            clauses = (clauses // 2) + s * {b}\n"
+                f"            exp_work = exp_work + (clauses // {a}) + {c}\n"
+                f"        else:\n"
+                f"            clauses = clauses + {b} + (s % {c})\n"
+                f"            exp_work = exp_work + (clauses // {b}) + 1\n"
+                f"    return clauses + exp_work"
+            )
+            d1_t = f"We falsely assume P=NP polynomial collapse and omit the IPZ branching updates to clauses."
+            d1_a = (
+                f"def solve(steps):\n"
+                f"    return {m0 + a} + steps * {c}"
+            )
+            d2_t = f"We swap the even-parity IPZ sparsification branch and odd-parity SETH kernelization branch."
+            d2_a = (
+                f"def solve(steps):\n"
+                f"    clauses = {m0}\n"
+                f"    exp_work = {a}\n"
+                f"    for s in range(1, steps + 1):\n"
+                f"        clauses = clauses + {b} if clauses % 2 == 0 else clauses // 2\n"
+                f"        exp_work = exp_work + {c}\n"
+                f"    return clauses + exp_work"
+            )
+            hack_a = "def solve(steps):\n    return 0"
+            default_scaffold = "abstraction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m == 1:
+            # 81: Frontier Pure & Applied Math — Analytic Number Theory, Dirichlet Twists & Chebyshev Spectral Recurrences
+            p_mod = 809 + 2 * (idx % 23)
+            t1_init = a % p_mod
+
+            def _spectral_math_ref(n: int) -> int:
+                if n <= 0:
+                    return 2
+                if n == 1:
+                    return t1_init
+                t0, t1 = 2, t1_init
+                for k_i in range(2, n + 1):
+                    twist = k_i * b + (c if k_i % 2 == 0 else 1)
+                    t0, t1 = t1, (2 * a * t1 - t0 + twist) % p_mod
+                return t1
+
+            ans_L = _spectral_math_ref(hops)
+            ans_2 = _spectral_math_ref(2)
+            ans_1 = _spectral_math_ref(1)
+            ans_0 = _spectral_math_ref(0)
+            task_id = f"math_spectral_chebyshev_t{t_val}_L{hops}_{a}_{p_mod}_{idx}"
+            prompt_q = (
+                f"#U$# [Frontier Pure & Applied Math RL: Spectral Chebyshev-Frobenius Trace & Dirichlet Twist | ★{stars:.2f} | Ring Z/{p_mod}Z | Order L={hops}] "
+                f"Evaluate the Dirichlet-twisted Chebyshev spectral operator recurrence modulo `{p_mod}` with base states `T(0) = 2`, `T(1) = {t1_init}`:\n"
+                f"For `k = 2 .. n`, let `twist = k * {b} + ({c} if k % 2 == 0 else 1)` and evolve:\n"
+                f"`T(k) = (2 * {a} * T(k - 1) - T(k - 2) + twist) % {p_mod}`.\n"
+                f"#Q$# [code] Derive the spectral operator recurrence in `#T$#` and implement `def solve(n):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Stage 1 sets Chebyshev base traces T(0) = 2 and T(1) = {t1_init} modulo {p_mod}. "
+                f"Iterating T(k) = (2 * {a} * T(k-1) - T(k-2) + twist) % {p_mod} yields solve(2) = {ans_2} and solve({hops}) = {ans_L}."
+            )
+            gold_a = (
+                f"def solve(n):\n"
+                f"    if n <= 0:\n"
+                f"        return 2\n"
+                f"    if n == 1:\n"
+                f"        return {t1_init}\n"
+                f"    t0, t1 = 2, {t1_init}\n"
+                f"    for k in range(2, n + 1):\n"
+                f"        twist = k * {b} + ({c} if k % 2 == 0 else 1)\n"
+                f"        t0, t1 = t1, (2 * {a} * t1 - t0 + twist) % {p_mod}\n"
+                f"    return t1"
+            )
+            d1_t = f"We add T(k-2) instead of subtracting T(k-2) in the Chebyshev spectral operator recurrence."
+            d1_a = (
+                f"def solve(n):\n"
+                f"    if n <= 0:\n"
+                f"        return 2\n"
+                f"    t0, t1 = 2, {t1_init}\n"
+                f"    for k in range(2, n + 1):\n"
+                f"        t0, t1 = t1, (2 * {a} * t1 + t0 + k * {b}) % {p_mod}\n"
+                f"    return t1"
+            )
+            d2_t = f"We omit the factor of 2 on the principal spectral eigenvalue {a}."
+            d2_a = (
+                f"def solve(n):\n"
+                f"    if n <= 0:\n"
+                f"        return 2\n"
+                f"    t0, t1 = 2, {t1_init}\n"
+                f"    for k in range(2, n + 1):\n"
+                f"        t0, t1 = t1, ({a} * t1 - t0) % {p_mod}\n"
+                f"    return t1"
+            )
+            hack_a = "def solve(n):\n    return 0"
+            default_scaffold = "abstraction -> deduction -> evaluation -> metacognition"
+
+        elif m == 2:
+            # 82: Frontier Physics — Quantum Lindblad Master Equation, Rabi Coherence & Non-Equilibrium StatMech
+            pop_0 = a * 4 + b
+            inv_thresh = a * 3
+
+            def _quantum_lindblad_ref(steps: int) -> int:
+                pop = pop_0
+                entropy = c
+                if steps <= 0:
+                    return pop * 2 + entropy
+                for t_i in range(1, steps + 1):
+                    rabi = (t_i * b) % (a + c) + 2
+                    if pop >= inv_thresh:
+                        decay = (pop // 3) + c
+                        pop = pop - decay + rabi
+                        entropy = entropy + decay
+                    else:
+                        pop = pop + rabi + b
+                        entropy = entropy + (rabi // 2) + 1
+                return pop * 2 + entropy
+
+            ans_L = _quantum_lindblad_ref(hops)
+            ans_2 = _quantum_lindblad_ref(2)
+            ans_1 = _quantum_lindblad_ref(1)
+            ans_0 = _quantum_lindblad_ref(0)
+            task_id = f"sci_quantum_lindblad_t{t_val}_L{hops}_{pop_0}_{inv_thresh}_{idx}"
+            prompt_q = (
+                f"#U$# [Frontier Physics RL: Open Quantum Lindblad Evolution & Non-Equilibrium StatMech | ★{stars:.2f} | Modes={vars_n} | Trotter Steps L={hops}] "
+                f"Simulate an open quantum system's excited-state population `pop = {pop_0}` and bath von Neumann entropy `entropy = {c}` (`if steps <= 0: return pop * 2 + entropy`) with population-inversion threshold `{inv_thresh}`:\n"
+                f"For each Trotter step `t = 1 .. steps`, coherent Rabi drive is `rabi = (t * {b}) % {a + c} + 2`:\n"
+                f"- Inverted regime (`pop >= {inv_thresh}`): Lindblad spontaneous/stimulated relaxation `decay = (pop // 3) + {c}` updates `pop = pop - decay + rabi` and `entropy = entropy + decay`\n"
+                f"- Sub-threshold optical pumping (`pop < {inv_thresh}`): `pop = pop + rabi + {b}` and `entropy = entropy + (rabi // 2) + 1`.\n"
+                f"Return total free-energy action `pop * 2 + entropy`.\n"
+                f"#Q$# [code] Trace the coherent Rabi drive and Lindblad bath dissipation in `#T$#` and implement `def solve(steps):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Stage 1 starts at pop = {pop_0}, entropy = {c}, inversion threshold = {inv_thresh} (solve(0) = {ans_0}). "
+                f"Evolving coherent Rabi drive and Lindblad bath relaxation across Trotter steps yields solve(1) = {ans_1}, solve(2) = {ans_2}, and solve({hops}) = {ans_L}."
+            )
+            gold_a = (
+                f"def solve(steps):\n"
+                f"    pop = {pop_0}\n"
+                f"    entropy = {c}\n"
+                f"    if steps <= 0:\n"
+                f"        return pop * 2 + entropy\n"
+                f"    for t in range(1, steps + 1):\n"
+                f"        rabi = (t * {b}) % {a + c} + 2\n"
+                f"        if pop >= {inv_thresh}:\n"
+                f"            decay = (pop // 3) + {c}\n"
+                f"            pop = pop - decay + rabi\n"
+                f"            entropy = entropy + decay\n"
+                f"        else:\n"
+                f"            pop = pop + rabi + {b}\n"
+                f"            entropy = entropy + (rabi // 2) + 1\n"
+                f"    return pop * 2 + entropy"
+            )
+            d1_t = f"We treat the quantum system as closed unitary evolution with zero Lindblad bath dissipation."
+            d1_a = (
+                f"def solve(steps):\n"
+                f"    return ({pop_0} + steps * {b}) * 2 + {c}"
+            )
+            d2_t = f"We return only pop without weighting by 2 or adding bath entropy."
+            d2_a = (
+                f"def solve(steps):\n"
+                f"    pop = {pop_0}\n"
+                f"    for t in range(1, steps + 1):\n"
+                f"        pop = pop - (pop // 3) + {b}\n"
+                f"    return pop"
+            )
+            hack_a = "def solve(steps):\n    return 0"
+            default_scaffold = "abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m == 3:
+            # 83: Frontier Chemistry & Systems Biology — Allosteric Hill Cooperativity & Michaelis-Menten Enzyme Cascade
+            sub_0 = a * 6 + b * 2
+            inh_thresh = a * 2
+
+            def _biochem_cascade_ref(stages: int) -> int:
+                sub = sub_0
+                prod = b
+                if stages <= 0:
+                    return sub + prod * 2
+                for s_i in range(1, stages + 1):
+                    if prod >= inh_thresh:
+                        flux = max(1, (sub // 5) + c)
+                        prod = prod - (prod // 3) + flux
+                    else:
+                        flux = (sub // 3) + b + (s_i % c)
+                        prod = prod + flux
+                    sub = max(a, sub - flux + b * 2)
+                return sub + prod * 2
+
+            ans_L = _biochem_cascade_ref(hops)
+            ans_2 = _biochem_cascade_ref(2)
+            ans_1 = _biochem_cascade_ref(1)
+            ans_0 = _biochem_cascade_ref(0)
+            task_id = f"sci_biochem_allosteric_t{t_val}_L{hops}_{sub_0}_{inh_thresh}_{idx}"
+            prompt_q = (
+                f"#U$# [Frontier Chemistry & Systems Biology RL: Allosteric Hill Enzyme Cascade | ★{stars:.2f} | Enzymes={vars_n // 2} | Cascade L={hops}] "
+                f"Model a cooperative Michaelis-Menten enzymatic pathway with negative-feedback allosteric inhibition (`sub = {sub_0}`, `prod = {b}`, inhibition threshold `{inh_thresh}`, `if stages <= 0: return sub + prod * 2`):\n"
+                f"For each cascade stage `s = 1 .. stages`:\n"
+                f"- Allosteric feedback inhibition (`prod >= {inh_thresh}`): `flux = max(1, (sub // 5) + {c})` and `prod = prod - (prod // 3) + flux`\n"
+                f"- Cooperative Hill activation (`prod < {inh_thresh}`): `flux = (sub // 3) + {b} + (s % {c})` and `prod = prod + flux`\n"
+                f"- Mass-action substrate replenishment: `sub = max({a}, sub - flux + {b * 2})`.\n"
+                f"Return stoichiometric invariant `sub + prod * 2`.\n"
+                f"#Q$# [code] Trace the allosteric feedback loop and substrate mass balance in `#T$#` and implement `def solve(stages):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Stage 1 starts with substrate sub = {sub_0} and allosteric product prod = {b} (solve(0) = {ans_0}). "
+                f"Simulating Hill activation below {inh_thresh} and allosteric inhibition at or above {inh_thresh} yields solve(1) = {ans_1}, solve(2) = {ans_2}, and solve({hops}) = {ans_L}."
+            )
+            gold_a = (
+                f"def solve(stages):\n"
+                f"    sub = {sub_0}\n"
+                f"    prod = {b}\n"
+                f"    if stages <= 0:\n"
+                f"        return sub + prod * 2\n"
+                f"    for s in range(1, stages + 1):\n"
+                f"        if prod >= {inh_thresh}:\n"
+                f"            flux = max(1, (sub // 5) + {c})\n"
+                f"            prod = prod - (prod // 3) + flux\n"
+                f"        else:\n"
+                f"            flux = (sub // 3) + {b} + (s % {c})\n"
+                f"            prod = prod + flux\n"
+                f"        sub = max({a}, sub - flux + {b * 2})\n"
+                f"    return sub + prod * 2"
+            )
+            d1_t = f"We ignore allosteric negative-feedback inhibition when prod >= {inh_thresh}."
+            d1_a = (
+                f"def solve(stages):\n"
+                f"    sub = {sub_0}\n"
+                f"    prod = {b}\n"
+                f"    for s in range(1, stages + 1):\n"
+                f"        flux = (sub // 3) + {b}\n"
+                f"        prod = prod + flux\n"
+                f"        sub = max({a}, sub - flux + {b * 2})\n"
+                f"    return sub + prod * 2"
+            )
+            d2_t = f"We forget to replenish substrate sub by +{b * 2} after each enzymatic stage."
+            d2_a = (
+                f"def solve(stages):\n"
+                f"    return {sub_0} + stages * {b}"
+            )
+            hack_a = "def solve(stages):\n    return 0"
+            default_scaffold = "analogy -> abduction -> deduction -> evaluation -> metacognition"
+
+        elif m == 4:
+            # 84: Electrical Engineering (DSP & RF Control) — IIR Biquad Filter & Anti-Windup Phase-Locked Loop (PLL)
+            phi_0 = a * 3
+            v_sat = a * 5 + b * 2
+
+            def _ee_dsp_pll_ref(samples: int) -> int:
+                phi = phi_0
+                v_ctrl = b
+                if samples <= 0:
+                    return v_ctrl * 2 + phi
+                for k_i in range(1, samples + 1):
+                    x_k = (k_i * c) % (a + b) + 1
+                    raw_v = v_ctrl + b * x_k - (phi // 3)
+                    v_ctrl = min(v_sat, max(1, raw_v))
+                    phi = max(0, phi + x_k * a - (v_ctrl // 2))
+                return v_ctrl * 2 + phi
+
+            ans_L = _ee_dsp_pll_ref(hops)
+            ans_2 = _ee_dsp_pll_ref(2)
+            ans_1 = _ee_dsp_pll_ref(1)
+            ans_0 = _ee_dsp_pll_ref(0)
+            task_id = f"ee_dsp_pll_biquad_t{t_val}_L{hops}_{phi_0}_{v_sat}_{idx}"
+            prompt_q = (
+                f"#U$# [Electrical Engineering RL: DSP Biquad Loop Filter & Anti-Windup PLL Control | ★{stars:.2f} | Vsat={v_sat} | Samples L={hops}] "
+                f"Simulate a digital Phase-Locked Loop (PLL) and IIR loop filter starting at phase error `phi = {phi_0}`, VCO control voltage `v_ctrl = {b}`, and anti-windup saturation rail `v_sat = {v_sat}` (`if samples <= 0: return v_ctrl * 2 + phi`):\n"
+                f"For each sample clock `k = 1 .. samples`, reference excitation is `x_k = (k * {c}) % {a + b} + 1`:\n"
+                f"1. PI loop filter with phase-error feedback: `raw_v = v_ctrl + {b} * x_k - (phi // 3)`\n"
+                f"2. Anti-windup rail clamp: `v_ctrl = min({v_sat}, max(1, raw_v))`\n"
+                f"3. VCO phase error update: `phi = max(0, phi + x_k * {a} - (v_ctrl // 2))`.\n"
+                f"Return locked loop state `v_ctrl * 2 + phi`.\n"
+                f"#Q$# [code] Trace the DSP loop filter and VCO phase feedback in `#T$#` and implement `def solve(samples):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Stage 1 starts at phi = {phi_0}, v_ctrl = {b}, v_sat = {v_sat} (solve(0) = {ans_0}). "
+                f"Propagating the anti-windup PI loop filter and VCO phase accumulator across k = 1 ({ans_1}), k = 2 ({ans_2}), up to k = {hops} yields {ans_L}."
+            )
+            gold_a = (
+                f"def solve(samples):\n"
+                f"    phi = {phi_0}\n"
+                f"    v_ctrl = {b}\n"
+                f"    if samples <= 0:\n"
+                f"        return v_ctrl * 2 + phi\n"
+                f"    for k in range(1, samples + 1):\n"
+                f"        x_k = (k * {c}) % {a + b} + 1\n"
+                f"        raw_v = v_ctrl + {b} * x_k - (phi // 3)\n"
+                f"        v_ctrl = min({v_sat}, max(1, raw_v))\n"
+                f"        phi = max(0, phi + x_k * {a} - (v_ctrl // 2))\n"
+                f"    return v_ctrl * 2 + phi"
+            )
+            d1_t = f"We omit the anti-windup saturation rail clamp min({v_sat}, max(1, raw_v))."
+            d1_a = (
+                f"def solve(samples):\n"
+                f"    phi = {phi_0}\n"
+                f"    v_ctrl = {b}\n"
+                f"    for k in range(1, samples + 1):\n"
+                f"        x_k = (k * {c}) % {a + b} + 1\n"
+                f"        v_ctrl = v_ctrl + {b} * x_k\n"
+                f"        phi = phi + x_k * {a}\n"
+                f"    return v_ctrl * 2 + phi"
+            )
+            d2_t = f"We apply positive feedback +(phi // 3) instead of negative feedback -(phi // 3) in the PLL."
+            d2_a = (
+                f"def solve(samples):\n"
+                f"    return {b * 2 + phi_0} + samples * {a}"
+            )
+            hack_a = "def solve(samples):\n    return 0"
+            default_scaffold = "deduction -> decision -> evaluation -> metacognition"
+
+        elif m == 5:
+            # 85: Electrical Engineering (CMOS VLSI) — Elmore RC Delay Tree, Miller Crosstalk & Repeater Timing Closure
+            delay_0 = a * 4
+            slack_0 = a * 6 + b * 3
+            crit_slack = a * 2
+
+            def _ee_vlsi_elmore_ref(stages: int) -> int:
+                delay_ps = delay_0
+                slack = slack_0
+                if stages <= 0:
+                    return delay_ps + slack
+                for i_s in range(1, stages + 1):
+                    rc_load = i_s * b + c
+                    if slack < crit_slack:
+                        # Insert CMOS inverter repeater buffer to break quadratic Elmore RC wire delay
+                        stage_delay = (rc_load // 2) + c
+                        slack = slack + a - (stage_delay // 2)
+                    else:
+                        # Unbuffered wire segment with Miller capacitive crosstalk penalty
+                        stage_delay = rc_load + (i_s % 2) * c
+                        slack = max(1, slack - (stage_delay // 3))
+                    delay_ps = delay_ps + stage_delay
+                return delay_ps + slack
+
+            ans_L = _ee_vlsi_elmore_ref(hops)
+            ans_2 = _ee_vlsi_elmore_ref(2)
+            ans_1 = _ee_vlsi_elmore_ref(1)
+            ans_0 = _ee_vlsi_elmore_ref(0)
+            task_id = f"ee_vlsi_elmore_rc_t{t_val}_L{hops}_{delay_0}_{slack_0}_{idx}"
+            prompt_q = (
+                f"#U$# [Electrical Engineering CMOS VLSI RL: Elmore RC Interconnect Delay & Repeater Timing Closure | ★{stars:.2f} | Nets={vars_n} | Stages L={hops}] "
+                f"Perform CMOS static timing analysis and repeater buffer insertion starting from cumulative path delay `delay_ps = {delay_0}`, setup slack `slack = {slack_0}`, and critical slack threshold `{crit_slack}` (`if stages <= 0: return delay_ps + slack`):\n"
+                f"For each interconnect stage `i = 1 .. stages`, distributed Elmore RC load is `rc_load = i * {b} + {c}`:\n"
+                f"- Critical slack (`slack < {crit_slack}`): insert CMOS repeater buffer so `stage_delay = (rc_load // 2) + {c}` and `slack = slack + {a} - (stage_delay // 2)`\n"
+                f"- Non-critical slack (`slack >= {crit_slack}`): unbuffered segment with Miller 2Cc crosstalk `stage_delay = rc_load + (i % 2) * {c}` and `slack = max(1, slack - (stage_delay // 3))`.\n"
+                f"Update `delay_ps = delay_ps + stage_delay` each stage and return `delay_ps + slack`.\n"
+                f"#Q$# [code] Trace the Elmore RC delay and repeater slack recovery in `#T$#` and implement `def solve(stages):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Stage 1 initializes delay_ps = {delay_0} and setup slack = {slack_0} with critical repeater threshold {crit_slack} (solve(0) = {ans_0}). "
+                f"Inserting CMOS repeaters whenever slack < {crit_slack} yields solve(1) = {ans_1}, solve(2) = {ans_2}, and solve({hops}) = {ans_L}."
+            )
+            gold_a = (
+                f"def solve(stages):\n"
+                f"    delay_ps = {delay_0}\n"
+                f"    slack = {slack_0}\n"
+                f"    if stages <= 0:\n"
+                f"        return delay_ps + slack\n"
+                f"    for i in range(1, stages + 1):\n"
+                f"        rc_load = i * {b} + {c}\n"
+                f"        if slack < {crit_slack}:\n"
+                f"            stage_delay = (rc_load // 2) + {c}\n"
+                f"            slack = slack + {a} - (stage_delay // 2)\n"
+                f"        else:\n"
+                f"            stage_delay = rc_load + (i % 2) * {c}\n"
+                f"            slack = max(1, slack - (stage_delay // 3))\n"
+                f"        delay_ps = delay_ps + stage_delay\n"
+                f"    return delay_ps + slack"
+            )
+            d1_t = f"We never insert CMOS repeater buffers even when setup slack drops below {crit_slack}."
+            d1_a = (
+                f"def solve(stages):\n"
+                f"    delay_ps = {delay_0}\n"
+                f"    for i in range(1, stages + 1):\n"
+                f"        delay_ps += i * {b} + {c}\n"
+                f"    return delay_ps"
+            )
+            d2_t = f"We ignore Miller capacitive crosstalk (i % 2) * {c} on unbuffered interconnect segments."
+            d2_a = (
+                f"def solve(stages):\n"
+                f"    return {delay_0 + slack_0} + stages * {b}"
+            )
+            hack_a = "def solve(stages):\n    return 0"
+            default_scaffold = "abstraction -> deduction -> decision -> evaluation -> metacognition"
+
+        elif m == 6:
+            # 86: Computer Science (Distributed Systems) — Raft Quorum Consensus, Split-Vote Elections & Linearizable Commit
+            def _cs_raft_consensus_ref(epochs: int) -> int:
+                commit_idx = a
+                term = 1
+                inflight = b
+                if epochs <= 0:
+                    return commit_idx * 2 + term * a + inflight
+                for e_i in range(1, epochs + 1):
+                    if (e_i + idx) % 3 != 0:
+                        batch = (e_i % c) + b
+                        commit_idx = commit_idx + inflight + batch
+                        inflight = c
+                    else:
+                        term = term + 1
+                        inflight = (inflight // 2) + b
+                return commit_idx * 2 + term * a + inflight
+
+            ans_L = _cs_raft_consensus_ref(hops)
+            ans_2 = _cs_raft_consensus_ref(2)
+            ans_1 = _cs_raft_consensus_ref(1)
+            ans_0 = _cs_raft_consensus_ref(0)
+            task_id = f"cs_raft_quorum_t{t_val}_L{hops}_{a}_{b}_{c}_{idx}"
+            prompt_q = (
+                f"#U$# [Computer Science Distributed Systems RL: Raft Quorum Consensus & Linearizable State Machine | ★{stars:.2f} | Nodes={2 * t_val + 3} | Epochs L={hops}] "
+                f"Simulate a Raft consensus cluster (`commit_idx = {a}`, `term = 1`, uncommitted `inflight = {b}`, `if epochs <= 0: return commit_idx * 2 + term * {a} + inflight`):\n"
+                f"For each protocol epoch `e = 1 .. epochs`:\n"
+                f"- Quorum majority reached (`(e + {idx}) % 3 != 0`): commit `batch = (e % {c}) + {b}`, advancing `commit_idx = commit_idx + inflight + batch` and resetting `inflight = {c}`\n"
+                f"- Network partition / split-vote election (`(e + {idx}) % 3 == 0`): increment `term = term + 1` and truncate uncommitted tail `inflight = (inflight // 2) + {b}` while preserving linearizable `commit_idx`.\n"
+                f"Return cluster state digest `commit_idx * 2 + term * {a} + inflight`.\n"
+                f"#Q$# [code] Trace the Raft quorum commits and term elections in `#T$#` and implement `def solve(epochs):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Stage 1 starts at commit_idx = {a}, term = 1, inflight = {b} (solve(0) = {ans_0}). "
+                f"Advancing commit_idx on quorum epochs and incrementing term while truncating uncommitted inflight logs on partition epochs yields solve(1) = {ans_1}, solve(2) = {ans_2}, and solve({hops}) = {ans_L}."
+            )
+            gold_a = (
+                f"def solve(epochs):\n"
+                f"    commit_idx = {a}\n"
+                f"    term = 1\n"
+                f"    inflight = {b}\n"
+                f"    if epochs <= 0:\n"
+                f"        return commit_idx * 2 + term * {a} + inflight\n"
+                f"    for e in range(1, epochs + 1):\n"
+                f"        if (e + {idx}) % 3 != 0:\n"
+                f"            batch = (e % {c}) + {b}\n"
+                f"            commit_idx = commit_idx + inflight + batch\n"
+                f"            inflight = {c}\n"
+                f"        else:\n"
+                f"            term = term + 1\n"
+                f"            inflight = (inflight // 2) + {b}\n"
+                f"    return commit_idx * 2 + term * {a} + inflight"
+            )
+            d1_t = f"We violate Raft safety by committing inflight entries during network partitions."
+            d1_a = (
+                f"def solve(epochs):\n"
+                f"    return ({a} + epochs * {b}) * 2 + {a}"
+            )
+            d2_t = f"We forget to increment election term on split-vote partition epochs."
+            d2_a = (
+                f"def solve(epochs):\n"
+                f"    commit_idx = {a}\n"
+                f"    for e in range(1, epochs + 1):\n"
+                f"        commit_idx += {b}\n"
+                f"    return commit_idx * 2 + {a} + {b}"
+            )
+            hack_a = "def solve(epochs):\n    return 0"
+            default_scaffold = "deduction -> abduction -> decision -> evaluation -> metacognition"
+
+        else:
+            # 87: Grandmaster STEM Synthesis (ETH Sparsification + Spectral Math + Quantum Lindblad + VLSI Elmore RC + Raft Consensus)
+            p_mod = 883 + 2 * (idx % 27)
+            eth_0 = (a * b + c) % p_mod
+            q_pop_0 = (a * 3 + b) % p_mod
+            rc_slk_0 = (b * 4 + c) % p_mod
+
+            def _grandmaster_stem_ref(epochs: int) -> int:
+                eth = eth_0
+                q_pop = q_pop_0
+                rc_slk = rc_slk_0
+                if epochs <= 0:
+                    return (eth + q_pop * b + rc_slk * c) % p_mod
+                for s_i in range(1, epochs + 1):
+                    # 1. IPZ ETH Sparsification + Spectral Chebyshev step
+                    if eth % 2 == 0:
+                        eth = (eth // 2 + s_i * a + c) % p_mod
+                    else:
+                        eth = (eth * 2 + b + (s_i % c)) % p_mod
+                    # 2. Quantum Lindblad + Allosteric coupling
+                    q_pop = (q_pop + (eth // 3) + s_i * b) % p_mod
+                    # 3. CMOS VLSI Elmore RC + Raft quorum state update
+                    if (s_i + t_val) % 3 == 0:
+                        rc_slk = (rc_slk + a + (q_pop // 2)) % p_mod
+                    else:
+                        rc_slk = (rc_slk + c + (eth % b)) % p_mod
+                return (eth + q_pop * b + rc_slk * c) % p_mod
+
+            ans_L = _grandmaster_stem_ref(hops)
+            ans_2 = _grandmaster_stem_ref(2)
+            ans_1 = _grandmaster_stem_ref(1)
+            ans_0 = _grandmaster_stem_ref(0)
+            task_id = f"stem_grandmaster_eth_q_vlsi_t{t_val}_L{hops}_{p_mod}_{idx}"
+            prompt_q = (
+                f"#U$# [Grandmaster STEM RL: Coupled ETH Sparsification + Quantum Lindblad + CMOS VLSI + CS Consensus | ★{stars:.2f} | Mod={p_mod} | Horizon L={hops}] "
+                f"Evolve the coupled 3-state STEM tensor `(eth = {eth_0}, q_pop = {q_pop_0}, rc_slk = {rc_slk_0})` modulo `{p_mod}` (`if epochs <= 0: return (eth + q_pop * {b} + rc_slk * {c}) % {p_mod}`):\n"
+                f"For each epoch `s = 1 .. epochs`:\n"
+                f"1. IPZ ETH Sparsification: if `eth % 2 == 0`, `eth = (eth // 2 + s * {a} + {c}) % {p_mod}`; else `eth = (eth * 2 + {b} + (s % {c})) % {p_mod}`\n"
+                f"2. Quantum Lindblad coupling: `q_pop = (q_pop + (eth // 3) + s * {b}) % {p_mod}`\n"
+                f"3. VLSI Elmore RC & Quorum slack: if `(s + {t_val}) % 3 == 0`, `rc_slk = (rc_slk + {a} + (q_pop // 2)) % {p_mod}`; else `rc_slk = (rc_slk + {c} + (eth % {b})) % {p_mod}`.\n"
+                f"Return `(eth + q_pop * {b} + rc_slk * {c}) % {p_mod}`.\n"
+                f"#Q$# [code] Trace the coupled ETH-Quantum-VLSI-CS recurrence in `#T$#` and implement `def solve(epochs):` in `#A$#`."
+            )
+            harness_h = (
+                f"assert solve({hops}) == {ans_L} "
+                f"and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} "
+                f"and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Stage 1 initializes coupled STEM state (eth={eth_0}, q_pop={q_pop_0}, rc_slk={rc_slk_0}) modulo {p_mod} (solve(0) = {ans_0}). "
+                f"Propagating IPZ ETH sparsification, quantum Lindblad coupling, and VLSI Elmore RC slack yields solve(1) = {ans_1}, solve(2) = {ans_2}, and solve({hops}) = {ans_L}."
+            )
+            gold_a = (
+                f"def solve(epochs):\n"
+                f"    eth = {eth_0}\n"
+                f"    q_pop = {q_pop_0}\n"
+                f"    rc_slk = {rc_slk_0}\n"
+                f"    if epochs <= 0:\n"
+                f"        return (eth + q_pop * {b} + rc_slk * {c}) % {p_mod}\n"
+                f"    for s in range(1, epochs + 1):\n"
+                f"        if eth % 2 == 0:\n"
+                f"            eth = (eth // 2 + s * {a} + {c}) % {p_mod}\n"
+                f"        else:\n"
+                f"            eth = (eth * 2 + {b} + (s % {c})) % {p_mod}\n"
+                f"        q_pop = (q_pop + (eth // 3) + s * {b}) % {p_mod}\n"
+                f"        if (s + {t_val}) % 3 == 0:\n"
+                f"            rc_slk = (rc_slk + {a} + (q_pop // 2)) % {p_mod}\n"
+                f"        else:\n"
+                f"            rc_slk = (rc_slk + {c} + (eth % {b})) % {p_mod}\n"
+                f"    return (eth + q_pop * {b} + rc_slk * {c}) % {p_mod}"
+            )
+            d1_t = f"We evolve only eth without coupling into q_pop or rc_slk."
+            d1_a = (
+                f"def solve(epochs):\n"
+                f"    return ({eth_0} + epochs * {a}) % {p_mod}"
+            )
+            d2_t = f"We swap the even and odd parity branches of the IPZ ETH sparsification step."
+            d2_a = (
+                f"def solve(epochs):\n"
+                f"    eth = {eth_0}\n"
+                f"    for s in range(1, epochs + 1):\n"
+                f"        eth = (eth * 2 + {b}) % {p_mod} if eth % 2 == 0 else (eth // 2 + {c}) % {p_mod}\n"
+                f"    return eth"
+            )
+            hack_a = "def solve(epochs):\n    return 0"
+            default_scaffold = "analogy -> abduction -> deduction -> decision -> evaluation -> metacognition"
+
+        base_cands = (
+            f"#T$# {gold_t}\n#A$# {gold_a}",
+            f"#T$# {d1_t}\n#A$# {d1_a}",
+            f"#T$# {d2_t}\n#A$# {d2_a}",
+            f"#T$# Default fallback.\n#A$# {hack_a}",
+        )
+        base_scores = (1.0, 0.25, 0.15, 0.0)
+        order = [0, 1, 2, 3]
+        shift = idx % 4
+        order[0], order[shift] = order[shift], order[0]
+        p_cands = tuple(base_cands[i] for i in order)
+        p_scores = tuple(base_scores[i] for i in order)
+        g_idx = order.index(0)
+        self._last_task_kinds[task_id] = kind_slot
+        cached_s = self.scaffold_cache.get(task_id, default=default_scaffold)
+        return OrnithTask(
+            task_id=task_id,
+            domain=domain_name,
+            prompt_q=prompt_q,
+            harness_h=harness_h,
+            scaffold_s=cached_s,
+            candidate_rollouts=p_cands,
+            harness_scores=p_scores,
+            gold_index=g_idx,
+            gold_thought=gold_t,
+            gold_answer=gold_a,
+            skill=skill_name,
+            star_difficulty=stars,
+            recursion_depth=rec_depth,
+            difficulty_mods=mods,
+        )
+
+    def _synthesize_crypto_linguistics_cipher_puzzle_task(
+        self,
+        idx: int,
+        *,
+        tier: int = 1,
+        mode: int = 0,
+    ) -> OrnithTask:
+        """Synthesize an infinitely scaling Cryptography, Computational Linguistics, Unknown Language Decipherment
+        & Multi-Layer Cipher Puzzle RL/RSI task (Families 88..95):
+        - Mode 0 (`88`, `crypto.polyalphabetic_vigenere_autokey_kasiski`): Polyalphabetic Vigenere, Running-Key &
+          Autokey Cipher Cryptanalysis (Kasiski Index of Coincidence & Multi-Round Feedback Decryption).
+        - Mode 1 (`89`, `crypto.feistel_spn_differential_cryptanalysis`): Symmetric Block Ciphers — Balanced Feistel
+          Networks, S-Box Substitution-Permutation Networks (SPN) & Differential Cryptanalysis Inversion.
+        - Mode 2 (`90`, `crypto.public_key_rsa_elgamal_crt_lattice`): Public-Key Cryptography & Number-Theoretic
+          Trapdoors — RSA Euler Totient, Diffie-Hellman / ElGamal Shared Ratchet & CRT Key Reconstruction.
+        - Mode 3 (`91`, `linguistics.rosetta_bilingual_morpheme_decipherment`): Rosetta Comparative Decipherment &
+          Unknown Script Decoding — Bilingual Gloss Alignment, Agglutinative Morpheme Segmentation & Paradigm Induction.
+        - Mode 4 (`92`, `linguistics.phonological_sound_change_neogrammarian`): Historical & Computational Linguistics —
+          Neogrammarian Regular Sound-Change Laws (Grimm's / Verner's Law Cascades), Assimilation & Reconstruction.
+        - Mode 5 (`93`, `linguistics.formal_cfg_earley_cyk_transducer`): Formal Grammars, Chomsky Hierarchy & Syntactic
+          Typology — Context-Free / Mildly Context-Sensitive (SOV / Ergative) Parse-Tree & Compositional Semantics.
+        - Mode 6 (`94`, `puzzles.enigma_rotor_stepping_transposition_grid`): Multi-Layer Cipher Puzzles & Mechanical
+          Rotor Cryptanalysis — Stepping Enigma Rotor Cascades (Double-Stepping Turnover), Steckerbrett & Transposition.
+        - Mode 7 (`95`, `crypto.grandmaster_rosetta_enigma_zero_knowledge_synthesis`): Grandmaster Synthesis — Coupled
+          Rosetta Tablet Morpheme Decoding + Feistel/Enigma Rotor Unmasking + Schnorr/Fiat-Shamir ZK Proof Verification.
+        """
+        scale = max(1, int(tier))
+        L = 3 + (scale - 1)
+        mode_slot = int(mode) % 8
+        kind_slot = 88 + mode_slot
+        skill_name, domain_name = self.env_architect.skill_and_domain(kind_slot)
+        rec_depth = max(L, self.env_architect.recursion_depth(kind_slot))
+        mods = self.env_architect.difficulty_mods(kind_slot)
+        stars = compute_star_difficulty(scale, recursion_depth=rec_depth, mods=mods)
+
+        if mode_slot == 0:
+            # Mode 0 (88): Polyalphabetic Vigenere, Autokey & Kasiski IoC Feedback Cryptanalysis
+            alpha_w = 26
+            m0 = 2 + ((idx * 5 + self._rng_seed) % 10)
+            k0 = 2 + ((idx * 7 + scale) % 11)
+            k_step = 3 + ((idx * 3 + scale) % 7)
+            auto_wt = 3 + 2 * (scale % 5)
+            c_base = 11 + ((idx * 11 + self._rng_seed) % 23)
+            c_stride = 5 + ((idx * 13 + scale) % 9)
+            kasiski_period = 3 + (scale % 5)
+            alphabet_str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            sample_ct = "".join(
+                alphabet_str[(c_base + t * c_stride + k0) % alpha_w] for t in range(min(12, L + 5))
+            )
+
+            def _sim_m0(hops: int) -> int:
+                m = m0
+                acc = m0
+                for t in range(hops):
+                    k_t = (k0 + (t % kasiski_period) * k_step + auto_wt * m) % alpha_w
+                    c_t = (c_base + (t + 1) * c_stride) % alpha_w
+                    m = (c_t - k_t) % alpha_w
+                    acc = acc + m * (t + 2) + k_t
+                return acc
+
+            ans_L = _sim_m0(L)
+            ans_2 = _sim_m0(2)
+            ans_1 = _sim_m0(1)
+            ans_0 = _sim_m0(0)
+            task_id = f"crypto_autokey_t{scale}_L{L}_{idx}"
+            prompt_q = (
+                f"#U$# [Cryptography RL: Polyalphabetic Vigenere & Autokey Kasiski Cryptanalysis | Tier {scale} | Blocks L={L}] "
+                f"Intercepted polyalphabetic autokey ciphertext sample `{sample_ct}` over ring `Z_{alpha_w}` with Kasiski key period "
+                f"`P = {kasiski_period}`, initial plaintext seed `m = {m0}`, and digest accumulator `acc = {m0}`.\n"
+                f"For each block `t` in `0 .. hops - 1`:\n"
+                f"  1. Dynamic autokey shift: `k_t = ({k0} + (t % {kasiski_period}) * {k_step} + {auto_wt} * m) % {alpha_w}`\n"
+                f"  2. Ciphertext residue: `c_t = ({c_base} + (t + 1) * {c_stride}) % {alpha_w}`\n"
+                f"  3. Autokey plaintext recovery: `m = (c_t - k_t) % {alpha_w}`\n"
+                f"  4. Cryptanalytic digest update: `acc = acc + m * (t + 2) + k_t`\n"
+                f"#Q$# [polyalphabetic_cipher_rl] Implement `solve(hops)` in Python returning `acc` after `hops` decrypted blocks."
+            )
+            harness_h = (
+                f"assert solve({L}) == {ans_L} and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Track autokey feedback mod {alpha_w} with Kasiski period {kasiski_period}: "
+                f"solve(0)={ans_0}, solve(1)={ans_1}, solve(2)={ans_2}, solve({L})={ans_L}."
+            )
+            d1_t = "Omit autokey plaintext feedback term auto_wt * m (static Vigenere fallacy)."
+            d2_t = "Add k_t instead of subtracting k_t mod 26 during decryption."
+            gold_a = (
+                f"def solve(hops):\n"
+                f"    m = {m0}\n"
+                f"    acc = {m0}\n"
+                f"    for t in range(hops):\n"
+                f"        k_t = ({k0} + (t % {kasiski_period}) * {k_step} + {auto_wt} * m) % {alpha_w}\n"
+                f"        c_t = ({c_base} + (t + 1) * {c_stride}) % {alpha_w}\n"
+                f"        m = (c_t - k_t) % {alpha_w}\n"
+                f"        acc = acc + m * (t + 2) + k_t\n"
+                f"    return acc"
+            )
+            d1_a = (
+                f"def solve(hops):\n"
+                f"    m = {m0}\n"
+                f"    acc = {m0}\n"
+                f"    for t in range(hops):\n"
+                f"        k_t = ({k0} + (t % {kasiski_period}) * {k_step}) % {alpha_w}\n"
+                f"        c_t = ({c_base} + (t + 1) * {c_stride}) % {alpha_w}\n"
+                f"        m = (c_t - k_t) % {alpha_w}\n"
+                f"        acc = acc + m * (t + 2) + k_t\n"
+                f"    return acc"
+            )
+            d2_a = (
+                f"def solve(hops):\n"
+                f"    m = {m0}\n"
+                f"    acc = {m0}\n"
+                f"    for t in range(hops):\n"
+                f"        k_t = ({k0} + (t % {kasiski_period}) * {k_step} + {auto_wt} * m) % {alpha_w}\n"
+                f"        c_t = ({c_base} + (t + 1) * {c_stride}) % {alpha_w}\n"
+                f"        m = (c_t + k_t + 1) % {alpha_w}\n"
+                f"        acc = acc + m * (t + 2) + k_t\n"
+                f"    return acc"
+            )
+            hack_a = "def solve(hops):\n    return 0"
+            default_scaffold = (
+                "Autokey & Kasiski Cryptanalysis Checklist:\n"
+                "1. Compute period-indexed + plaintext-feedback shift k_t mod 26.\n"
+                "2. Recover m = (c_t - k_t) % 26 and accumulate m * (t + 1) + k_t."
+            )
+
+        elif mode_slot == 1:
+            # Mode 1 (89): Symmetric Block Ciphers — Balanced Feistel Network, S-Box SPN & Differential Trail
+            l0 = 17 + ((idx * 7 + self._rng_seed) % 97)
+            r0 = 29 + ((idx * 11 + scale * 5) % 113)
+            k_seed = 13 + ((idx * 5 + scale) % 61)
+            k_step = 7 + ((idx * 3 + scale) % 19)
+            s_mult = 3 + 2 * (scale % 4)
+            s_add = 5 + ((idx * 9 + scale) % 23)
+            diff_wt = 2 + (scale % 3)
+
+            def _sim_m1(hops: int) -> int:
+                left = l0
+                right = r0
+                diff_acc = 0
+                for t in range(hops):
+                    rk = (k_seed + (t + 1) * k_step) & 255
+                    f_out = (((right ^ rk) * s_mult + s_add) ^ ((right >> 2) + rk)) & 255
+                    left, right = right, (left ^ f_out) & 255
+                    diff_acc = diff_acc + ((left ^ right) * diff_wt)
+                return left * 256 + right + diff_acc
+
+            ans_L = _sim_m1(L)
+            ans_2 = _sim_m1(2)
+            ans_1 = _sim_m1(1)
+            ans_0 = _sim_m1(0)
+            task_id = f"crypto_feistel_t{scale}_L{L}_{idx}"
+            prompt_q = (
+                f"#U$# [Cryptography RL: Balanced Feistel Block Cipher & Differential Cryptanalysis | Tier {scale} | Rounds L={L}] "
+                f"A 16-bit Balanced Feistel + ARX S-Box cipher starts with 8-bit halves `left = {l0}`, `right = {r0}`, "
+                f"and differential trail accumulator `diff_acc = 0`.\n"
+                f"For each round `t` in `0 .. hops - 1`:\n"
+                f"  1. Round subkey: `rk = ({k_seed} + (t + 1) * {k_step}) & 255`\n"
+                f"  2. Non-linear ARX S-Box round function: `f_out = (((right ^ rk) * {s_mult} + {s_add}) ^ ((right >> 2) + rk)) & 255`\n"
+                f"  3. Feistel involution swap: `left, right = right, (left ^ f_out) & 255`\n"
+                f"  4. Differential characteristic accumulation: `diff_acc = diff_acc + ((left ^ right) * {diff_wt})`\n"
+                f"Return `left * 256 + right + diff_acc` after `hops` rounds.\n"
+                f"#Q$# [feistel_block_cipher_rl] Implement `solve(hops)` in Python."
+            )
+            harness_h = (
+                f"assert solve({L}) == {ans_L} and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Unroll {L}-round Feistel ARX involution with ^ bitwise XOR and & 255 mask: "
+                f"solve(0)={ans_0}, solve(1)={ans_1}, solve(2)={ans_2}, solve({L})={ans_L}."
+            )
+            d1_t = "Update left without swapping left and right across Feistel rounds."
+            d2_t = "Use addition instead of bitwise XOR ^ in the Feistel round update."
+            gold_a = (
+                f"def solve(hops):\n"
+                f"    left = {l0}\n"
+                f"    right = {r0}\n"
+                f"    diff_acc = 0\n"
+                f"    for t in range(hops):\n"
+                f"        rk = ({k_seed} + (t + 1) * {k_step}) & 255\n"
+                f"        f_out = (((right ^ rk) * {s_mult} + {s_add}) ^ ((right >> 2) + rk)) & 255\n"
+                f"        left, right = right, (left ^ f_out) & 255\n"
+                f"        diff_acc = diff_acc + ((left ^ right) * {diff_wt})\n"
+                f"    return left * 256 + right + diff_acc"
+            )
+            d1_a = (
+                f"def solve(hops):\n"
+                f"    left = {l0}\n"
+                f"    right = {r0}\n"
+                f"    diff_acc = 0\n"
+                f"    for t in range(hops):\n"
+                f"        rk = ({k_seed} + (t + 1) * {k_step}) & 255\n"
+                f"        f_out = (((right ^ rk) * {s_mult} + {s_add}) ^ ((right >> 2) + rk)) & 255\n"
+                f"        left = (left ^ f_out) & 255\n"
+                f"        diff_acc = diff_acc + ((left ^ right) * {diff_wt})\n"
+                f"    return left * 256 + right + diff_acc"
+            )
+            d2_a = (
+                f"def solve(hops):\n"
+                f"    left = {l0}\n"
+                f"    right = {r0}\n"
+                f"    diff_acc = 0\n"
+                f"    for t in range(hops):\n"
+                f"        rk = ({k_seed} + (t + 1) * {k_step}) & 255\n"
+                f"        f_out = (((right + rk) * {s_mult} + {s_add}) + ((right >> 2) + rk)) & 255\n"
+                f"        left, right = right, (left + f_out) & 255\n"
+                f"        diff_acc = diff_acc + ((left ^ right) * {diff_wt})\n"
+                f"    return left * 256 + right + diff_acc"
+            )
+            hack_a = "def solve(hops):\n    return 0"
+            default_scaffold = (
+                "Balanced Feistel & Differential Trail Checklist:\n"
+                "1. Compute 8-bit round subkey rk and ARX S-Box output f_out.\n"
+                "2. Swap halves (left, right = right, (left ^ f_out) & 255) and update diff_acc."
+            )
+
+        elif mode_slot == 2:
+            # Mode 2 (90): Public-Key Cryptography — RSA Euler Totient, Diffie-Hellman Ratchet & CRT Key Reconstruction
+            prime_pairs = ((11, 17), (13, 19), (17, 23), (19, 29), (23, 31))
+            p_prime, q_prime = prime_pairs[(idx + scale) % len(prime_pairs)]
+            n_mod = p_prime * q_prime
+            phi_n = (p_prime - 1) * (q_prime - 1)
+            # Choose e coprime to phi_n and compute exact modular inverse d_priv
+            e_pub = 7
+            while e_pub < phi_n:
+                a_g, b_g = e_pub, phi_n
+                while b_g:
+                    a_g, b_g = b_g, a_g % b_g
+                if a_g == 1:
+                    break
+                e_pub += 2
+            d_priv = pow(e_pub, -1, phi_n)
+            sh0 = 5 + ((idx * 7 + self._rng_seed) % (n_mod // 3))
+            g_dh = 3 + ((idx * 5 + scale) % 11)
+            c_base = 19 + ((idx * 13 + scale) % (n_mod // 2))
+            c_step = 7 + ((idx * 3 + scale) % 23)
+
+            def _sim_m2(hops: int) -> int:
+                sh = sh0
+                acc = sh0
+                for t in range(hops):
+                    sh = (sh * g_dh + p_prime) % n_mod
+                    ct = (c_base + (t + 1) * c_step) % n_mod
+                    dec = (ct * d_priv + sh) % n_mod
+                    crt_check = (dec % p_prime) * q_prime + (dec % q_prime)
+                    acc = acc + dec + crt_check
+                return acc
+
+            ans_L = _sim_m2(L)
+            ans_2 = _sim_m2(2)
+            ans_1 = _sim_m2(1)
+            ans_0 = _sim_m2(0)
+            wrong_d = (phi_n - d_priv) if d_priv != phi_n // 2 else d_priv + 1
+            task_id = f"crypto_pubkey_rsa_crt_t{scale}_L{L}_{idx}"
+            prompt_q = (
+                f"#U$# [Cryptography RL: RSA Trapdoor, Diffie-Hellman Ratchet & CRT Residue Synthesis | Tier {scale} | Epochs L={L}] "
+                f"Given RSA prime factors `p = {p_prime}`, `q = {q_prime}` (`N = p * q = {n_mod}`, Euler totient "
+                f"`phi(N) = (p - 1) * (q - 1) = {phi_n}`), public exponent `e = {e_pub}`, and private trapdoor inverse "
+                f"`d = e^-1 mod phi(N) = {d_priv}`. Initial ephemeral Diffie-Hellman ratchet state `sh = {sh0}` and `acc = {sh0}`.\n"
+                f"For each epoch `t` in `0 .. hops - 1`:\n"
+                f"  1. Ephemeral DH ratchet: `sh = (sh * {g_dh} + {p_prime}) % {n_mod}`\n"
+                f"  2. Ciphertext share: `ct = ({c_base} + (t + 1) * {c_step}) % {n_mod}`\n"
+                f"  3. Trapdoor unmasking: `dec = (ct * {d_priv} + sh) % {n_mod}`\n"
+                f"  4. CRT bi-modular projection: `crt_check = (dec % {p_prime}) * {q_prime} + (dec % {q_prime})`\n"
+                f"  5. Transcript update: `acc = acc + dec + crt_check`\n"
+                f"#Q$# [public_key_crypto_rl] Implement `solve(hops)` in Python returning `acc`."
+            )
+            harness_h = (
+                f"assert solve({L}) == {ans_L} and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Compute phi({n_mod}) = {phi_n}, inverse d = {d_priv} mod {phi_n}, and unroll DH+CRT ratchet: "
+                f"solve(0)={ans_0}, solve(1)={ans_1}, solve(2)={ans_2}, solve({L})={ans_L}."
+            )
+            d1_t = "Use negated modular inverse phi(N) - d instead of d mod phi(N)."
+            d2_t = "Omit the CRT bi-modular residue projection crt_check."
+            gold_a = (
+                f"def solve(hops):\n"
+                f"    sh = {sh0}\n"
+                f"    acc = {sh0}\n"
+                f"    for t in range(hops):\n"
+                f"        sh = (sh * {g_dh} + {p_prime}) % {n_mod}\n"
+                f"        ct = ({c_base} + (t + 1) * {c_step}) % {n_mod}\n"
+                f"        dec = (ct * {d_priv} + sh) % {n_mod}\n"
+                f"        crt_check = (dec % {p_prime}) * {q_prime} + (dec % {q_prime})\n"
+                f"        acc = acc + dec + crt_check\n"
+                f"    return acc"
+            )
+            d1_a = (
+                f"def solve(hops):\n"
+                f"    sh = {sh0}\n"
+                f"    acc = {sh0}\n"
+                f"    for t in range(hops):\n"
+                f"        sh = (sh * {g_dh} + {p_prime}) % {n_mod}\n"
+                f"        ct = ({c_base} + (t + 1) * {c_step}) % {n_mod}\n"
+                f"        dec = (ct * {wrong_d} + sh) % {n_mod}\n"
+                f"        crt_check = (dec % {p_prime}) * {q_prime} + (dec % {q_prime})\n"
+                f"        acc = acc + dec + crt_check\n"
+                f"    return acc"
+            )
+            d2_a = (
+                f"def solve(hops):\n"
+                f"    sh = {sh0}\n"
+                f"    acc = {sh0}\n"
+                f"    for t in range(hops):\n"
+                f"        sh = (sh * {g_dh} + {p_prime}) % {n_mod}\n"
+                f"        ct = ({c_base} + (t + 1) * {c_step}) % {n_mod}\n"
+                f"        dec = (ct * {d_priv} + sh) % {n_mod}\n"
+                f"        acc = acc + dec\n"
+                f"    return acc"
+            )
+            hack_a = "def solve(hops):\n    return 0"
+            default_scaffold = (
+                "Public-Key Trapdoor & CRT Checklist:\n"
+                "1. Advance ephemeral DH state sh mod N.\n"
+                "2. Apply private key d_priv and sum dec + crt_check across hops."
+            )
+
+        elif mode_slot == 3:
+            # Mode 3 (91): Rosetta Comparative Decipherment & Unknown Script Agglutinative Morpheme Decoding (IOL style)
+            root_base = 11 + ((idx * 5 + self._rng_seed) % 17)
+            root_step = 3 + ((idx * 3 + scale) % 7)
+            asp_perf = 3 + (scale % 3)
+            asp_imperf = 1 + (scale % 2)
+            erg_bonus = 9 + ((idx * 7 + scale) % 13)
+            abs_base = 2 + (idx % 5)
+            enclitic_w = 4 + (scale % 5)
+            s0 = 10 + (idx % 15)
+
+            def _sim_m3(hops: int) -> int:
+                sem = s0
+                for t in range(hops):
+                    r_val = root_base + (t % 3) * root_step
+                    asp_mult = asp_perf if (t % 2 == 0) else asp_imperf
+                    case_val = erg_bonus if (t % 3 == 0) else abs_base
+                    sem = sem + r_val * asp_mult + case_val + (t + 1) * enclitic_w
+                return sem
+
+            ans_L = _sim_m3(L)
+            ans_2 = _sim_m3(2)
+            ans_1 = _sim_m3(1)
+            ans_0 = _sim_m3(0)
+            task_id = f"ling_rosetta_morpheme_t{scale}_L{L}_{idx}"
+            prompt_q = (
+                f"#U$# [Linguistics & Decipherment RL: Rosetta Bilingual Tablet & Agglutinative Morpheme Paradigm | Tier {scale} | Clauses L={L}] "
+                f"A bilingual Rosetta inscription in an unknown agglutinative script (`PREFIX-ROOT-ASPECT-CASE-ENCLITIC`) "
+                f"has initial discourse register `sem = {s0}` and revealed the following morpheme alignment laws:\n"
+                f"  - Lexical root table (`t % 3`): `r_val = {root_base} + (t % 3) * {root_step}`\n"
+                f"  - Telic/Perfective aspect infix (`t % 2 == 0`): multiplier `asp_mult = {asp_perf}`, else imperfective `asp_mult = {asp_imperf}`\n"
+                f"  - Ergative-Absolutive case suffix (`t % 3 == 0` transitive agent): `case_val = {erg_bonus}`, else absolutive `case_val = {abs_base}`\n"
+                f"  - Discourse clitic chain weight at clause `t`: `(t + 1) * {enclitic_w}`\n"
+                f"For each tablet clause `t` in `0 .. hops - 1`, update:\n"
+                f"  `sem = sem + r_val * asp_mult + case_val + (t + 1) * {enclitic_w}`\n"
+                f"#Q$# [rosetta_decipherment_rl] Implement `solve(hops)` in Python returning the decoded semantic digest `sem`."
+            )
+            harness_h = (
+                f"assert solve({L}) == {ans_L} and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Segment agglutinative morphemes with t % 3 root/ergative alignment and t % 2 aspect reduplication: "
+                f"solve(0)={ans_0}, solve(1)={ans_1}, solve(2)={ans_2}, solve({L})={ans_L}."
+            )
+            d1_t = "Treat aspect infix asp_mult as additive (r_val + asp_mult) instead of multiplicative."
+            d2_t = "Collapse ergative-absolutive case alignment to absolutive abs_base on all clauses."
+            gold_a = (
+                f"def solve(hops):\n"
+                f"    sem = {s0}\n"
+                f"    for t in range(hops):\n"
+                f"        r_val = {root_base} + (t % 3) * {root_step}\n"
+                f"        asp_mult = {asp_perf} if (t % 2 == 0) else {asp_imperf}\n"
+                f"        case_val = {erg_bonus} if (t % 3 == 0) else {abs_base}\n"
+                f"        sem = sem + r_val * asp_mult + case_val + (t + 1) * {enclitic_w}\n"
+                f"    return sem"
+            )
+            d1_a = (
+                f"def solve(hops):\n"
+                f"    sem = {s0}\n"
+                f"    for t in range(hops):\n"
+                f"        r_val = {root_base} + (t % 3) * {root_step}\n"
+                f"        asp_mult = {asp_perf} if (t % 2 == 0) else {asp_imperf}\n"
+                f"        case_val = {erg_bonus} if (t % 3 == 0) else {abs_base}\n"
+                f"        sem = sem + r_val + asp_mult + case_val + (t + 1) * {enclitic_w}\n"
+                f"    return sem"
+            )
+            d2_a = (
+                f"def solve(hops):\n"
+                f"    sem = {s0}\n"
+                f"    for t in range(hops):\n"
+                f"        r_val = {root_base} + (t % 3) * {root_step}\n"
+                f"        asp_mult = {asp_perf} if (t % 2 == 0) else {asp_imperf}\n"
+                f"        sem = sem + r_val * asp_mult + {abs_base} + (t + 1) * {enclitic_w}\n"
+                f"    return sem"
+            )
+            hack_a = "def solve(hops):\n    return 0"
+            default_scaffold = (
+                "Rosetta Morpheme Decipherment Checklist:\n"
+                "1. Evaluate root r_val, aspect multiplier asp_mult, and ergative case_val.\n"
+                "2. Accumulate r_val * asp_mult + case_val + (t + 1) * enclitic_w."
+            )
+
+        elif mode_slot == 4:
+            # Mode 4 (92): Historical & Computational Linguistics — Neogrammarian Sound-Change Cascade (Grimm's & Verner's Laws)
+            v0 = 23 + ((idx * 7 + self._rng_seed) % 41)
+            assim_mult = 2 + (scale % 3)
+            grimm_shift = 7 + ((idx * 5 + scale) % 13)
+            verner_voice = 11 + ((idx * 3 + scale) % 17)
+            fortition_keep = 3 + (idx % 5)
+            phon_mod = 127 + 16 * (scale % 5)
+            drift_step = 4 + (scale % 6)
+
+            def _sim_m4(hops: int) -> int:
+                v = v0
+                for t in range(hops):
+                    verner = verner_voice if (t % 2 == 0) else fortition_keep
+                    v = ((v * assim_mult + grimm_shift + verner) % phon_mod) + (t + 1) * drift_step
+                return v
+
+            ans_L = _sim_m4(L)
+            ans_2 = _sim_m4(2)
+            ans_1 = _sim_m4(1)
+            ans_0 = _sim_m4(0)
+            task_id = f"ling_neogrammarian_sound_t{scale}_L{L}_{idx}"
+            prompt_q = (
+                f"#U$# [Computational & Historical Linguistics RL: Neogrammarian Sound-Change Cascade (Grimm's & Verner's Laws) | Tier {scale} | Epochs L={L}] "
+                f"Reconstruct the diachronic phonological evolution of a Proto-Language phoneme feature state starting at `v = {v0}`.\n"
+                f"In each chronological epoch `t` in `0 .. hops - 1`:\n"
+                f"  1. **Verner's Law Prosodic Conditioning**: if the pre-tonic stress parity `t % 2 == 0`, "
+                f"apply intervocalic voicing `verner = {verner_voice}`; else tonic fortition `verner = {fortition_keep}`.\n"
+                f"  2. **Grimm's Chain Shift & Regressive Assimilation**: "
+                f"`v = ((v * {assim_mult} + {grimm_shift} + verner) % {phon_mod}) + (t + 1) * {drift_step}`.\n"
+                f"#Q$# [historical_linguistics_rl] Implement `solve(hops)` in Python returning the reflex feature state `v` after `hops` epochs."
+            )
+            harness_h = (
+                f"assert solve({L}) == {ans_L} and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Apply Verner prosodic parity (v + t) % 2 and Grimm shift mod {phon_mod} in chronological feeding order: "
+                f"solve(0)={ans_0}, solve(1)={ans_1}, solve(2)={ans_2}, solve({L})={ans_L}."
+            )
+            d1_t = "Apply Verner voicing unconditionally without checking pre-tonic stress parity."
+            d2_t = "Apply diachronic drift before modulo reduction (bleeding order error)."
+            gold_a = (
+                f"def solve(hops):\n"
+                f"    v = {v0}\n"
+                f"    for t in range(hops):\n"
+                f"        verner = {verner_voice} if (t % 2 == 0) else {fortition_keep}\n"
+                f"        v = ((v * {assim_mult} + {grimm_shift} + verner) % {phon_mod}) + (t + 1) * {drift_step}\n"
+                f"    return v"
+            )
+            d1_a = (
+                f"def solve(hops):\n"
+                f"    v = {v0}\n"
+                f"    for t in range(hops):\n"
+                f"        v = ((v * {assim_mult} + {grimm_shift} + {verner_voice}) % {phon_mod}) + (t + 1) * {drift_step}\n"
+                f"    return v"
+            )
+            d2_a = (
+                f"def solve(hops):\n"
+                f"    v = {v0}\n"
+                f"    for t in range(hops):\n"
+                f"        verner = {verner_voice} if (t % 2 == 0) else {fortition_keep}\n"
+                f"        v = ((v * {assim_mult} + verner) % {phon_mod}) + (t + 1) * {drift_step}\n"
+                f"    return v"
+            )
+            hack_a = "def solve(hops):\n    return 0"
+            default_scaffold = (
+                "Neogrammarian Sound-Change Checklist:\n"
+                "1. Check prosodic stress condition (v + t) % 2 == 1 for Verner's Law.\n"
+                "2. Apply Grimm chain shift mod phon_mod then add diachronic drift."
+            )
+
+        elif mode_slot == 5:
+            # Mode 5 (93): Formal Grammars, Chomsky Hierarchy & CYK / Earley Syntactic Parse-Tree Compositional Semantics
+            lc0 = 7 + ((idx * 5 + self._rng_seed) % 19)
+            rc0 = 11 + ((idx * 9 + scale) % 23)
+            head_mult = 2 + (scale % 3)
+            adj_tag = 5 + ((idx * 3 + scale) % 11)
+            chart_mod = 151 + 12 * (scale % 5)
+            ambig_bonus = 9 + (scale % 7)
+            unambig_bonus = 2 + (idx % 4)
+
+            def _sim_m5(hops: int) -> int:
+                lc = lc0
+                rc = rc0
+                sem = lc0 + rc0
+                for t in range(hops):
+                    l_next = (lc * head_mult + rc + (t + 1) * adj_tag) % chart_mod
+                    split_b = ambig_bonus if ((l_next + t) % 2 == 0) else unambig_bonus
+                    r_next = lc + split_b
+                    lc, rc = l_next, r_next
+                    sem = sem + lc + rc
+                return sem
+
+            ans_L = _sim_m5(L)
+            ans_2 = _sim_m5(2)
+            ans_1 = _sim_m5(1)
+            ans_0 = _sim_m5(0)
+            task_id = f"ling_cfg_cyk_earley_t{scale}_L{L}_{idx}"
+            prompt_q = (
+                f"#U$# [Computational Linguistics RL: CYK / Earley Chart Parsing & Mildly Context-Sensitive TAG Semantics | Tier {scale} | Layers L={L}] "
+                f"Evaluate the compositional semantic chart of a mildly context-sensitive Tree-Adjoining Grammar (TAG) "
+                f"starting with left constituent `lc = {lc0}`, right head constituent `rc = {rc0}`, and `sem = {lc0 + rc0}`.\n"
+                f"For each derivation layer `t` in `0 .. hops - 1`:\n"
+                f"  1. Cross-serial TAG adjunction projection: `l_next = (lc * {head_mult} + rc + (t + 1) * {adj_tag}) % {chart_mod}`\n"
+                f"  2. Structural attachment ambiguity branch: `split_b = {ambig_bonus}` if `(l_next + t) % 2 == 0` else `{unambig_bonus}`\n"
+                f"  3. Right constituent shift: `r_next = lc + split_b`\n"
+                f"  4. Update `lc, rc = l_next, r_next` and `sem = sem + lc + rc`\n"
+                f"#Q$# [formal_grammar_parsing_rl] Implement `solve(hops)` in Python returning `sem`."
+            )
+            harness_h = (
+                f"assert solve({L}) == {ans_L} and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Propagate CYK/TAG chart constituents mod {chart_mod} with attachment ambiguity split_b: "
+                f"solve(0)={ans_0}, solve(1)={ans_1}, solve(2)={ans_2}, solve({L})={ans_L}."
+            )
+            d1_t = "Omit cross-serial TAG adjunction cost (t + 1) * adj_tag."
+            d2_t = "Overwrite lc before computing r_next = lc + split_b."
+            gold_a = (
+                f"def solve(hops):\n"
+                f"    lc = {lc0}\n"
+                f"    rc = {rc0}\n"
+                f"    sem = {lc0 + rc0}\n"
+                f"    for t in range(hops):\n"
+                f"        l_next = (lc * {head_mult} + rc + (t + 1) * {adj_tag}) % {chart_mod}\n"
+                f"        split_b = {ambig_bonus} if ((l_next + t) % 2 == 0) else {unambig_bonus}\n"
+                f"        r_next = lc + split_b\n"
+                f"        lc, rc = l_next, r_next\n"
+                f"        sem = sem + lc + rc\n"
+                f"    return sem"
+            )
+            d1_a = (
+                f"def solve(hops):\n"
+                f"    lc = {lc0}\n"
+                f"    rc = {rc0}\n"
+                f"    sem = {lc0 + rc0}\n"
+                f"    for t in range(hops):\n"
+                f"        l_next = (lc * {head_mult} + rc) % {chart_mod}\n"
+                f"        split_b = {ambig_bonus} if ((l_next + t) % 2 == 0) else {unambig_bonus}\n"
+                f"        r_next = lc + split_b\n"
+                f"        lc, rc = l_next, r_next\n"
+                f"        sem = sem + lc + rc\n"
+                f"    return sem"
+            )
+            d2_a = (
+                f"def solve(hops):\n"
+                f"    lc = {lc0}\n"
+                f"    rc = {rc0}\n"
+                f"    sem = {lc0 + rc0}\n"
+                f"    for t in range(hops):\n"
+                f"        lc = (lc * {head_mult} + rc + (t + 1) * {adj_tag}) % {chart_mod}\n"
+                f"        split_b = {ambig_bonus} if ((lc + t) % 2 == 0) else {unambig_bonus}\n"
+                f"        rc = lc + split_b\n"
+                f"        sem = sem + lc + rc\n"
+                f"    return sem"
+            )
+            hack_a = "def solve(hops):\n    return 0"
+            default_scaffold = (
+                "CYK / Earley & TAG Chart Parsing Checklist:\n"
+                "1. Compute l_next mod chart_mod with TAG adjunction.\n"
+                "2. Preserve old lc for r_next = lc + split_b before updating lc, rc."
+            )
+
+        elif mode_slot == 6:
+            # Mode 6 (94): Multi-Layer Cipher Puzzles & Mechanical Rotor Cryptanalysis — Enigma Double-Stepping + Steckerbrett + Grid
+            rf0 = (idx * 3 + self._rng_seed) % 26
+            rm0 = (idx * 7 + scale) % 26
+            rs0 = (idx * 11 + scale) % 26
+            # Set notch_fast to rf0 so double-stepping/turnover triggers early and reliably!
+            notch_fast = rf0
+            notch_mid = (rm0 + 1) % 26
+            w_fast = 2 + (scale % 4)
+            w_mid = 3 + (scale % 5)
+            w_slow = 5 + (scale % 3)
+            stecker = 4 + ((idx * 5 + scale) % 15)
+            ct0 = 13 + ((idx * 9 + scale) % 25)
+            col_stride = 7 + ((idx * 3 + scale) % 11)
+
+            def _sim_m6(hops: int) -> int:
+                rf, rm, rs = rf0, rm0, rs0
+                acc = rf0 + rm0 + rs0
+                for t in range(hops):
+                    if rm == notch_mid:
+                        rm = (rm + 1) % 26
+                        rs = (rs + 1) % 26
+                    elif rf == notch_fast:
+                        rm = (rm + 1) % 26
+                    rf = (rf + 1) % 26
+                    perm = (rf * w_fast + rm * w_mid + rs * w_slow + stecker) % 26
+                    dec_cell = (ct0 + (t + 1) * col_stride - perm) % 26
+                    acc = acc + dec_cell * (t + 1) + rm + rs
+                return acc
+
+            ans_L = _sim_m6(L)
+            ans_2 = _sim_m6(2)
+            ans_1 = _sim_m6(1)
+            ans_0 = _sim_m6(0)
+            task_id = f"puzzle_enigma_rotor_t{scale}_L{L}_{idx}"
+            prompt_q = (
+                f"#U$# [Cipher Puzzles & Rotor Cryptanalysis RL: Stepping Enigma Double-Turnover & Columnar Grid | Tier {scale} | Steps L={L}] "
+                f"A 3-rotor mechanical cipher puzzle starts at rotor positions `rf = {rf0}`, `rm = {rm0}`, `rs = {rs0}` (mod 26) "
+                f"with fast turnover notch `notch_fast = {notch_fast}`, middle double-stepping notch `notch_mid = {notch_mid}`, "
+                f"Steckerbrett involution offset `{stecker}`, and initial digest `acc = {rf0 + rm0 + rs0}`.\n"
+                f"Before encrypting/decrypting each character `t` in `0 .. hops - 1`:\n"
+                f"  1. **Enigma Double-Stepping Pawl**:\n"
+                f"     - If `rm == {notch_mid}`: advance both middle and slow rotors (`rm = (rm + 1) % 26`, `rs = (rs + 1) % 26`).\n"
+                f"     - Else if `rf == {notch_fast}`: advance middle rotor (`rm = (rm + 1) % 26`).\n"
+                f"     - Always advance fast rotor: `rf = (rf + 1) % 26`.\n"
+                f"  2. **Rotor + Steckerbrett Permutation**: `perm = (rf * {w_fast} + rm * {w_mid} + rs * {w_slow} + {stecker}) % 26`\n"
+                f"  3. **Columnar Grid Unmasking**: `dec_cell = ({ct0} + (t + 1) * {col_stride} - perm) % 26`\n"
+                f"  4. **Puzzle State Digest**: `acc = acc + dec_cell * (t + 1) + rm + rs`\n"
+                f"#Q$# [cipher_puzzle_enigma_rl] Implement `solve(hops)` in Python returning `acc`."
+            )
+            harness_h = (
+                f"assert solve({L}) == {ans_L} and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Simulate pre-character Enigma pawl double-stepping mod 26 and Steckerbrett grid unmasking: "
+                f"solve(0)={ans_0}, solve(1)={ans_1}, solve(2)={ans_2}, solve({L})={ans_L}."
+            )
+            d1_t = "Ignore fast/middle rotor notch turnovers (advance only rf)."
+            d2_t = "Step rotors after computing perm instead of before character encryption."
+            gold_a = (
+                f"def solve(hops):\n"
+                f"    rf, rm, rs = {rf0}, {rm0}, {rs0}\n"
+                f"    acc = {rf0 + rm0 + rs0}\n"
+                f"    for t in range(hops):\n"
+                f"        if rm == {notch_mid}:\n"
+                f"            rm = (rm + 1) % 26\n"
+                f"            rs = (rs + 1) % 26\n"
+                f"        elif rf == {notch_fast}:\n"
+                f"            rm = (rm + 1) % 26\n"
+                f"        rf = (rf + 1) % 26\n"
+                f"        perm = (rf * {w_fast} + rm * {w_mid} + rs * {w_slow} + {stecker}) % 26\n"
+                f"        dec_cell = ({ct0} + (t + 1) * {col_stride} - perm) % 26\n"
+                f"        acc = acc + dec_cell * (t + 1) + rm + rs\n"
+                f"    return acc"
+            )
+            d1_a = (
+                f"def solve(hops):\n"
+                f"    rf, rm, rs = {rf0}, {rm0}, {rs0}\n"
+                f"    acc = {rf0 + rm0 + rs0}\n"
+                f"    for t in range(hops):\n"
+                f"        rf = (rf + 1) % 26\n"
+                f"        perm = (rf * {w_fast} + rm * {w_mid} + rs * {w_slow} + {stecker}) % 26\n"
+                f"        dec_cell = ({ct0} + (t + 1) * {col_stride} - perm) % 26\n"
+                f"        acc = acc + dec_cell * (t + 1) + rm + rs\n"
+                f"    return acc"
+            )
+            d2_a = (
+                f"def solve(hops):\n"
+                f"    rf, rm, rs = {rf0}, {rm0}, {rs0}\n"
+                f"    acc = {rf0 + rm0 + rs0}\n"
+                f"    for t in range(hops):\n"
+                f"        perm = (rf * {w_fast} + rm * {w_mid} + rs * {w_slow} + {stecker}) % 26\n"
+                f"        dec_cell = ({ct0} + (t + 1) * {col_stride} - perm) % 26\n"
+                f"        acc = acc + dec_cell * (t + 1) + rm + rs\n"
+                f"        rf = (rf + 1) % 26\n"
+                f"    return acc"
+            )
+            hack_a = "def solve(hops):\n    return 0"
+            default_scaffold = (
+                "Enigma Rotor & Cipher Puzzle Checklist:\n"
+                "1. Execute pawl double-stepping (rm == notch_mid elif rf == notch_fast) and rf = (rf + 1) % 26 before perm.\n"
+                "2. Unmask dec_cell mod 26 and accumulate dec_cell * (t + 1) + rm + rs."
+            )
+
+        else:
+            # Mode 7 (95): Grandmaster Cryptography, Rosetta Decipherment & Fiat-Shamir Zero-Knowledge Synthesis
+            r0 = (idx * 5 + self._rng_seed) % 26
+            r_step = 2 + (scale % 4)
+            notch_r = (r0 + r_step) % 26
+            c_tab = 37 + ((idx * 11 + scale * 7) % 131)
+            c_delta = 13 + ((idx * 3 + scale) % 29)
+            k_feistel = 19 + ((idx * 7 + scale) % 67)
+            root_mult = 2 + (scale % 3)
+            erg_b = 11 + (scale % 7)
+            abs_b = 3 + (idx % 5)
+            fs_prime = 5 + 2 * (scale % 3)
+            zk_mod = 509 + 32 * (scale % 4)
+            commit_step = 6 + (scale % 5)
+            zk0 = 17 + (idx % 23)
+
+            def _sim_m7(hops: int) -> int:
+                rot = r0
+                zk = zk0
+                for t in range(hops):
+                    rot = (rot + r_step + (1 if rot == notch_r else 0)) % 26
+                    unmasked = ((c_tab + (t + 1) * c_delta) ^ (rot + k_feistel)) & 255
+                    morph = unmasked * root_mult + (erg_b if ((unmasked + t) % 2 == 0) else abs_b)
+                    zk = ((zk * fs_prime + morph + rot) % zk_mod) + (t + 1) * commit_step
+                return zk
+
+            ans_L = _sim_m7(L)
+            ans_2 = _sim_m7(2)
+            ans_1 = _sim_m7(1)
+            ans_0 = _sim_m7(0)
+            task_id = f"grandmaster_crypto_ling_zk_t{scale}_L{L}_{idx}"
+            prompt_q = (
+                f"#U$# [Grandmaster Cryptography, Rosetta Decipherment & Zero-Knowledge Synthesis RL | Tier {scale} | Hops L={L}] "
+                f"Synthesize a 3-layer Cryptographic + Linguistic Decipherment pipeline starting at rotor `rot = {r0}` "
+                f"and Fiat-Shamir Zero-Knowledge transcript state `zk = {zk0}`.\n"
+                f"For each epoch `t` in `0 .. hops - 1`:\n"
+                f"  1. **Enigma-Feistel Unmasking**:\n"
+                f"     - `rot = (rot + {r_step} + (1 if rot == {notch_r} else 0)) % 26`\n"
+                f"     - `unmasked = (({c_tab} + (t + 1) * {c_delta}) ^ (rot + {k_feistel})) & 255`\n"
+                f"  2. **Rosetta Morpheme & Ergative Parser**:\n"
+                f"     - `morph = unmasked * {root_mult} + ({erg_b} if ((unmasked + t) % 2 == 0) else {abs_b})`\n"
+                f"  3. **Schnorr / Fiat-Shamir Non-Interactive ZK Transcript**:\n"
+                f"     - `zk = ((zk * {fs_prime} + morph + rot) % {zk_mod}) + (t + 1) * {commit_step}`\n"
+                f"#Q$# [grandmaster_crypto_linguistics_rl] Implement `solve(hops)` in Python returning `zk`."
+            )
+            harness_h = (
+                f"assert solve({L}) == {ans_L} and solve(2) == {ans_2} "
+                f"and solve(1) == {ans_1} and solve(0) == {ans_0}"
+            )
+            gold_t = (
+                f"Couple Enigma-Feistel ^ XOR unmasking, Rosetta ergative morpheme parsing, and Fiat-Shamir ZK mod {zk_mod}: "
+                f"solve(0)={ans_0}, solve(1)={ans_1}, solve(2)={ans_2}, solve({L})={ans_L}."
+            )
+            d1_t = "Use addition instead of bitwise XOR ^ during Feistel tablet unmasking."
+            d2_t = "Omit Rosetta ergative parity branch and rotor anomaly turnover."
+            gold_a = (
+                f"def solve(hops):\n"
+                f"    rot = {r0}\n"
+                f"    zk = {zk0}\n"
+                f"    for t in range(hops):\n"
+                f"        rot = (rot + {r_step} + (1 if rot == {notch_r} else 0)) % 26\n"
+                f"        unmasked = (({c_tab} + (t + 1) * {c_delta}) ^ (rot + {k_feistel})) & 255\n"
+                f"        morph = unmasked * {root_mult} + ({erg_b} if ((unmasked + t) % 2 == 0) else {abs_b})\n"
+                f"        zk = ((zk * {fs_prime} + morph + rot) % {zk_mod}) + (t + 1) * {commit_step}\n"
+                f"    return zk"
+            )
+            d1_a = (
+                f"def solve(hops):\n"
+                f"    rot = {r0}\n"
+                f"    zk = {zk0}\n"
+                f"    for t in range(hops):\n"
+                f"        rot = (rot + {r_step} + (1 if rot == {notch_r} else 0)) % 26\n"
+                f"        unmasked = (rot + {k_feistel}) & 255\n"
+                f"        morph = unmasked * {root_mult} + ({erg_b} if ((unmasked + t) % 2 == 0) else {abs_b})\n"
+                f"        zk = ((zk * {fs_prime} + morph + rot) % {zk_mod}) + (t + 1) * {commit_step}\n"
+                f"    return zk"
+            )
+            d2_a = (
+                f"def solve(hops):\n"
+                f"    rot = {r0}\n"
+                f"    zk = {zk0}\n"
+                f"    for t in range(hops):\n"
+                f"        rot = (rot + {r_step}) % 26\n"
+                f"        unmasked = (({c_tab} + (t + 1) * {c_delta}) ^ (rot + {k_feistel})) & 255\n"
+                f"        morph = unmasked * {root_mult} + {abs_b}\n"
+                f"        zk = ((zk * {fs_prime} + morph + rot) % {zk_mod}) + (t + 1) * {commit_step}\n"
+                f"    return zk"
+            )
+            hack_a = "def solve(hops):\n    return 0"
+            default_scaffold = (
+                "Grandmaster Crypto-Linguistics & ZK Checklist:\n"
+                "1. Step rotor with notch check and XOR-unmask tablet byte.\n"
+                "2. Parse Rosetta ergative morpheme and fold into Fiat-Shamir ZK transcript."
+            )
+
+        base_cands = (
+            f"#T$# {gold_t}\n#A$# {gold_a}",
+            f"#T$# {d1_t}\n#A$# {d1_a}",
+            f"#T$# {d2_t}\n#A$# {d2_a}",
+            f"#T$# Default fallback.\n#A$# {hack_a}",
+        )
+        base_scores = (1.0, 0.25, 0.15, 0.0)
+        order = [0, 1, 2, 3]
+        shift = idx % 4
+        order[0], order[shift] = order[shift], order[0]
+        p_cands = tuple(base_cands[i] for i in order)
+        p_scores = tuple(base_scores[i] for i in order)
+        g_idx = order.index(0)
+        self._last_task_kinds[task_id] = kind_slot
+        cached_s = self.scaffold_cache.get(task_id, default=default_scaffold)
+        return OrnithTask(
+            task_id=task_id,
+            domain=domain_name,
+            prompt_q=prompt_q,
+            harness_h=harness_h,
+            scaffold_s=cached_s,
+            candidate_rollouts=p_cands,
+            harness_scores=p_scores,
+            gold_index=g_idx,
+            gold_thought=gold_t,
+            gold_answer=gold_a,
+            skill=skill_name,
+            star_difficulty=stars,
+            recursion_depth=rec_depth,
+            difficulty_mods=mods,
+        )
+
     def _synthesize_combinatorial_pipeline_task(self, idx: int, *, tier: int = 1) -> OrnithTask:
         """Synthesize a randomized 3-stage cross-template pipeline ($8 \\times 6 \\times 4 = 192$ combinations)
         with length-matched adversarial multi-stage distractors (Stage-1 vs Stage-2 error propagation).
@@ -3902,6 +6669,14 @@ class OrnithSelfImprover:
             idx, seed=self._rng_seed, pp_leaderboard=self.pp_leaderboard
         )
         tier = self.env_architect.difficulty_tier(kind)
+        if not compact and 88 <= kind < 96:
+            return self._synthesize_crypto_linguistics_cipher_puzzle_task(idx, tier=tier, mode=kind - 88)
+        if not compact and 80 <= kind < 88:
+            return self._synthesize_math_science_cs_ee_eth_task(idx, tier=tier, mode=kind - 80)
+        if not compact and 72 <= kind < 80:
+            return self._synthesize_business_finance_entrepreneurship_task(idx, tier=tier, mode=kind - 72)
+        if not compact and 64 <= kind < 72:
+            return self._synthesize_infinite_context_utilization_task(idx, tier=tier, mode=kind - 64)
         if not compact and 56 <= kind < 64:
             return self._synthesize_leetcode_recursive_coding_task(idx, tier=tier, mode=kind - 56)
         if not compact and 48 <= kind < 56:
@@ -3917,6 +6692,22 @@ class OrnithSelfImprover:
         # For online training steps beyond the initial 56-family sweep, dynamically invoke Agentic RL,
         # Sherlockian reasoning, Polymath challenges, the 192-pipeline combinatorial synthesizer, and infinite-horizon recursion.
         if not compact and idx >= self.env_architect.TOTAL_FAMILIES:
+            if idx % 3 == 2:
+                cl_mode = (idx // 3) % 8
+                cl_tier = max(tier, self.env_architect.difficulty_tier(88 + cl_mode))
+                return self._synthesize_crypto_linguistics_cipher_puzzle_task(idx, tier=cl_tier, mode=cl_mode)
+            if idx % 3 == 1:
+                st_mode = (idx // 3) % 8
+                st_tier = max(tier, self.env_architect.difficulty_tier(80 + st_mode))
+                return self._synthesize_math_science_cs_ee_eth_task(idx, tier=st_tier, mode=st_mode)
+            if idx % 5 == 0:
+                bf_mode = (idx // 5) % 8
+                bf_tier = max(tier, self.env_architect.difficulty_tier(72 + bf_mode))
+                return self._synthesize_business_finance_entrepreneurship_task(idx, tier=bf_tier, mode=bf_mode)
+            if idx % 4 == 3:
+                ic_mode = (idx // 4) % 8
+                ic_tier = max(tier, self.env_architect.difficulty_tier(64 + ic_mode))
+                return self._synthesize_infinite_context_utilization_task(idx, tier=ic_tier, mode=ic_mode)
             if idx % 6 == 5:
                 lc_mode = (idx // 6) % 8
                 lc_tier = max(tier, self.env_architect.difficulty_tier(56 + lc_mode))

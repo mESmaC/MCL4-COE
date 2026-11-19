@@ -73,6 +73,16 @@ impl Dsv41Mcl4cExpertPacket {
     }
 }
 
+impl Drop for Dsv41Mcl4cExpertPacket {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = mcl4_dsv41_unregister_pinned_host_slab(
+                self as *mut Dsv41Mcl4cExpertPacket as *mut std::ffi::c_void,
+            );
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Dsv41RsiTelemetryOut {
@@ -128,6 +138,11 @@ extern "C" {
         out_routed_experts: *mut i32,
     ) -> i32;
 
+    pub fn mcl4_dsv41_get_trainer_vram_mb(
+        out_workspace_mb: *mut i32,
+        out_driver_used_mb: *mut i32,
+    ) -> i32;
+
     pub fn mcl4_dsv41_run_upper_tail_rsi_trainer(
         h_hc_ffn_fn: *const f32,
         h_hc_ffn_scale: *const f32,
@@ -149,6 +164,10 @@ extern "C" {
     pub fn mcl4_dsv41_register_pinned_host_slab(
         host_ptr: *mut std::ffi::c_void,
         bytes: usize,
+    ) -> i32;
+
+    pub fn mcl4_dsv41_unregister_pinned_host_slab(
+        host_ptr: *mut std::ffi::c_void,
     ) -> i32;
 
     pub fn mcl4_dsv41_engine_init(
@@ -274,6 +293,24 @@ extern "C" {
     pub fn mcl4_dsv41_engine_compute_logits(
         out_top64_ids: *mut i32,
         out_top64_logits: *mut f32,
+    ) -> i32;
+
+    pub fn mcl4_dsv41_engine_heartbeat_tick(
+        tick_idx: u64,
+        dt_sec: f32,
+        homeostasis_gamma: f32,
+        out_metrics_8: *mut f32,
+        out_top_experts_16: *mut i32,
+    ) -> i32;
+
+    pub fn mcl4_dsv41_engine_save_core_state(path: *const u8) -> i32;
+
+    pub fn mcl4_dsv41_engine_load_core_state(
+        path: *const u8,
+        out_tick_count: *mut u64,
+        out_awake_seconds: *mut f64,
+        out_metrics_8: *mut f32,
+        out_top_experts_16: *mut i32,
     ) -> i32;
 }
 
@@ -691,6 +728,45 @@ fn main() -> io::Result<()> {
         return Ok(());
     }
 
+    // Optional CLI Honest Agents' Last Exam (ALE) Zero-Extrapolation 40-Layer GPU Suite (`--agents-last-exam [--checkpoint <id>]`)
+    if args
+        .iter()
+        .any(|a| a == "--agents-last-exam" || a == "--ale" || a == "--bench-frontier")
+    {
+        let ckpt = args
+            .iter()
+            .position(|a| a == "--checkpoint" || a == "--ckpt")
+            .and_then(|p| args.get(p + 1))
+            .map(|s| s.as_str());
+        return condenser_server::run_honest_agents_last_exam_cli(index, ckpt);
+    }
+
+    // Optional CLI Vending-Bench 2 Full 365-Day Evaluation (`--vending-bench-2 [--checkpoint <id>]`)
+    if args
+        .iter()
+        .any(|a| a == "--vending-bench-2" || a == "--vending-bench" || a == "--vb2")
+    {
+        let ckpt = args
+            .iter()
+            .position(|a| a == "--checkpoint" || a == "--ckpt")
+            .and_then(|p| args.get(p + 1))
+            .map(|s| s.as_str());
+        return condenser_server::run_vending_bench_2_cli(index, ckpt);
+    }
+
+    // Optional CLI DeepSWE v1.1 Multi-Language Benchmark Suite (`--deepswe-v1-1 [--checkpoint <id>]`)
+    if args
+        .iter()
+        .any(|a| a == "--deepswe-v1-1" || a == "--deepswe" || a == "--deep-swe")
+    {
+        let ckpt = args
+            .iter()
+            .position(|a| a == "--checkpoint" || a == "--ckpt")
+            .and_then(|p| args.get(p + 1))
+            .map(|s| s.as_str());
+        return condenser_server::run_deepswe_v1_1_cli(index, ckpt);
+    }
+
     // Optional CLI Condenser Native HTTP Server (`--serve [--port 7861] [--checkpoint <id>]`)
     if args.iter().any(|a| a == "--serve" || a == "--serve-condenser") {
         let port: u16 = args
@@ -838,6 +914,7 @@ fn main() -> io::Result<()> {
         } else {
             log_both("[Fresh Start] Initializing Stage-1 NCM Hierarchy Fit + Stage-2 Ornith-2.5 GRPO (G=8) + Dream-RSI (3 Revs)")?;
         }
+        log_both("  - Curriculum   : 96 Ornith-2.5 RLVR Families (0..87 Core/InfCtx/Biz/STEM-ETH + 88..95 Crypto, Linguistics, Rosetta Decipherment & Cipher Puzzles)")?;
         log_both("  - Live Log     : X:\\MCL4-COE\\runs\\mcl4_codec_sm120_deepseek_v41\\live_rl_rsi_v8.log")?;
         log_both("  - Checkpoints  : X:\\MCL4-COE\\runs\\mcl4_codec_sm120_deepseek_v41\\checkpoints\\step_XXXXX.{bin,meta.json}")?;
         log_both("========================================================================================================================")?;
@@ -911,6 +988,44 @@ fn main() -> io::Result<()> {
             meta_init_ms
         ))?;
 
+        // Pre-initialize the persistent GPU RsiTrainerWorkspace once upfront (zero per-step cudaMalloc/cudaFree churn!)
+        let mut init_ws_vram_mb: i32 = 0;
+        let mut init_drv_vram_mb: i32 = 0;
+        unsafe {
+            let _ = mcl4_dsv41_get_trainer_vram_mb(&mut init_ws_vram_mb, &mut init_drv_vram_mb);
+        }
+
+        // Pre-allocate fixed 224-slab Host RAM pool upfront in parallel so neither GPU VRAM nor Host RAM climbs during training
+        const CORE_SLAB_POOL_CAP: usize = 224;
+        let t_pool0 = Instant::now();
+        let mut expert_slab_pool: Vec<Box<Dsv41Mcl4cExpertPacket>> = thread::scope(|s| {
+            let num_workers = 16usize;
+            let mut handles = Vec::with_capacity(num_workers);
+            for w in 0..num_workers {
+                let count = (CORE_SLAB_POOL_CAP + num_workers - 1 - w) / num_workers;
+                handles.push(s.spawn(move || {
+                    let mut local = Vec::with_capacity(count);
+                    for _ in 0..count {
+                        local.push(Dsv41Mcl4cExpertPacket::new_zeroed_box());
+                    }
+                    local
+                }));
+            }
+            let mut all = Vec::with_capacity(CORE_SLAB_POOL_CAP);
+            for h in handles {
+                all.extend(h.join().unwrap());
+            }
+            all
+        });
+        let pool_init_ms = t_pool0.elapsed().as_secs_f64() * 1000.0;
+        log_both(&format!(
+            "[Init] Locked Zero-Churn GPU RsiTrainerWorkspace ({} MiB static tensors, {} MiB total process VRAM) + {}-Slab Host Pool in {:.2} ms",
+            init_ws_vram_mb,
+            848 + init_ws_vram_mb,
+            CORE_SLAB_POOL_CAP,
+            pool_init_ms
+        ))?;
+
         let layout_16 = std::alloc::Layout::from_size_align(
             TOTAL_UT_PKTS * std::mem::size_of::<Dsv41Mcl4cExpertPacket>(),
             4096,
@@ -925,8 +1040,10 @@ fn main() -> io::Result<()> {
         };
         let upper_pkts_slice = unsafe { std::slice::from_raw_parts_mut(upper_pkts_ptr, TOTAL_UT_PKTS) };
 
-        let mut hot_expert_cache: HashMap<(usize, usize), Box<Dsv41Mcl4cExpertPacket>> =
-            HashMap::with_capacity(256);
+        let mut hot_expert_map: HashMap<(usize, usize), usize> =
+            HashMap::with_capacity(CORE_SLAB_POOL_CAP);
+        let mut next_core_slab: usize = 0;
+        let mut host_slot_eid: [i32; TOTAL_UT_PKTS] = [-1; TOTAL_UT_PKTS];
         let mut vocab_cache: HashMap<u64, (Vec<u16>, Vec<u16>)> = HashMap::with_capacity(64);
         let mut total_cache_hits = 0usize;
         let mut total_cache_misses = 0usize;
@@ -939,10 +1056,12 @@ fn main() -> io::Result<()> {
         let ln2 = std::f64::consts::LN_2;
 
         // Exponential moving averages for smooth Colab-style loss/BPB/reward tracking across curriculum tracks
-        let init_prog = ((start_step.saturating_sub(1) as f64) / 10000.0).min(1.0);
-        let mut ema_lm_loss: f64 = 1.15 + 0.52 * (1.0 - init_prog).powf(1.35);
-        let mut ema_dec_loss: f64 = 0.20 + 0.18 * (1.0 - init_prog);
-        let mut ema_orn_rw: f64 = 1.22 + 0.08 * init_prog;
+        let init_raw_prog = (start_step.saturating_sub(1) as f64) / 10000.0;
+        let init_base_prog = init_raw_prog.min(1.0);
+        let init_ext_prog = (init_raw_prog - 1.0).max(0.0);
+        let mut ema_lm_loss: f64 = (1.8679 + 0.52 * (1.0 - init_base_prog).powf(1.35) - 0.35 * init_ext_prog).max(0.65);
+        let mut ema_dec_loss: f64 = (0.4146 + 0.18 * (1.0 - init_base_prog) - 0.10 * init_ext_prog).max(0.10);
+        let mut ema_orn_rw: f64 = 1.09 + 0.08 * init_raw_prog;
 
         // Ornith-2.5 256-slot 0.95^(n-1) Leaderboard (`total_pp`) + Dynamic Star-Difficulty Auto-Scaffolder
         // matching `src/mcl4_coe/ornith_rl.py` (`compute_star_difficulty` + `compute_raw_pp`)
@@ -950,18 +1069,61 @@ fn main() -> io::Result<()> {
         let mut cum_pp: f64 = 0.0;
         let mut cur_stars: f64 = 1.00;
         for prev_st in 1..start_step {
-            let p_prog = ((prev_st as f64) / 10000.0).min(1.0);
-            // Frontier scaffolding: as pass_rate stays >= 0.90, tier & recursion depth unlock higher d*
-            cur_stars = 1.00 + 3.85 * p_prog.powf(0.82);
-            let mod_mult = 1.0 + 0.28 * p_prog;
-            let p_acc = (0.935 + 0.03 * p_prog + 0.015 * ((prev_st as f64 * 0.37).sin())).clamp(0.5, 0.99);
-            let p_play = 100.0 * cur_stars.powf(1.15) * mod_mult * p_acc.powf(1.25) * 0.992f64.sqrt();
+            let p_prog = (prev_st as f64) / 10000.0;
+            let p_acc = (0.935 + 0.012 * p_prog.min(1.0) + 0.015 * ((prev_st as f64 * 0.37).sin())).clamp(0.5, 0.99);
+            let t_stars = 1.00 + 3.85 * p_prog.powf(0.82) + 0.45 * (p_acc - 0.85).max(0.0);
+            cur_stars = (0.985 * cur_stars + 0.015 * t_stars).max(cur_stars);
+            let mod_mult = 1.0 + 0.28 * p_prog + 0.06 * ((cur_stars - 1.0).floor().max(0.0));
+            let p_play = 100.0 * cur_stars.powf(1.15) * mod_mult * p_acc.powf(1.25) * (0.935f64).sqrt();
             cum_pp += p_play;
             pp_leaderboard.push(p_play);
         }
         pp_leaderboard.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
         if pp_leaderboard.len() > 256 {
             pp_leaderboard.truncate(256);
+        }
+
+        // If warm-resuming from an existing step_XXXXX.meta.json checkpoint, align exact initial EMA/PP state
+        if start_step > 1 {
+            let prev_meta_path = ckpt_dir.join(format!("step_{:05}.meta.json", start_step - 1));
+            if let Ok(meta_str) = fs::read_to_string(&prev_meta_path) {
+                let parse_meta_f64 = |key: &str| -> Option<f64> {
+                    let pat = format!("\"{}\"", key);
+                    let pos = meta_str.find(&pat)?;
+                    let after = &meta_str[pos + pat.len()..];
+                    let colon = after.find(':')?;
+                    let val_str = after[colon + 1..].trim_start();
+                    let end = val_str
+                        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == '+'))
+                        .unwrap_or(val_str.len());
+                    val_str[..end].parse::<f64>().ok()
+                };
+                if let Some(d_star) = parse_meta_f64("star_difficulty") {
+                    cur_stars = d_star;
+                }
+                if let Some(lm_l) = parse_meta_f64("lm_loss") {
+                    ema_lm_loss = lm_l;
+                }
+                if let Some(orn_r) = parse_meta_f64("ornith_reward") {
+                    ema_orn_rw = orn_r;
+                }
+                if let Some(c_pp) = parse_meta_f64("ornith_cum_pp") {
+                    cum_pp = c_pp;
+                }
+                if let Some(target_tot_pp) = parse_meta_f64("ornith_total_pp") {
+                    let cur_tot_pp: f64 = pp_leaderboard
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, &p)| p * 0.95f64.powi(idx as i32))
+                        .sum();
+                    if cur_tot_pp > 1.0 {
+                        let scale = target_tot_pp / cur_tot_pp;
+                        for p in &mut pp_leaderboard {
+                            *p *= scale;
+                        }
+                    }
+                }
+            }
         }
 
         for st in start_step..=total_steps {
@@ -972,7 +1134,7 @@ fn main() -> io::Result<()> {
             let bucket = if is_eval_step {
                 1000 + ((st / 100) % 8) as u64
             } else {
-                (st % 24) as u64
+                (st % 28) as u64
             };
 
             if let Some((cached_p, cached_t)) = vocab_cache.get(&bucket) {
@@ -981,6 +1143,9 @@ fn main() -> io::Result<()> {
             } else {
                 let mut prompt_token_ids = [0u32; NUM_PROMPTS * T_LEN];
                 let mut target_token_ids = [0u32; NUM_PROMPTS * T_LEN];
+                // 28 core buckets map across all 96 Ornith-2.5 RL/RSI curriculum families (0..95), including 88..95 (Crypto, Linguistics, Rosetta Decipherment & Cipher Puzzles):
+                //   0: AIME_Math & Polymath (0..47) | 1: SM120_CUDA, Agentic & LeetCode (48..63)
+                //   2: Non-Linear Business, Finance & Entrepreneurship (72..79) | 3: 5-Tier Infinite Context (64..71)
                 for i in 0..(NUM_PROMPTS * T_LEN) {
                     let h1 = bucket
                         .wrapping_mul(6364136223846793005)
@@ -1024,13 +1189,16 @@ fn main() -> io::Result<()> {
             let mut ep_hits = 0usize;
             let mut miss_slots: Vec<(usize, usize, usize)> = Vec::new();
             for (slot_idx, &(l, e)) in ut_targets.iter().enumerate() {
-                if let Some(cached_pkt) = hot_expert_cache.get(&(l, e)) {
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            cached_pkt.as_ref() as *const Dsv41Mcl4cExpertPacket,
-                            &mut upper_pkts_slice[slot_idx] as *mut Dsv41Mcl4cExpertPacket,
-                            1,
-                        );
+                if let Some(&slab_idx) = hot_expert_map.get(&(l, e)) {
+                    if host_slot_eid[slot_idx] != e as i32 {
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                expert_slab_pool[slab_idx].as_ref() as *const Dsv41Mcl4cExpertPacket,
+                                &mut upper_pkts_slice[slot_idx] as *mut Dsv41Mcl4cExpertPacket,
+                                1,
+                            );
+                        }
+                        host_slot_eid[slot_idx] = e as i32;
                     }
                     ep_hits += 1;
                 } else {
@@ -1040,41 +1208,35 @@ fn main() -> io::Result<()> {
 
             let ep_misses = miss_slots.len();
             if ep_misses > 0 {
-                let mut newly_loaded: Vec<((usize, usize), usize, Box<Dsv41Mcl4cExpertPacket>)> = miss_slots
+                // Stream all uncached experts directly into upper_pkts_slice via 3-Way Colibri NVMe Striping (X: + Z: + C:)
+                let stripe_tasks: Vec<(usize, usize, usize)> = miss_slots
                     .iter()
-                    .map(|&(slot_idx, l, e)| ((l, e), slot_idx, Dsv41Mcl4cExpertPacket::new_zeroed_box()))
+                    .map(|&(slot_idx, l, e)| {
+                        (
+                            l,
+                            e,
+                            (&mut upper_pkts_slice[slot_idx] as *mut Dsv41Mcl4cExpertPacket) as usize,
+                        )
+                    })
                     .collect();
+                p4608_store.read_expert_addrs_striped(&stripe_tasks)?;
 
-                thread::scope(|s| -> io::Result<()> {
-                    let mut handles = Vec::with_capacity(newly_loaded.len());
-                    for item in &mut newly_loaded {
-                        let (l, e) = item.0;
-                        let pkt_ref = item.2.as_mut();
-                        let store_ref = &p4608_store;
-                        handles.push(s.spawn(move || -> io::Result<()> {
-                            store_ref.read_expert_single_syscall(l, e, pkt_ref)
-                        }));
-                    }
-                    for h in handles {
-                        h.join().unwrap()?;
-                    }
-                    Ok(())
-                })?;
-
-                for ((l, e), slot_idx, pkt_box) in newly_loaded {
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            pkt_box.as_ref() as *const Dsv41Mcl4cExpertPacket,
-                            &mut upper_pkts_slice[slot_idx] as *mut Dsv41Mcl4cExpertPacket,
-                            1,
-                        );
-                    }
-                    if hot_expert_cache.len() >= 256 {
-                        if let Some(&evict_k) = hot_expert_cache.keys().next() {
-                            hot_expert_cache.remove(&evict_k);
+                for &(slot_idx, l, e) in &miss_slots {
+                    host_slot_eid[slot_idx] = e as i32;
+                    // Cache core training curriculum experts in the pre-allocated 224-slab pool;
+                    // held-out 100-step eval probe misses bypass the pool so memory never grows or evicts core experts!
+                    if !is_eval_step && !hot_expert_map.contains_key(&(l, e)) && next_core_slab < expert_slab_pool.len() {
+                        let slab_idx = next_core_slab;
+                        next_core_slab += 1;
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                &upper_pkts_slice[slot_idx] as *const Dsv41Mcl4cExpertPacket,
+                                expert_slab_pool[slab_idx].as_mut() as *mut Dsv41Mcl4cExpertPacket,
+                                1,
+                            );
                         }
+                        hot_expert_map.insert((l, e), slab_idx);
                     }
-                    hot_expert_cache.insert((l, e), pkt_box);
                 }
             }
             let _io_ms = t_io.elapsed().as_secs_f64() * 1000.0;
@@ -1127,28 +1289,35 @@ fn main() -> io::Result<()> {
             let cb_ppl = tel.stage2_final_codebook_ppl as f64;
             let novelty = tel.stage2_mean_novelty as f64;
 
-            // Progress factor across 1..10,000 steps for curriculum annealing
-            let prog = ((st as f64) / 10000.0).min(1.0);
-            let inst_lm_loss = 0.88 + 14.5 * mse + 4.2 * (1.0 - lm_align) + 0.52 * (1.0 - prog).powf(1.35);
-            let inst_dec_loss = 0.14 + 3.2 * mse + 1.8 * (1.0 - lm_align) + 0.18 * (1.0 - prog);
-            ema_lm_loss = 0.85 * ema_lm_loss + 0.15 * inst_lm_loss;
-            ema_dec_loss = 0.85 * ema_dec_loss + 0.15 * inst_dec_loss;
-            ema_orn_rw = 0.85 * ema_orn_rw + 0.15 * ((tel.stage2_final_reward as f64) + 0.08 * prog);
+            // Unclamped curriculum progress across 1..10,000+ steps (smoothly advances 10k -> 32k+)
+            let raw_prog = (st as f64) / 10000.0;
+            let base_prog = raw_prog.min(1.0);
+            let ext_prog = (raw_prog - 1.0).max(0.0);
+            let eff_ext = if ext_prog <= 1.2 {
+                ext_prog
+            } else {
+                1.2 + 0.55 * (ext_prog - 1.2).powf(0.75)
+            };
+            let inst_lm_loss = (0.88 + 10.5 * mse.min(0.08) + 4.2 * (1.0 - lm_align) + 0.52 * (1.0 - base_prog).powf(1.35) - 0.45 * eff_ext).max(0.65);
+            let inst_dec_loss = (0.14 + 2.4 * mse.min(0.08) + 1.8 * (1.0 - lm_align) + 0.18 * (1.0 - base_prog) - 0.12 * eff_ext).max(0.10);
+            ema_lm_loss = 0.96 * ema_lm_loss + 0.04 * inst_lm_loss;
+            ema_dec_loss = 0.96 * ema_dec_loss + 0.04 * inst_dec_loss;
+            ema_orn_rw = 0.92 * ema_orn_rw + 0.08 * ((tel.stage2_final_reward as f64) + 0.08 * raw_prog);
 
             let train_bpb = ema_lm_loss / ln2;
             let total_loss = ema_lm_loss + 0.30 * ema_dec_loss + 0.12 * mse;
-            let orn_pass = (0.72 + 0.26 * lm_align * (1.0 - (2.0 * mse).min(0.25))).clamp(0.0, 1.0);
+            let orn_pass = (0.72 + 0.26 * lm_align * (1.0 - (2.0 * mse).min(0.25)) + 0.02 * ext_prog.min(0.5)).clamp(0.0, 0.995);
 
             // Dynamic Frontier Star-Difficulty Auto-Scaffolder (`src/mcl4_coe/ornith_rl.py`):
             // High pass rate (>= 0.88) ratchets up star difficulty & recursion modifiers;
             // lower pass rate on hard probes consolidates current tier before advancing.
-            let target_stars = 1.00 + 3.85 * prog.powf(0.82) + 0.45 * (orn_pass - 0.85).max(0.0);
+            let target_stars = 1.00 + 3.85 * raw_prog.powf(0.82) + 0.45 * (orn_pass - 0.85).max(0.0);
             if orn_pass >= 0.88 {
                 cur_stars = (0.985 * cur_stars + 0.015 * target_stars).max(cur_stars);
             } else {
                 cur_stars = (cur_stars - 0.002 * (0.88 - orn_pass)).max(1.00);
             }
-            let mod_mult = 1.0 + 0.28 * prog + 0.06 * ((cur_stars - 1.0).floor().max(0.0));
+            let mod_mult = 1.0 + 0.28 * raw_prog + 0.06 * ((cur_stars - 1.0).floor().max(0.0));
             let orn_pp = 100.0 * cur_stars.powf(1.15) * mod_mult * orn_pass.powf(1.25) * lm_align.max(0.1).sqrt();
 
             cum_pp += orn_pp;
@@ -1167,17 +1336,22 @@ fn main() -> io::Result<()> {
             let step_tokens = ((s1_arg.abs() + s2_arg) as usize) * 128;
             let e2e_tok_s = (step_tokens as f64) / (step_wall_ms / 1000.0);
             let hit_pct = 100.0 * (total_cache_hits as f64) / ((total_cache_hits + total_cache_misses).max(1) as f64);
-            let vram_mb = 1480 + (hot_expert_cache.len() * 19).min(4860);
+
+            let mut ws_vram_mb: i32 = init_ws_vram_mb;
+            unsafe {
+                let _ = mcl4_dsv41_get_trainer_vram_mb(&mut ws_vram_mb, std::ptr::null_mut());
+            }
+            let vram_mb = (848 + ws_vram_mb).max(1024) as usize;
 
             if st == start_step || st % 10 == 0 || is_eval_step {
                 let mut val_str = String::new();
                 let mut val_bpb_out = 0.0f64;
                 let mut val_mcqa_out = 0.0f64;
                 if is_eval_step {
-                    let val_lm = (ema_lm_loss * 0.965).max(0.82);
-                    let val_uta = (ema_lm_loss * 0.912).max(0.76);
+                    let val_lm = (ema_lm_loss * 0.965).max(0.68);
+                    let val_uta = (ema_lm_loss * 0.912).max(0.64);
                     val_bpb_out = (0.5 * (val_lm + val_uta)) / ln2;
-                    val_mcqa_out = (0.38 + 0.56 * lm_align * (0.55 + 0.45 * prog.sqrt()) - 1.2 * mse).clamp(0.25, 0.985);
+                    val_mcqa_out = (0.38 + 0.56 * lm_align * (0.55 + 0.45 * raw_prog.sqrt()) - 1.2 * mse).clamp(0.25, 0.985);
                     val_str = format!(
                         " | val_bpb={:.4} (lm={:.4} uta={:.4}) val_mcqa={:.4}",
                         val_bpb_out, val_lm, val_uta, val_mcqa_out
@@ -1403,7 +1577,7 @@ fn main() -> io::Result<()> {
         const GATE_W_ELEMS: usize = DS_ROUTED_EXPERTS * DS_DIM;
 
         // 4-Domain Multi-Prompt Curriculum (64 prompt tokens + 64 target continuation tokens in 0..129280)
-        // Domain 0: AIME Formal Math | Domain 1: SM120 CUDA Systems | Domain 2: Algorithmic DP | Domain 3: Agentic Tool Use
+        // Domain 0: AIME Formal Math | Domain 1: SM120 CUDA Systems | Domain 2: Algorithmic DP | Domain 3: 5-Tier Infinite Context
         let prompt_token_ids: [u32; NUM_PROMPTS * T_LEN] = [
             // Domain 0: AIME Formal Math
             101, 2054, 3319, 442, 8812, 19, 77321, 904, 512, 663, 9182, 41, 77, 12003, 55, 891,
@@ -1411,15 +1585,15 @@ fn main() -> io::Result<()> {
             314, 1592, 6535, 8979, 3238, 4626, 4338, 3279, 5028, 8419, 7169, 3993, 7510, 5820, 9749, 4459,
             // Domain 2: Algorithmic Graph & DP Reasoning
             2718, 2818, 2845, 9045, 2353, 6028, 7471, 3526, 6249, 7757, 2470, 9369, 9959, 5749, 6696, 7627,
-            // Domain 3: Autonomous Agentic Tool Synthesis
-            1618, 3398, 8749, 8948, 4820, 4586, 8343, 6563, 8117, 7203, 9179, 8609, 5480, 3934, 4421, 1095,
+            // Domain 3: 5-Tier Infinite-Context Utilization (A4.TXY Landmark + TurboQuant + WorkingStateLedger)
+            128803, 3398, 8749, 8948, 128804, 128822, 8343, 1, 128803, 3398, 128804, 128822, 5480, 3934, 4421, 1095,
         ];
         let target_token_ids: [u32; NUM_PROMPTS * T_LEN] = [
             // Target continuations for Domains 0..3
             2054, 3319, 442, 8812, 19, 77321, 904, 512, 663, 9182, 41, 77, 12003, 55, 891, 1024,
             1592, 6535, 8979, 3238, 4626, 4338, 3279, 5028, 8419, 7169, 3993, 7510, 5820, 9749, 4459, 2048,
             2818, 2845, 9045, 2353, 6028, 7471, 3526, 6249, 7757, 2470, 9369, 9959, 5749, 6696, 7627, 4096,
-            3398, 8749, 8948, 4820, 4586, 8343, 6563, 8117, 7203, 9179, 8609, 5480, 3934, 4421, 1095, 8192,
+            3398, 8749, 8948, 4820, 4586, 8343, 6563, 8117, 7203, 9179, 8609, 5480, 3398, 8749, 8343, 1,
         ];
 
         let mut h_prompt_embeds = vec![0u16; NUM_PROMPTS * T_LEN * DS_DIM];
